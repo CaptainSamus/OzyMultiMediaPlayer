@@ -200,9 +200,10 @@
       <video preload="metadata" draggable="false"></video>
       <div class="overlay">
         <div class="top">
+          <button class="remove" title="Remove this video">✕</button>
           <span class="group-swatch" hidden></span>
           <span class="name"></span>
-          <button class="remove" title="Remove this video">✕</button>
+          <button class="fullscreen" title="Fullscreen (double-click the picture also works; Esc leaves)">⛶</button>
         </div>
         <div class="vol-zone" title="Volume: click or drag anywhere on the bar. Mouse wheel and ↑/↓ work too.">
           <div class="vol-bar">
@@ -256,7 +257,7 @@
     <div class="tile image">
       <img draggable="false" alt="">
       <div class="overlay">
-        <div class="top"><span class="group-swatch" hidden></span><span class="name"></span><button class="remove" title="Remove">✕</button></div>
+        <div class="top"><button class="remove" title="Remove">✕</button><span class="group-swatch" hidden></span><span class="name"></span><button class="fullscreen" title="Fullscreen (double-click the picture also works; Esc leaves)">⛶</button></div>
       </div>
       <div class="handle tl" data-corner="tl"></div><div class="handle tr" data-corner="tr"></div>
       <div class="handle bl" data-corner="bl"></div><div class="handle br" data-corner="br"></div>
@@ -267,7 +268,7 @@
     <div class="tile web">
       <iframe allow="autoplay; fullscreen; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin"></iframe>
       <div class="overlay">
-        <div class="top"><span class="group-swatch" hidden></span><span class="name"></span><button class="remove" title="Remove">✕</button></div>
+        <div class="top"><button class="remove" title="Remove">✕</button><span class="group-swatch" hidden></span><span class="name"></span><button class="fullscreen" title="Fullscreen (Esc leaves)">⛶</button></div>
         <div class="bottom">
           <div class="markers"></div>
           <input type="range" class="seek" min="0" max="10000" value="0" step="1" title="Scrub">

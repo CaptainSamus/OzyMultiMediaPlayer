@@ -96,8 +96,11 @@ itself when you click **Update yt-dlp** in the sidebar.
   step `|◀` `▶|`, −5 s / +5 s (Shift for 30 s), time, bookmarks, mute, and
   speed. Move the mouse to the **right side** of the picture and a big white
   volume bar appears: click or drag anywhere on it (mouse wheel works too).
-  Click the picture to play/pause it, double-click for fullscreen. On the
-  board the controls stay the same size on screen at any zoom.
+  Click the picture to play/pause it. Every tile's title bar has **✕**
+  (remove) on the left and **⛶** (fullscreen) on the right; double-clicking
+  a video or picture also goes fullscreen, as does `Shift+F` on the selected
+  or hovered tile, and `Esc` or ⛶ again comes back.
+  On the board the controls stay the same size on screen at any zoom.
 - **Make playable.** Files the built-in decoders can't play show a button
   that makes an H.264 copy with the bundled ffmpeg (see Formats).
 - **Frame step and time.** `,` and `.` step one frame back / forward (the
@@ -189,7 +192,8 @@ itself when you click **Update yt-dlp** in the sidebar.
 `Ctrl+O` open session, `Ctrl+S` save, `Ctrl+Shift+S` save as, `Ctrl+Z` undo,
 `Ctrl+Shift+Z` / `Ctrl+Y` redo, `Ctrl+G` group, `Ctrl+Shift+G` ungroup,
 `Space` play/pause everything, `C` A/B compare, `T` timeline lanes,
-`I` / `O` loop In / Out, `` ` `` sidebar, `F` fit all, `L` linked, `H` pan
+`I` / `O` loop In / Out, `` ` `` sidebar, `F` fit all, `Shift+F` fullscreen
+the selected (or hovered) tile, `Esc` leave fullscreen, `L` linked, `H` pan
 tool, `+` / `-` zoom, `Esc` deselect. Over a video: `←`/`→` seek 5 s
 (Shift 30 s), `↑`/`↓` volume, `K` play/pause, `M` mute, `,` `.` frame step,
 `B` bookmark, `[` `]` previous / next bookmark.

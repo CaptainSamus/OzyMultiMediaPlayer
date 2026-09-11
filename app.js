@@ -1548,8 +1548,7 @@ function addVideo(filePath, state = {}) {
   });
   video.addEventListener('dblclick', () => {
     if (!cmp.el.hidden) return; // in the compare view the tile is empty
-    if (document.fullscreenElement === el) document.exitFullscreen();
-    else el.requestFullscreen().catch(() => {});
+    toggleTileFullscreen(el);
   });
 
   playBtn.addEventListener('click', () => tile.togglePlay());
@@ -1621,6 +1620,7 @@ function addVideo(filePath, state = {}) {
   volZone.addEventListener('dblclick', (e) => e.stopPropagation());
 
   removeBtn.addEventListener('click', () => removeTile(tile));
+  wireFullscreenButton(el);
 
   // corner resize handles
   for (const h of el.querySelectorAll('.handle')) {
@@ -1649,6 +1649,25 @@ function addVideo(filePath, state = {}) {
   updateChrome();
   return tile;
 }
+
+// Fullscreen one tile: the ⛶ button (top-right of every tile), double-click on a video or image; Esc leaves.
+function toggleTileFullscreen(el) {
+  if (document.fullscreenElement === el) document.exitFullscreen().catch(() => {});
+  else el.requestFullscreen().catch(() => {});
+}
+function wireFullscreenButton(el) {
+  const b = el.querySelector('.fullscreen');
+  b.addEventListener('click', (e) => { e.stopPropagation(); toggleTileFullscreen(el); });
+  for (const ev of ['pointerdown', 'dblclick']) b.addEventListener(ev, (e) => e.stopPropagation()); // never a board drag
+}
+document.addEventListener('fullscreenchange', () => {
+  for (const t of tiles) {
+    const b = t.el.querySelector('.fullscreen');
+    const on = document.fullscreenElement === t.el;
+    if (!b.dataset.enterTitle) b.dataset.enterTitle = b.title;
+    b.title = on ? 'Exit fullscreen (Esc)' : b.dataset.enterTitle;
+  }
+});
 
 function togglePlay(video) {
   if (video.paused) video.play().catch(() => {});
@@ -1839,6 +1858,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
     selectionStatus();
   });
   el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
+  wireFullscreenButton(el); // the iframe eats clicks, so for web tiles the button is the way in
   for (const h of el.querySelectorAll('.handle')) {
     h.addEventListener('pointerdown', (e) => startResize(tile, h.dataset.corner, e));
     h.addEventListener('dblclick', (e) => {
@@ -1886,6 +1906,8 @@ function addImageTile(filePath, state = {}, at = null) {
   });
   img.src = window.api.videoUrl(filePath);
   el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
+  wireFullscreenButton(el);
+  img.addEventListener('dblclick', () => toggleTileFullscreen(el));
   el.addEventListener('pointerenter', () => { hoveredTile = tile; });
   el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; });
   el.addEventListener('click', (e) => {
@@ -2483,6 +2505,9 @@ window.addEventListener('keydown', (e) => {
   const ctrl = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
 
+  // Esc leaves a fullscreen tile (Electron doesn't do this for page fullscreen by itself)
+  if (e.key === 'Escape' && document.fullscreenElement) { e.preventDefault(); document.exitFullscreen().catch(() => {}); return; }
+
   // the compare view owns the keyboard while it is open
   if (!cmp.el.hidden) {
     if (e.key === 'Escape') { closeCompare(); return; }
@@ -2542,6 +2567,11 @@ window.addEventListener('keydown', (e) => {
     toggleTimelineExpanded();
   } else if ((key === 'i' || key === 'o') && !ctrl && !tl.hidden) {
     setRangeAtPlayhead(key === 'i' ? 'in' : 'out');
+  } else if (key === 'f' && e.shiftKey && !ctrl) {
+    // Shift+F: fullscreen the one selected tile, else the tile under the mouse; again (or Esc) to leave
+    if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
+    const target = selection.size === 1 ? [...selection][0] : h;
+    if (target) toggleTileFullscreen(target.el); else setStatus('Select or hover a video first');
   } else if (key === 'f') {
     fitAll();
   } else if (e.key === '=' || e.key === '+') {
