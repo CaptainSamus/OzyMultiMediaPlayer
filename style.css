@@ -600,6 +600,27 @@ body.resizing .tile.resizing { pointer-events: auto; }
 .tl-handle { position: absolute; top: 0; bottom: 0; width: 8px; margin-left: -4px; background: var(--accent); opacity: 0.8; cursor: ew-resize; }
 .tl-handle.tl-in { border-radius: 4px 0 0 4px; } .tl-handle.tl-out { border-radius: 0 4px 4px 0; }
 .tl-playhead { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: #fff; pointer-events: none; box-shadow: 0 0 3px #000; }
+/* A/B compare */
+#compare { position: fixed; inset: 0; z-index: 100; background: #000; display: flex; flex-direction: column; }
+#compare[hidden] { display: none; }
+.cmp-stage { position: relative; flex: 1 1 auto; overflow: hidden; }
+.cmp-slot { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.cmp-slot video { max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; }
+.cmp-b { clip-path: inset(0 0 0 var(--wipe, 50%)); }
+#compare.flip .cmp-b { clip-path: none; }
+#compare.flip.show-a .cmp-b { visibility: hidden; }
+#compare.flip .cmp-wipe { display: none; }
+.cmp-wipe { position: absolute; top: 0; bottom: 0; left: var(--wipe, 50%); width: 2px; margin-left: -1px; background: #fff; cursor: ew-resize; box-shadow: 0 0 4px #000; }
+.cmp-wipe::before { content: ""; position: absolute; inset: 0 -10px; }
+.cmp-label { position: absolute; top: 10px; padding: 3px 8px; background: rgba(0,0,0,0.6); border-radius: 4px; font-size: 12px; pointer-events: none; }
+.cmp-label-a { left: 10px; } .cmp-label-b { right: 10px; }
+#compare.flip.show-a .cmp-label-b, #compare.flip:not(.show-a) .cmp-label-a { opacity: 0.35; }
+.cmp-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel); }
+.cmp-bar button { background: var(--panel-2); color: var(--text); border: 1px solid #333338; border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; }
+.cmp-bar .cmp-seek { flex: 1 1 auto; }
+.cmp-bar .cmp-time { font-variant-numeric: tabular-nums; min-width: 160px; }
+.cmp-bar .seg button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
 .bm-panel .bm-color { width: 14px; height: 14px; border-radius: 50%; border: none; cursor: pointer; box-shadow: 0 0 0 1px #000; flex: 0 0 auto; padding: 0; }
 .tile .error { pointer-events: auto; flex-direction: column; gap: 10px; }
 .tile .error-actions { display: flex; gap: 8px; }

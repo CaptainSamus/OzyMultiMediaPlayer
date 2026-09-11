@@ -567,6 +567,87 @@ tlQ('.tl-clear-range').addEventListener('click', () => {
 });
 window.addEventListener('resize', () => renderTimeline());
 
+// ---------- A/B compare ----------
+// Both <video> elements move into a full-window view (they keep playing) and
+// share a temporary synced group; their real groups are put back on close.
+const cmp = { el: document.getElementById('compare'), a: null, b: null, saved: [], temp: null, mode: 'wipe', wipe: 50, tick: null, scrubbing: false };
+const cmpQ = (s) => cmp.el.querySelector(s);
+
+function openCompare(a, b) {
+  cmp.a = a; cmp.b = b; cmp.mode = 'wipe'; cmp.wipe = 50;
+  cmp.el.classList.remove('flip', 'show-a');
+  cmp.el.style.setProperty('--wipe', '50%');
+  for (const x of cmpQ('.cmp-mode').querySelectorAll('button')) x.classList.toggle('active', x.dataset.cmp === 'wipe');
+  // snapshot the real groups (members and starts) before pulling a and b out
+  cmp.saved = [...new Set([a.group, b.group].filter(Boolean))].map((g) => ({
+    group: g, members: [...g.members], starts: new Map([...g.members].map((t) => [t, t.sync ? { ...t.sync } : null])),
+  }));
+  for (const t of [a, b]) if (t.group) removeFromGroup(t.group, t);
+  cmp.temp = createGroup([a, b], { name: 'A/B', sync: true, sticky: false, rate: a.video.playbackRate });
+  cmpQ('.cmp-a').appendChild(a.video); cmpQ('.cmp-b').appendChild(b.video);
+  cmpQ('.cmp-label-a').textContent = 'A: ' + basename(a.path);
+  cmpQ('.cmp-label-b').textContent = 'B: ' + basename(b.path);
+  cmp.el.hidden = false;
+  cmp.tick = () => {
+    const v = a.video;
+    cmpQ('.cmp-play').textContent = v.paused ? '▶' : '❚❚';
+    cmpQ('.cmp-time').textContent = Frames.format(v.currentTime, v.duration, a.fps, layout.timeDisplay);
+    if (v.duration && !cmp.scrubbing) cmpQ('.cmp-seek').value = String(Math.round(v.currentTime / v.duration * 10000));
+  };
+  cmp.tick();
+}
+function closeCompare() {
+  if (!cmp.a) return;
+  const { a, b } = cmp;
+  dissolveGroup(cmp.temp);
+  a.el.insertBefore(a.video, a.el.firstChild);
+  b.el.insertBefore(b.video, b.el.firstChild);
+  // put the real groups back as they were (a group that dropped below 2 members was dissolved; revive it)
+  for (const s of cmp.saved) {
+    const g = s.group;
+    const members = s.members.filter((t) => tiles.includes(t));
+    if (members.length < 2) continue;
+    if (!groups.includes(g)) groups.push(g);
+    g.members = new Set(members);
+    for (const t of members) { t.group = g; t.sync = s.starts.get(t) || null; paintGroup(t); }
+    applyGroupAudio(g);
+  }
+  cmp.el.hidden = true; cmp.a = cmp.b = null; cmp.tick = null; cmp.temp = null; cmp.saved = [];
+  layoutTiles(); syncActiveFromSelection();
+}
+function tryOpenCompare() {
+  const sel = [...selection].filter((t) => t.video);
+  if (sel.length !== 2) { setStatus('Select exactly two videos for A/B (Shift-click, or lasso on the board)'); return; }
+  openCompare(sel[0], sel[1]);
+}
+document.getElementById('btn-ab').addEventListener('click', tryOpenCompare);
+cmpQ('.cmp-close').addEventListener('click', closeCompare);
+cmpQ('.cmp-play').addEventListener('click', () => cmp.a.togglePlay());
+cmpQ('.cmp-fb').addEventListener('click', () => cmp.a.stepFrame(-1));
+cmpQ('.cmp-ff').addEventListener('click', () => cmp.a.stepFrame(1));
+cmpQ('.cmp-mode').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-cmp]'); if (!btn) return;
+  cmp.mode = btn.dataset.cmp;
+  for (const x of cmpQ('.cmp-mode').querySelectorAll('button')) x.classList.toggle('active', x === btn);
+  cmp.el.classList.toggle('flip', cmp.mode === 'flip');
+});
+const cmpSeek = cmpQ('.cmp-seek');
+cmpSeek.addEventListener('pointerdown', () => { cmp.scrubbing = true; });
+cmpSeek.addEventListener('pointerup', () => { cmp.scrubbing = false; });
+cmpSeek.addEventListener('input', () => {
+  const v = cmp.a.video; if (!v.duration) return;
+  v.currentTime = Number(cmpSeek.value) / 10000 * v.duration;
+  broadcast(cmp.a, 'seek');
+});
+cmpQ('.cmp-wipe').addEventListener('pointerdown', (e) => {
+  const r = cmpQ('.cmp-stage').getBoundingClientRect();
+  const wipeEl = e.currentTarget;
+  try { wipeEl.setPointerCapture(e.pointerId); } catch {}
+  const onMove = (ev) => { cmp.wipe = clamp((ev.clientX - r.left) / r.width * 100, 0, 100); cmp.el.style.setProperty('--wipe', cmp.wipe + '%'); };
+  const onUp = () => { wipeEl.removeEventListener('pointermove', onMove); wipeEl.removeEventListener('pointerup', onUp); wipeEl.removeEventListener('pointercancel', onUp); };
+  wipeEl.addEventListener('pointermove', onMove); wipeEl.addEventListener('pointerup', onUp); wipeEl.addEventListener('pointercancel', onUp);
+});
+
 function setLinked(on) {
   board.linked = !!on;
   document.getElementById('btn-link').classList.toggle('toggled', board.linked);
@@ -1349,6 +1430,7 @@ function addVideo(filePath, state = {}) {
     selectionStatus();
   });
   video.addEventListener('dblclick', () => {
+    if (!cmp.el.hidden) return; // in the compare view the tile is empty
     if (document.fullscreenElement === el) document.exitFullscreen();
     else el.requestFullscreen().catch(() => {});
   });
@@ -1488,6 +1570,7 @@ window.api.onProxyProgress((p, frac) => { const t = tiles.find((x) => x.path ===
 (function loop() {
   for (const t of tiles) t.tick && t.tick();
   tickTimeline();
+  if (cmp.tick) cmp.tick();
   requestAnimationFrame(loop);
 })();
 
@@ -1660,6 +1743,17 @@ window.addEventListener('keydown', (e) => {
   // a focused button (you just clicked one) shouldn't swallow the shortcuts
   const inControl = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
   const ctrl = e.ctrlKey || e.metaKey;
+  const key = e.key.toLowerCase();
+
+  // the compare view owns the keyboard while it is open
+  if (!cmp.el.hidden) {
+    if (e.key === 'Escape') { closeCompare(); return; }
+    if (e.key === 'Tab') { e.preventDefault(); if (cmp.mode === 'flip') cmp.el.classList.toggle('show-a'); return; }
+    if (e.code === 'Space') { e.preventDefault(); cmp.a.togglePlay(); return; }
+    if (e.key === ',') { cmp.a.stepFrame(-1); return; }
+    if (e.key === '.') { cmp.a.stepFrame(1); return; }
+    return;
+  }
 
   if (ctrl && e.key.toLowerCase() === 's') { e.preventDefault(); e.shiftKey ? saveSessionAs() : saveSession(); return; }
   if (ctrl && e.key.toLowerCase() === 'o') { e.preventDefault(); openSession(); return; }
@@ -1667,7 +1761,7 @@ window.addEventListener('keydown', (e) => {
   if (ctrl && e.key.toLowerCase() === 'a' && !isBoard()) { e.preventDefault(); document.getElementById('btn-add').click(); return; }
 
   if (inControl) return;
-  const key = e.key.toLowerCase();
+  if (key === 'c' && !ctrl) { tryOpenCompare(); return; }
 
   // shortcuts that act on the video under the mouse
   const h = hoveredTile && tiles.includes(hoveredTile) ? hoveredTile : null;
