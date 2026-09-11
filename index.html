@@ -240,6 +240,7 @@
               <option value="1.5">1.5×</option>
               <option value="2">2×</option>
             </select>
+            <button class="settings" title="Settings: frame rate override for frame step and timecode">⚙</button>
           </div>
           <div class="bm-panel hidden"></div>
         </div>
@@ -256,6 +257,56 @@
       <div class="handle tr" data-corner="tr"></div>
       <div class="handle bl" data-corner="bl"></div>
       <div class="handle br" data-corner="br"></div>
+    </div>
+  </template>
+
+  <!-- image sequence: a frame player drawing into a canvas (no audio, so no mute or volume) -->
+  <template id="seq-tile-template">
+    <div class="tile sequence">
+      <canvas></canvas>
+      <div class="seq-badge" hidden></div>
+      <div class="overlay">
+        <div class="top">
+          <button class="remove" title="Remove this sequence">✕</button>
+          <span class="group-swatch" hidden></span>
+          <span class="name"></span>
+          <button class="fullscreen" title="Fullscreen (double-click the picture also works; Esc leaves)">⛶</button>
+        </div>
+        <div class="bottom">
+          <div class="markers" title=""></div>
+          <div class="cache-bar" title="Frames ready to show: dim = decoded on disk, bright = in memory"></div>
+          <input type="range" class="seek" min="0" max="10000" value="0" step="1" title="Scrub">
+          <div class="row">
+            <button class="play" title="Play / pause (K)">▶</button>
+            <button class="fstep-back" title="Back one frame (,)">|◀</button>
+            <button class="back" title="Back 5 s (←). Shift for 30 s">−5s</button>
+            <button class="fwd" title="Forward 5 s (→). Shift for 30 s">+5s</button>
+            <button class="fstep-fwd" title="Forward one frame (.)">▶|</button>
+            <span class="time" title="Click to switch clock / frames / timecode">0:00 / 0:00</span>
+            <span class="spacer"></span>
+            <button class="bm-add" title="Add a bookmark at the current frame (B)">🔖+</button>
+            <button class="bm-list" title="Bookmarks: click to list, rename, or delete. [ and ] jump between them.">🔖<span class="bm-count">0</span></button>
+            <button class="loop" title="Loop this video (L)">🔁</button>
+            <select class="rate" title="Playback speed">
+              <option value="0.25">0.25×</option>
+              <option value="0.5">0.5×</option>
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2×</option>
+            </select>
+            <button class="settings" title="Settings: frame rate, and exposure / colour for EXR">⚙</button>
+          </div>
+          <div class="bm-panel hidden"></div>
+        </div>
+      </div>
+      <div class="error hidden">
+        <div class="error-text"></div>
+        <div class="error-actions"><button class="retry">Re-decode</button></div>
+      </div>
+      <div class="handle tl" data-corner="tl"></div><div class="handle tr" data-corner="tr"></div>
+      <div class="handle bl" data-corner="bl"></div><div class="handle br" data-corner="br"></div>
     </div>
   </template>
 
@@ -306,6 +357,8 @@
   <script src="lib/settings.js"></script>
   <script src="lib/sources.js"></script>
   <script src="lib/arrange.js"></script>
+  <script src="lib/sequence.js"></script>
+  <script src="lib/framecache.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -108,6 +108,8 @@ itself when you click **Update yt-dlp** in the sidebar.
 - **Frame step and time.** `,` and `.` step one frame back / forward (the
   video pauses first). Click the time label to switch between clock,
   frame count, and `HH:MM:SS:FF` timecode; the choice is saved per session.
+  If a file reports the wrong frame rate, **⚙** on its control row sets
+  one for frame step and timecode (playback speed is untouched).
 - **Bookmarks.** `🔖+` (or `B` while hovering) drops a bookmark at the
   current time; they show as pins above the scrub bar. Click a pin to jump,
   right-click to delete, Shift-right-click to change its colour. The `🔖 n`
@@ -161,6 +163,28 @@ itself when you click **Update yt-dlp** in the sidebar.
   tab in every session.
 - **Image tiles.** jpg, png, gif, webp and bmp become picture tiles: title
   bar, move, resize, groups and sessions, no playback controls.
+- **Image sequences and EXR.** A run of numbered frames
+  (`shot.0001.exr`, `plate_0001.png`, … in exr, png, tif, jpg, webp or
+  dpx) plays like a video in a Nuke-style frame player: it is never turned
+  into a movie. The sidebar shows each run as one **SEQ** row
+  (`shot.[0001-0240].exr · 240 fr`, with a thumbnail from the middle
+  frame); drag it, double-click it or use Add all. Picking or dropping one
+  frame asks whether to add the whole sequence; a single EXR is a
+  one-frame sequence.
+  - PNG, JPEG and WebP frames are shown straight from the files. EXR, TIFF
+    and DPX frames are decoded by the bundled ffmpeg into a frame cache,
+    around the playhead first and then the rest; the thin bar above the
+    scrub bar shows which frames are ready (dim: decoded, bright: in
+    memory). Playback waits on a frame that isn't ready yet, like Nuke.
+  - Everything else works as for videos: frame step, timecode, bookmarks,
+    loop, the timeline, groups and Sync, A/B, fullscreen, sessions, undo.
+  - **⚙** sets the frame rate (24 by default; nothing is re-decoded) and,
+    for EXR, **Exposure** in stops (applied in linear light) and
+    **Colour**: sRGB, Rec.709 (Nuke's curve) or None (the linear values
+    as they are). Changing the look re-decodes in the background while the
+    tile keeps showing its frame. Log DPX shows as stored.
+  - A missing frame shows the one before it with a "frame N missing"
+    badge.
 - **YouTube / Twitch tiles.** YouTube tiles use the app's own play, scrub,
   mute and volume controls and join Play all / Pause all and group mute /
   volume. They also get bookmarks, appear on the timeline, and join Sync and
@@ -196,8 +220,8 @@ itself when you click **Update yt-dlp** in the sidebar.
   (it lights up), and a second click turns them all off.
 - **Master volume** (toolbar slider) scales every video's own volume. New
   videos start at a quiet 10% so twenty of them don't blast you.
-- **Cache** (toolbar) shows how much space playable copies and thumbnails
-  use, and clears them.
+- **Cache** (toolbar) shows how much space playable copies, thumbnails
+  and decoded sequence frames use, and clears them.
 - **Save** writes a `.mvp` session file (plain JSON): every tile with its
   time, volume, mute, speed, position, bookmarks and group, plus the layout.
   It saves in place once the session has a file; **right-click Save** (or

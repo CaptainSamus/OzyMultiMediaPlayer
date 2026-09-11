@@ -213,14 +213,16 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 
 const VIDEO_EXTS = ['mp4', 'm4v', 'webm', 'mkv', 'mov', 'ogv', 'ogg', 'avi', 'mp3', 'wav', 'm4a', 'flac'];
 const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+const FRAME_EXTS = ['exr', 'tif', 'tiff', 'dpx'];
 
 ipcMain.handle('pick-videos', async () => {
   const r = await dialog.showOpenDialog(win, {
     title: 'Add videos',
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: 'Video / audio / images', extensions: [...VIDEO_EXTS, ...IMAGE_EXTS] },
+      { name: 'Video / audio / images / sequences', extensions: [...VIDEO_EXTS, ...IMAGE_EXTS, ...FRAME_EXTS] },
       { name: 'Images', extensions: IMAGE_EXTS },
+      { name: 'Image sequences (pick any frame)', extensions: ['exr', 'png', 'tif', 'tiff', 'jpg', 'jpeg', 'webp', 'dpx'] },
       { name: 'All files', extensions: ['*'] },
     ],
   });
@@ -268,6 +270,7 @@ ipcMain.handle('file-exists', (_e, p) => {
 const { execFile, spawn } = require('child_process');
 const Codecs = require('./lib/codecs');
 const ProxyCache = require('./lib/proxy');
+const Sequence = require('./lib/sequence');
 
 const proxyDir = () => path.join(app.getPath('userData'), 'proxies');
 function proxyPathFor(filePath, stat) {
@@ -349,17 +352,27 @@ ipcMain.on('cancel-proxy', (_e, filePath) => {
   if (job) job.child.kill();
 });
 
-// Cache = playable copies + thumbnails.
+// Cache = playable copies + thumbnails + decoded sequence frames (frames/ has a folder per sequence look).
+function dirUsage(dir) {
+  let bytes = 0, files = 0;
+  try {
+    for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, d.name);
+      if (d.isDirectory()) { const u = dirUsage(p); bytes += u.bytes; files += u.files; }
+      else { try { bytes += fs.statSync(p).size; files++; } catch {} }
+    }
+  } catch {}
+  return { bytes, files };
+}
 ipcMain.handle('cache-info', () => {
   let bytes = 0, files = 0;
-  for (const dir of [proxyDir(), thumbDir()]) {
-    try { for (const f of fs.readdirSync(dir)) { bytes += fs.statSync(path.join(dir, f)).size; files++; } } catch {}
-  }
+  for (const dir of [proxyDir(), thumbDir(), framesDir()]) { const u = dirUsage(dir); bytes += u.bytes; files += u.files; }
   return { bytes, files };
 });
 ipcMain.handle('clear-cache', () => {
   for (const job of proxyJobs.values()) job.child.kill();
-  for (const dir of [proxyDir(), thumbDir()]) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
+  cancelAllFrames();
+  for (const dir of [proxyDir(), thumbDir(), framesDir()]) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
 });
 
 // ---- YouTube thumbnails for web tiles ----
@@ -403,17 +416,26 @@ ipcMain.handle('pick-folder', async () => {
   const r = await dialog.showOpenDialog(win, { title: 'Add folder', properties: ['openDirectory'] });
   return r.canceled ? null : r.filePaths[0];
 });
-// Non-recursive: media files directly in the folder, sorted by name.
+// Non-recursive: media files directly in the folder, sorted by name. Runs of frames come back as
+// sequences (their frames are left out of files); a lone exr / tif / dpx frame is a file of kind 'frame'.
+function readSequences(dir, names) {
+  const frames = names.filter((n) => Sequence.isFrameExt(n));
+  const { sequences } = Sequence.detect(frames);
+  const members = new Set(sequences.flatMap((s) => s.frames));
+  return { sequences: sequences.map(({ frames: _f, ...s }) => ({ ...s, dir })), members }; // the frame list stays here (missing[] says the rest)
+}
 ipcMain.handle('list-folder', (_e, dir) => {
   let names;
   try { names = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => d.name); }
-  catch { return { ok: false, files: [] }; }
+  catch { return { ok: false, files: [], sequences: [] }; }
+  const { sequences, members } = readSequences(dir, names);
   const files = [];
   for (const n of Sources.filterMedia(names, { images: true })) {
+    if (members.has(n)) continue;
     const p = path.join(dir, n);
     try { const st = fs.statSync(p); files.push({ path: p, name: n, size: st.size, mtimeMs: st.mtimeMs, kind: Sources.kindOf(n) }); } catch {}
   }
-  return { ok: true, files };
+  return { ok: true, files, sequences };
 });
 
 // Local-file thumbnails: one JPEG per file (same hash as proxies) from 10 % in,
@@ -432,6 +454,10 @@ ipcMain.handle('thumb', (_e, filePath) => new Promise((resolve) => {
     if (Sources.kindOf(filePath) === 'image') { // images: no seek, just scale the first frame
       return execFile(binPath('ffmpeg'), ['-y', '-i', filePath, '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '4', out], { windowsHide: true }, (e2) => done(e2 ? null : out));
     }
+    if (Sources.kindOf(filePath) === 'frame') { // exr / tif / dpx: the frame player's decode (sRGB, no exposure), scaled
+      const vf = 'scale=320:-2,' + Sequence.filter({ seq: { ext: path.extname(filePath).slice(1) }, colour: 'srgb', useZscale: ffmpegHasSync('zscale') });
+      return execFile(binPath('ffmpeg'), ['-y', '-i', filePath, '-frames:v', '1', '-vf', vf, '-q:v', '4', out], { windowsHide: true }, (e2) => done(e2 ? null : out));
+    }
     execFile(binPath('ffprobe'), ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', filePath], { windowsHide: true }, (err, stdout) => {
       const dur = err ? 0 : Number(stdout) || 0;
       const ss = (dur * 0.1).toFixed(2);
@@ -440,6 +466,118 @@ ipcMain.handle('thumb', (_e, filePath) => new Promise((resolve) => {
   };
   thumbWaiting.push(job); nextThumb();
 }));
+
+// ---- image sequences: the frame player's decode cache ----
+// PNG / JPEG / WebP frames are read by the renderer straight from the originals. EXR / TIFF / DPX
+// frames are decoded by ffmpeg into userData/frames/<key>/<frame>.png (8-bit display frames; the
+// key includes the EXR look, so a new exposure or colour setting gets its own folder). Batches of up
+// to 24 contiguous frames, at most two ffmpeg processes (more don't help: see lib/sequence.js).
+const framesDir = () => path.join(app.getPath('userData'), 'frames');
+let filterList = null;
+function ffmpegHasSync(name) {
+  if (filterList === null) {
+    try { filterList = require('child_process').execFileSync(binPath('ffmpeg'), ['-hide_banner', '-filters'], { windowsHide: true, encoding: 'utf8' }); }
+    catch { filterList = ''; }
+  }
+  return new RegExp(`\\s${name}\\s`).test(filterList);
+}
+ipcMain.handle('ffmpeg-has', (_e, name) => checkTools() && ffmpegHasSync(String(name)));
+ipcMain.handle('frames-dir', () => framesDir());
+
+// The run a picked or dropped frame belongs to (null if it's alone; the renderer then makes a
+// one-frame sequence for exr / tif / dpx).
+ipcMain.handle('sequence-for', (_e, filePath) => {
+  const dir = path.dirname(filePath), name = path.basename(filePath);
+  let names; try { names = fs.readdirSync(dir); } catch { return null; }
+  return readSequences(dir, names).sequences.find((s) => Sequence.sameRun(s, name)) || null;
+});
+// First frame's mtime (part of the cache key) and picture size.
+ipcMain.handle('seq-info', async (_e, dir, seq) => {
+  const first = path.join(dir, Sequence.framePath(seq, seq.start));
+  let firstMtime = 0;
+  try { firstMtime = fs.statSync(first).mtimeMs; } catch { return { ok: false }; }
+  const size = !checkTools() ? {} : await new Promise((resolve) => {
+    execFile(binPath('ffprobe'), ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', first], { windowsHide: true }, (err, out) => {
+      try { const s = JSON.parse(out).streams[0]; resolve({ width: s.width, height: s.height }); } catch { resolve({}); }
+    });
+  });
+  return { ok: true, firstMtime, ...size };
+});
+ipcMain.handle('frames-on-disk', (_e, key) => {
+  if (!/^[0-9a-f]{16}$/.test(String(key))) return [];
+  try { return fs.readdirSync(path.join(framesDir(), key)).filter((f) => /^\d+\.png$/.test(f)).map((f) => parseInt(f, 10)).sort((a, b) => a - b); }
+  catch { return []; }
+});
+
+const MAX_FRAME_PROCS = 2;
+const frameKeys = new Map(); // key -> { req, sender, pending: [[a, b]], running: Map(child -> [a, b]) }; last entry = asked most recently
+let frameProcs = 0;
+// req: { key, dir, seq, exposure, colour, ranges: [[a, b], ...] } in frame numbers, most wanted first.
+// A new request for a key replaces what that key still has waiting (the playhead moved).
+ipcMain.on('ensure-frames', (e, req) => {
+  if (!req || !/^[0-9a-f]{16}$/.test(String(req.key)) || !req.seq || !checkTools()) return;
+  const out = path.join(framesDir(), req.key);
+  const prev = frameKeys.get(req.key);
+  const entry = prev || { running: new Map() };
+  entry.req = req; entry.sender = e.sender; entry.cancelled = false;
+  const busy = (f) => [...entry.running.values()].some(([a, b]) => f >= a && f <= b);
+  const missing = new Set(req.seq.missing || []);
+  const want = []; const seen = new Set();
+  for (const [a0, b0] of req.ranges || []) {
+    const a = Math.max(req.seq.start, a0), b = Math.min(req.seq.end, b0);
+    for (let f = a; f <= b; f++) {
+      if (seen.has(f) || missing.has(f) || busy(f)) continue;
+      seen.add(f);
+      if (!fs.existsSync(path.join(out, Sequence.cacheFile(req.seq, f)))) want.push(f);
+    }
+  }
+  // contiguous batches, in the order asked (so the frames around the playhead go first)
+  const batches = []; let run = [];
+  for (const f of want) { if (run.length && f !== run[run.length - 1] + 1) { batches.push(...Sequence.batches(run)); run = []; } run.push(f); }
+  if (run.length) batches.push(...Sequence.batches(run));
+  entry.pending = batches;
+  frameKeys.delete(req.key); frameKeys.set(req.key, entry);
+  framesPump();
+});
+function framesPump() {
+  while (frameProcs < MAX_FRAME_PROCS) {
+    const entry = [...frameKeys.values()].reverse().find((k) => k.pending && k.pending.length);
+    if (!entry) return;
+    const [a, b] = entry.pending.shift();
+    runFrameBatch(entry, a, b);
+  }
+}
+function runFrameBatch(entry, a, b) {
+  const { req } = entry;
+  const out = path.join(framesDir(), req.key);
+  const tmp = path.join(out, `.part-${a}-${process.hrtime.bigint()}`); // renamed into place only when ffmpeg succeeds
+  const send = (...x) => { if (!entry.sender.isDestroyed()) entry.sender.send(...x); };
+  try { fs.mkdirSync(tmp, { recursive: true }); } catch (err) { send('frames-failed', req.key, a, b, err.message); return; }
+  const args = Sequence.decodeArgs({ dir: req.dir, seq: req.seq, from: a, to: b, outDir: tmp, exposure: req.exposure, colour: req.colour, useZscale: ffmpegHasSync('zscale'), sep: path.sep });
+  frameProcs++;
+  const child = spawn(binPath('ffmpeg'), args, { windowsHide: true });
+  entry.running.set(child, [a, b]);
+  let tail = '';
+  child.stderr.on('data', (d) => { tail = (tail + d).slice(-1500); });
+  child.on('error', () => {}); // 'close' follows
+  child.on('close', (code) => {
+    frameProcs--; entry.running.delete(child);
+    if (code === 0) { try { for (const f of fs.readdirSync(tmp)) fs.renameSync(path.join(tmp, f), path.join(out, f)); } catch {} }
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+    if (code === 0) send('frames-ready', req.key, a, b);
+    else if (!entry.cancelled) send('frames-failed', req.key, a, b, tail.trim().split('\n').slice(-3).join('\n') || `ffmpeg exited with ${code}`);
+    framesPump();
+  });
+}
+function cancelFrames(key) {
+  const entry = frameKeys.get(key); if (!entry) return;
+  entry.cancelled = true; entry.pending = [];
+  for (const child of entry.running.keys()) { try { child.kill(); } catch {} }
+  frameKeys.delete(key);
+}
+function cancelAllFrames() { for (const key of [...frameKeys.keys()]) cancelFrames(key); }
+ipcMain.on('cancel-frames', (_e, key) => cancelFrames(key));
+app.on('will-quit', cancelAllFrames);
 
 // ---- YouTube playlists via the bundled yt-dlp ----
 // yt-dlp runs as its own process (it talks to YouTube directly, outside the renderer's allowlist).

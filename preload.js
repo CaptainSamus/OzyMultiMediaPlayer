@@ -27,4 +27,14 @@ contextBridge.exposeInMainWorld('api', {
   ytdlpAvailable: () => ipcRenderer.invoke('ytdlp-available'),
   showInExplorer: (p) => ipcRenderer.invoke('show-in-explorer', p),
   copyText: (t) => ipcRenderer.invoke('copy-text', t),
+  // image sequences (frame player)
+  sequenceFor: (p) => ipcRenderer.invoke('sequence-for', p),
+  seqInfo: (dir, seq) => ipcRenderer.invoke('seq-info', dir, seq),
+  framesDir: () => ipcRenderer.invoke('frames-dir'),
+  framesOnDisk: (key) => ipcRenderer.invoke('frames-on-disk', key),
+  ensureFrames: (req) => ipcRenderer.send('ensure-frames', req),
+  cancelFrames: (key) => ipcRenderer.send('cancel-frames', key),
+  onFramesReady: (cb) => ipcRenderer.on('frames-ready', (_e, key, from, to) => cb(key, from, to)),
+  onFramesFailed: (cb) => ipcRenderer.on('frames-failed', (_e, key, from, to, msg) => cb(key, from, to, msg)),
+  ffmpegHas: (name) => ipcRenderer.invoke('ffmpeg-has', name),
 });

@@ -151,10 +151,18 @@ function refreshToolbarToggles() {
   const loopable = tiles.filter((t) => t.pb);
   document.getElementById('btn-loop-all').classList.toggle('toggled', loopable.length > 0 && loopable.every((t) => t.loop));
 }
-// Play state across local <video> tiles and YouTube tiles (Twitch has no API: skipped).
+// Play state across local <video>, sequence and YouTube tiles (Twitch has no API: skipped).
+/* DISABLED (Mark, 2026-09-11): replaced by the playback adapter versions below, which also cover sequence tiles
 function playTile(t) { if (t.video) t.video.play().catch(() => {}); else if (t.yt) t.yt.play(); }
 function pauseTile(t) { if (t.video) t.video.pause(); else if (t.yt) t.yt.pause(); }
 function isPlaying(t) { return t.video ? !t.video.paused : !!(t.yt && !t.yt.paused); }
+*/
+function playTile(t) { if (t.pb) t.pb.play(); }
+function pauseTile(t) { if (t.pb) t.pb.pause(); }
+function isPlaying(t) { return !!(t.pb && !t.pb.paused); }
+// fps for frame step and timecode: a video's ⚙ override, else what ffprobe found (null = unknown,
+// shown with ~ and stepped at 24); sequences always have one (tile.fps, default 24)
+const effectiveFps = (t) => t.fpsOverride || t.fps || null;
 
 // ---------- playback adapter ----------
 // tile.pb: one shape over a local <video> or a YouTube player, so groups, Sync, loops, bookmarks
@@ -162,7 +170,7 @@ function isPlaying(t) { return t.video ? !t.video.paused : !!(t.yt && !t.yt.paus
 // DOM-only things: fullscreen, A/B, frame step.)
 function videoPlayback(video) {
   return {
-    web: false, settling: false,
+    web: false, kind: 'video', settling: false,
     get time() { return video.currentTime || 0; }, set time(t) { video.currentTime = t; },
     get duration() { return video.duration || 0; },
     get paused() { return video.paused; },
@@ -177,7 +185,7 @@ function ytPlayback(yt) {
   let seekAt = -Infinity;
   const st = yt.st;
   return {
-    web: true,
+    web: true, kind: 'web',
     get settling() { return performance.now() - seekAt < 1000; },
     get time() {
       const t = st.state === 1 && st.at ? st.time + (performance.now() - st.at) / 1000 * (st.rate || 1) : st.time;
@@ -389,7 +397,8 @@ function applyGroupAudio(g) {
     setOwnMuted(t, t.ownMuted); // web tiles join groups for mute / volume (YouTube only) and Sticky
     applyTileVolume(t);
     if (t.pb) t.pb.rate = g.rate;
-    if (t.video) t.el.querySelector('.rate').value = String(g.rate);
+    const rateSel = t.el.querySelector('.rate'); // local video and sequence tiles
+    if (rateSel) rateSel.value = String(g.rate);
   }
 }
 
@@ -448,8 +457,10 @@ function setGroupSync(g, on) {
 // Group time from a member that isn't clamped (playing, or paused inside its own
 // extent). If every member is clamped, a member waiting at 0 means g <= its start,
 // so the earliest such start is g; if all have ended, g is the group's end.
-// A playing local video leads when there is one: its clock is exact, YouTube's is extrapolated.
-const leadOf = (ms) => ms.find((m) => !m.tile.pb.paused && !m.tile.pb.web) || ms.find((m) => !m.tile.pb.paused);
+// The playing member with the steadiest clock leads: a local video (exact), then a sequence (it can
+// stall while frames decode), then YouTube (extrapolated).
+const LEAD_RANK = { video: 0, frames: 1, web: 2 };
+const leadOf = (ms) => ms.filter((m) => !m.tile.pb.paused).sort((a, b) => LEAD_RANK[a.tile.pb.kind] - LEAD_RANK[b.tile.pb.kind])[0];
 function groupTimeOf(g) {
   const ms = memberModel(g);
   if (!ms.length) return 0;
@@ -531,7 +542,8 @@ setInterval(() => {
         if (inside && p.paused) p.play();   // its start was reached
         if (!inside && !p.paused) p.pause(); // waiting at 0 or holding at the end
         // YouTube on either side: ~¼ s slack, and none while it is still settling after a seek
-        const slack = p.web || lead.tile.pb.web ? Groups.DRIFT_WEB : Groups.DRIFT;
+        // a sequence moves in whole frames, so give it 1.5 frames of slack at low frame rates
+        const slack = p.web || lead.tile.pb.web ? Groups.DRIFT_WEB : Math.max(Groups.DRIFT, p.frameSlack || 0, lead.tile.pb.frameSlack || 0);
         if (!p.settling && Math.abs(p.time - want) > slack) p.time = want;
       }
     } finally { syncing = false; }
@@ -554,14 +566,14 @@ function timelineModel() {
   if (active) {
     const members = memberModel(active);
     if (!members.length) return null; // e.g. a group of Twitch tiles or images
-    return { title: active.name, members, group: active, fps: members[0].tile.fps };
+    return { title: active.name, members, group: active, fps: effectiveFps(members[0].tile) };
   }
   const asMembers = (list) => list.map((t) => ({ tile: t, start: 0, duration: t.pb.duration }));
   const sel = [...selection].filter((t) => t.pb);
-  if (sel.length === 1) return { title: tileName(sel[0]), members: asMembers(sel), group: null, fps: sel[0].fps };
-  if (sel.length > 1) return { title: `${sel.length} selected`, members: asMembers(sel), group: null, fps: sel[0].fps };
+  if (sel.length === 1) return { title: tileName(sel[0]), members: asMembers(sel), group: null, fps: effectiveFps(sel[0]) };
+  if (sel.length > 1) return { title: `${sel.length} selected`, members: asMembers(sel), group: null, fps: effectiveFps(sel[0]) };
   const all = tiles.filter((t) => t.pb);
-  if (all.length) return { title: 'All videos', members: asMembers(all), group: null, fps: all[0].fps };
+  if (all.length) return { title: 'All videos', members: asMembers(all), group: null, fps: effectiveFps(all[0]) };
   return null;
 }
 // each video's own colour (a palette key), used when the timeline shows several videos
@@ -606,8 +618,8 @@ function renderTimeline() {
       block.style.width = Math.max(2, Timeline.xFor(lane.end, end, width) - Timeline.xFor(lane.start, end, width)) + 'px';
       block.style.borderColor = tileColor(m.tile); // the lane's video colour; its markers keep per-bookmark colours
       block.textContent = tileName(m.tile);
-      const tcL = document.createElement('span'); tcL.className = 'tl-tc'; tcL.textContent = Frames.format(lane.start, 0, m.tile.fps, layout.timeDisplay).split(' / ')[0];
-      const tcR = document.createElement('span'); tcR.className = 'tl-tc right'; tcR.textContent = Frames.format(lane.end, 0, m.tile.fps, layout.timeDisplay).split(' / ')[0];
+      const tcL = document.createElement('span'); tcL.className = 'tl-tc'; tcL.textContent = Frames.format(lane.start, 0, effectiveFps(m.tile), layout.timeDisplay).split(' / ')[0];
+      const tcR = document.createElement('span'); tcR.className = 'tl-tc right'; tcR.textContent = Frames.format(lane.end, 0, effectiveFps(m.tile), layout.timeDisplay).split(' / ')[0];
       block.append(tcL, tcR); row.appendChild(block);
       for (const b of m.tile.bookmarks) {
         const mk = document.createElement('div'); mk.className = 'tl-mk'; mk.style.background = MARKER_COLORS[b.color];
@@ -736,16 +748,17 @@ function openCompare(a, b) {
     group: g, members: [...g.members], starts: new Map([...g.members].map((t) => [t, t.sync ? { ...t.sync } : null])),
   }));
   for (const t of [a, b]) if (t.group) removeFromGroup(t.group, t);
-  cmp.temp = createGroup([a, b], { name: 'A/B', sync: true, sticky: false, rate: a.video.playbackRate });
-  cmpQ('.cmp-a').appendChild(a.video); cmpQ('.cmp-b').appendChild(b.video);
-  cmpQ('.cmp-label-a').textContent = 'A: ' + basename(a.path);
-  cmpQ('.cmp-label-b').textContent = 'B: ' + basename(b.path);
+  cmp.temp = createGroup([a, b], { name: 'A/B', sync: true, sticky: false, rate: a.pb.rate });
+  // the picture element moves (a <video>, or a sequence's canvas); it keeps playing
+  cmpQ('.cmp-a').appendChild(a.mediaEl); cmpQ('.cmp-b').appendChild(b.mediaEl);
+  cmpQ('.cmp-label-a').textContent = 'A: ' + tileName(a);
+  cmpQ('.cmp-label-b').textContent = 'B: ' + tileName(b);
   cmp.el.hidden = false;
   cmp.tick = () => {
-    const v = a.video;
-    cmpQ('.cmp-play').textContent = v.paused ? '▶' : '❚❚';
-    cmpQ('.cmp-time').textContent = Frames.format(v.currentTime, v.duration, a.fps, layout.timeDisplay);
-    if (v.duration && !cmp.scrubbing) cmpQ('.cmp-seek').value = String(Math.round(v.currentTime / v.duration * 10000));
+    const p = a.pb;
+    cmpQ('.cmp-play').textContent = p.paused ? '▶' : '❚❚';
+    cmpQ('.cmp-time').textContent = Frames.format(p.time, p.duration, effectiveFps(a), layout.timeDisplay);
+    if (p.duration && !cmp.scrubbing) cmpQ('.cmp-seek').value = String(Math.round(p.time / p.duration * 10000));
   };
   cmp.tick();
 }
@@ -753,8 +766,8 @@ function closeCompare() {
   if (!cmp.a) return;
   const { a, b } = cmp;
   dissolveGroup(cmp.temp);
-  a.el.insertBefore(a.video, a.el.firstChild);
-  b.el.insertBefore(b.video, b.el.firstChild);
+  a.el.insertBefore(a.mediaEl, a.el.firstChild);
+  b.el.insertBefore(b.mediaEl, b.el.firstChild);
   // put the real groups back as they were (a group that dropped below 2 members was dissolved; revive it)
   for (const s of cmp.saved) {
     const g = s.group;
@@ -769,7 +782,7 @@ function closeCompare() {
   layoutTiles(); syncActiveFromSelection();
 }
 function tryOpenCompare() {
-  const sel = [...selection].filter((t) => t.video);
+  const sel = [...selection].filter((t) => t.mediaEl && t.pb && !t.pb.web); // local videos and sequences
   if (sel.length !== 2) { setStatus('Select exactly two videos for A/B (Shift-click, or lasso on the board)'); return; }
   openCompare(sel[0], sel[1]);
 }
@@ -788,8 +801,8 @@ const cmpSeek = cmpQ('.cmp-seek');
 cmpSeek.addEventListener('pointerdown', () => { cmp.scrubbing = true; });
 cmpSeek.addEventListener('pointerup', () => { cmp.scrubbing = false; });
 cmpSeek.addEventListener('input', () => {
-  const v = cmp.a.video; if (!v.duration) return;
-  v.currentTime = Number(cmpSeek.value) / 10000 * v.duration;
+  const p = cmp.a.pb; if (!p.duration) return;
+  p.time = Number(cmpSeek.value) / 10000 * p.duration;
   broadcast(cmp.a, 'seek');
 });
 cmpQ('.cmp-wipe').addEventListener('pointerdown', (e) => {
@@ -846,6 +859,7 @@ function applyRects(entry, dir) { // dir: 'before' | 'after'
 function restoreRemoved(entry) {
   const v = entry.record;
   const t = v.type === 'image' ? addImageTile(v.path, v)
+    : v.type === 'sequence' ? addSequenceTile(v.dir, v.seq, v) // its disk cache is reused (same key)
     : v.type && v.type !== 'file' ? addWebTile(v.url, WebUrl.parse(v.url), v) : addVideo(v.path, v);
   // put it back at its old index so gallery order is preserved
   tiles.splice(tiles.indexOf(t), 1); tiles.splice(Math.min(entry.index, tiles.length), 0, t);
@@ -1504,7 +1518,7 @@ function addVideo(filePath, state = {}) {
   const fwdBtn = el.querySelector('.fwd');
 
   const tile = {
-    path: filePath, el, video, pb: videoPlayback(video), seek, time: timeEl, scrubbing: false,
+    path: filePath, el, video, mediaEl: video, pb: videoPlayback(video), seek, time: timeEl, scrubbing: false,
     volume: DEFAULT_VIDEO_VOLUME,
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
     board: null,
@@ -1517,6 +1531,7 @@ function addVideo(filePath, state = {}) {
   }
   tiles.push(tile);
   tile.info = null; tile.proxy = null; tile.fps = null;
+  tile.fpsOverride = Number(state.fpsOverride) > 0 ? Number(state.fpsOverride) : null; // ⚙: frame step / timecode only
   tile.group = null; tile.sync = null; tile.ownMuted = !!state.muted;
   // its own colour for multi-video timelines: saved, else round-robin by position at creation
   tile.hue = GROUP_PALETTE.includes(state.color) ? state.color : GROUP_PALETTE[(tiles.length - 1) % GROUP_PALETTE.length];
@@ -1538,7 +1553,7 @@ function addVideo(filePath, state = {}) {
   const wantPlaying = state.paused === false;
 
   const updateTimeLabel = () => {
-    timeEl.textContent = Frames.format(video.currentTime, video.duration, tile.fps, layout.timeDisplay);
+    timeEl.textContent = Frames.format(video.currentTime, video.duration, effectiveFps(tile), layout.timeDisplay);
   };
   const updateSeek = () => {
     if (tile.scrubbing || !video.duration) return;
@@ -1577,7 +1592,7 @@ function addVideo(filePath, state = {}) {
     if (!video.duration) return;
     video.pause();
     broadcast(tile, 'pause');
-    seekTo(Frames.step(video.currentTime, tile.fps || Frames.DEFAULT_FPS, dir));
+    seekTo(Frames.step(video.currentTime, effectiveFps(tile) || Frames.DEFAULT_FPS, dir));
   };
   // play/pause from the user (picture click, ▶ button, K); synced members follow
   tile.togglePlay = () => { togglePlay(video); broadcast(tile, video.paused ? 'pause' : 'play'); };
@@ -1739,6 +1754,7 @@ function addVideo(filePath, state = {}) {
   loopBtn.addEventListener('click', () => setTileLoop(tile, !tile.loop));
   loopBtn.addEventListener('dblclick', (e) => e.stopPropagation());
   applyTileLoop(tile);
+  wireSettingsButton(tile);
   rate.addEventListener('change', () => { video.playbackRate = Number(rate.value); broadcast(tile, 'rate', video.playbackRate); });
 
   // volume bar: click or drag anywhere on it; the level is wherever the mouse is
@@ -2119,6 +2135,396 @@ function addImageTile(filePath, state = {}, at = null) {
   return tile;
 }
 
+// ---------- image sequences: a Nuke-style frame player ----------
+// A sequence tile draws frame N into a <canvas> from an in-memory bitmap cache; frames are never
+// turned into a movie. PNG / JPEG / WebP frames load straight from the originals. EXR / TIFF / DPX
+// frames are decoded by main's ffmpeg into userData/frames/<key>/ (in batches around the playhead,
+// then the rest of the sequence), and load from there once they land. Playback holds on a frame
+// that isn't ready and carries on when it arrives. tile.pb makes it look like any other video to
+// groups, Sync, loops, the timeline and bookmarks.
+const seqTileTemplate = document.getElementById('seq-tile-template');
+const framePool = FrameCache.pool(2 * 1024 ** 3); // decoded bitmaps across all sequence tiles
+let framesDirPath = null;
+const framesDirReady = window.api.framesDir().then((d) => { framesDirPath = d; });
+const joinPath = (dir, name) => dir + (dir.includes('\\') || !dir.includes('/') ? '\\' : '/') + name;
+const COLOUR_LABELS = { srgb: 'sRGB', rec709: 'Rec.709 (Nuke)', none: 'None (linear values)' };
+// frames-ready / frames-failed from main, routed to every tile showing that cache key
+window.api.onFramesReady((key, a, b) => { for (const t of tiles) if (t.cacheKey === key && t.onFramesReady) t.onFramesReady(a, b); });
+window.api.onFramesFailed((key, a, b, msg) => { for (const t of tiles) if (t.cacheKey === key && t.onFramesFailed) t.onFramesFailed(a, b, msg); });
+
+// dir: the folder; seq: from Sequence.detect / Sequence.single (plus fps / exposure / colour when
+// restored); state: a session record; at: board drop point.
+function addSequenceTile(dir, seq, state = {}, at = null) {
+  const frag = seqTileTemplate.content.cloneNode(true);
+  const el = frag.querySelector('.tile');
+  const cv = el.querySelector('canvas');
+  const ctx = cv.getContext('2d');
+  const seek = el.querySelector('.seek');
+  const playBtn = el.querySelector('.play');
+  const timeEl = el.querySelector('.time');
+  const rateSel = el.querySelector('.rate');
+  const badge = el.querySelector('.seq-badge');
+  const cacheBar = el.querySelector('.cache-bar');
+  const errorEl = el.querySelector('.error');
+  seq = { name: seq.name, sep: seq.sep || '', pad: Number(seq.pad) || 0, ext: seq.ext, start: Number(seq.start) || 0, end: Number(seq.end) || 0,
+    count: Number(seq.count) || 1, missing: Array.isArray(seq.missing) ? seq.missing.map(Number) : [], single: !!seq.single, fps: seq.fps, exposure: seq.exposure, colour: seq.colour };
+  const total = seq.end - seq.start + 1;
+  const decode = Sequence.needsDecode(seq.ext);
+  const missing = new Set(seq.missing);
+  const look = state.seq || seq;
+
+  const tile = {
+    type: 'sequence', dir, seq, path: joinPath(dir, Sequence.pattern(seq)), title: Sequence.label(seq),
+    el, video: null, mediaEl: cv, seek, time: timeEl, scrubbing: false,
+    volume: 0, ownMuted: false, aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
+    board: null, suppressClick: false, bookmarks: parseBookmarks(state.bookmarks), group: null, sync: null,
+    fps: Number(look.fps) > 0 ? Number(look.fps) : 24,
+    exposure: clamp(Number(look.exposure) || 0, -10, 10),
+    colour: Sequence.COLOURS.includes(look.colour) ? look.colour : 'srgb',
+    frame: 0, // 0-based index into the run; the file's own number is seq.start + frame
+    loop: state.loop === true, cacheKey: null, info: null,
+  };
+  const sb = state.board;
+  if (sb && isFinite(sb.x) && isFinite(sb.y) && sb.w > 0 && sb.h > 0) tile.board = { x: +sb.x, y: +sb.y, w: +sb.w, h: +sb.h };
+  tiles.push(tile);
+  tile.hue = GROUP_PALETTE.includes(state.color) ? state.color : GROUP_PALETTE[(tiles.length - 1) % GROUP_PALETTE.length];
+  const nameEl = el.querySelector('.name');
+  nameEl.textContent = tile.title;
+  nameEl.title = tile.path + `\n${seq.count} frame${seq.count === 1 ? '' : 's'}${missing.size ? `, ${missing.size} missing` : ''}\nRight-click: ` + REVEAL_LABEL;
+  nameEl.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); sourceContext(e, 'file', joinPath(dir, Sequence.framePath(seq, seq.start))); });
+
+  // ----- frame cache -----
+  const cache = FrameCache.create({ pool: framePool });
+  let disk = new Set();      // frame numbers decoded on disk (decode formats)
+  const loading = new Set(); // frame numbers being read into memory
+  let gen = 0;               // bumps when the look changes; loads from an older look are dropped
+  let requestedAt = null;    // frame the last decode request was centred on
+  let failed = null;         // last decode error text
+  const num = (i) => seq.start + i;
+  const onDiskOrOriginal = (n) => !missing.has(n) && (!decode || disk.has(n));
+  const urlOf = (n) => window.api.videoUrl(decode ? joinPath(joinPath(framesDirPath, tile.cacheKey), Sequence.cacheFile(seq, n)) : joinPath(dir, Sequence.framePath(seq, n)));
+  let bar = null;
+  const renderCacheBar = () => { // throttled to one paint per frame
+    if (bar) return;
+    bar = requestAnimationFrame(() => {
+      bar = null; cacheBar.textContent = '';
+      const put = (a, b, cls) => {
+        const i = document.createElement('i'); if (cls) i.className = cls;
+        i.style.left = ((a - seq.start) / total * 100).toFixed(3) + '%'; i.style.width = ((b - a + 1) / total * 100).toFixed(3) + '%';
+        cacheBar.appendChild(i);
+      };
+      if (decode) for (const [a, b] of Sequence.batches([...disk].sort((x, y) => x - y), Infinity)) put(a, b, '');
+      for (const [a, b] of cache.ranges()) put(a, b, 'mem');
+    });
+  };
+  const loadFrame = (n) => {
+    if (cache.has(n) || loading.has(n) || !onDiskOrOriginal(n) || (decode && !tile.cacheKey)) return;
+    loading.add(n);
+    const g = gen;
+    // colorSpaceConversion 'none': show the stored values, like Nuke's viewer (no profile / gAMA handling)
+    fetch(urlOf(n)).then((r) => { if (!r.ok) throw new Error(r.status); return r.blob(); }).then((b) => createImageBitmap(b, { colorSpaceConversion: 'none' })).then((bmp) => {
+      loading.delete(n);
+      if (g !== gen || !tiles.includes(tile)) { bmp.close(); return; }
+      cache.set(n, bmp, bmp.width * bmp.height * 4);
+      if (cv.width !== bmp.width || cv.height !== bmp.height) { cv.width = bmp.width; cv.height = bmp.height; setAspect(bmp.width / bmp.height); drawn = null; }
+      if (n === shownNumber()) draw();
+      renderCacheBar();
+    }).catch(() => { loading.delete(n); });
+  };
+  const setAspect = (ar) => {
+    if (!(ar > 0) || Math.abs(ar - tile.aspect) < 0.001) return;
+    tile.aspect = ar;
+    if (tile.board) tile.board.w = tile.board.h * ar;
+    layoutTiles();
+    if (pendingFit) scheduleFit();
+  };
+
+  // ----- drawing -----
+  // A missing file shows the nearest earlier frame with a badge.
+  const shownNumber = () => {
+    let n = num(tile.frame);
+    while (missing.has(n) && n > seq.start) n--;
+    return n;
+  };
+  let drawn = null;
+  const draw = () => {
+    const n = shownNumber(), want = num(tile.frame);
+    const bmp = cache.get(n);
+    if (bmp && drawn !== n) { ctx.drawImage(bmp, 0, 0, cv.width, cv.height); drawn = n; }
+    if (!bmp) loadFrame(n);
+    const text = failed && !onDiskOrOriginal(n) ? '' : missing.has(want) ? `frame ${want} missing` : !bmp ? (decode && !disk.has(n) ? 'caching…' : 'loading…') : '';
+    badge.textContent = text; badge.hidden = !text;
+  };
+  // keep ~2 s ahead (and a few frames behind) in memory
+  const prefetch = () => {
+    const ahead = Math.ceil(2 * tile.fps * Math.max(1, rate));
+    for (let k = -3; k <= ahead && loading.size < 4; k++) {
+      const i = tile.frame + k;
+      if (i < 0 || i >= total) continue;
+      loadFrame(num(i));
+    }
+  };
+  // decode formats: ask main for frames around the playhead first, then the rest of the run
+  const ensureAround = (force = false) => {
+    if (!decode || !tile.cacheKey) return;
+    const n = num(tile.frame);
+    if (!force && requestedAt !== null && Math.abs(n - requestedAt) < 24) return;
+    requestedAt = n;
+    const ranges = [[n, n + 48], [n - 12, n - 1], [n + 49, seq.end], [seq.start, n - 13]];
+    window.api.ensureFrames({ key: tile.cacheKey, dir, seq: { name: seq.name, sep: seq.sep, pad: seq.pad, ext: seq.ext, start: seq.start, end: seq.end, missing: seq.missing, single: seq.single }, exposure: tile.exposure, colour: tile.colour, ranges });
+  };
+  tile.onFramesReady = (a, b) => {
+    for (let n = a; n <= b; n++) disk.add(n);
+    failed = null; errorEl.classList.add('hidden');
+    renderCacheBar();
+    const s = shownNumber(); if (s >= a && s <= b) draw();
+  };
+  tile.onFramesFailed = (a, b, msg) => {
+    failed = msg;
+    const s = shownNumber();
+    if (s >= a && s <= b) { el.querySelector('.error-text').textContent = `Could not decode frames ${a}–${b}:\n${msg}`; errorEl.classList.remove('hidden'); }
+    setStatus(`${tile.title}: could not decode frames ${a}–${b}`, 8000);
+  };
+  // the cache key needs the first frame's mtime; the size sets the tile's shape before any frame loads
+  const setKey = async () => {
+    if (!tile.info) return;
+    await framesDirReady;
+    tile.cacheKey = Sequence.cacheKey(seq, dir, tile.exposure, tile.colour, tile.info.firstMtime);
+    gen++; requestedAt = null; failed = null;
+    cache.clear(); loading.clear(); drawn = null; // the canvas keeps showing the old look until the new frame lands
+    disk = new Set(decode ? await window.api.framesOnDisk(tile.cacheKey) : []);
+    renderCacheBar(); ensureAround(true); draw();
+  };
+  window.api.seqInfo(dir, seq).then(async (info) => {
+    if (!tiles.includes(tile)) return;
+    if (!info || !info.ok) { el.querySelector('.error-text').textContent = `Can't read this sequence:\n${tile.path}`; errorEl.classList.remove('hidden'); return; }
+    tile.info = info;
+    if (info.width > 0 && info.height > 0) setAspect(info.width / info.height);
+    await setKey();
+  });
+  // ⚙: a new exposure / colour is a new cache key; the canvas keeps the old frame until the new one lands
+  tile.setLook = (exposure, colour) => {
+    tile.exposure = clamp(Number(exposure) || 0, -10, 10);
+    tile.colour = Sequence.COLOURS.includes(colour) ? colour : 'srgb';
+    if (tile.cacheKey) window.api.cancelFrames(tile.cacheKey);
+    setKey();
+    refreshSettingsMark(tile);
+  };
+  tile.setFps = (fps) => { // keeps the frame (so its time changes); nothing is re-decoded
+    tile.fps = clamp(Number(fps) || 24, 1, 240);
+    pb.rebase(); refreshTime(); renderMarkers(); renderTimeline(); refreshSettingsMark(tile);
+  };
+  tile.redecode = () => { if (tile.cacheKey) window.api.cancelFrames(tile.cacheKey); failed = null; errorEl.classList.add('hidden'); requestedAt = null; ensureAround(true); };
+  el.querySelector('.retry').addEventListener('click', () => tile.redecode());
+  el.querySelector('.retry').addEventListener('pointerdown', (e) => e.stopPropagation());
+
+  // ----- playback: a wall-clock frame counter -----
+  let playing = false, t0 = 0, f0 = 0, raf = 0, rate = Number(state.playbackRate) > 0 ? Number(state.playbackRate) : 1;
+  rateSel.value = String(rate); if (rateSel.value !== String(rate)) { rate = 1; rateSel.value = '1'; }
+  const readyToShow = (i) => { const n = num(i); return missing.has(n) || cache.has(n); };
+  const stepLoop = (now) => {
+    if (!playing) return;
+    const target = f0 + Math.floor((now - t0) / 1000 * tile.fps * rate + 1e-6);
+    let i = tile.frame;
+    while (i < target) {
+      if (i + 1 >= total) {
+        if (tile.loop && !loopOverridden(tile)) { i = 0; f0 = 0; t0 = now; break; }
+        playing = false; onPlayState(); break; // stops on the last frame, like a video
+      }
+      if (!readyToShow(i + 1)) { f0 = i; t0 = now; break; } // hold here until the frame lands
+      i++;
+    }
+    if (i !== tile.frame) { tile.frame = i; draw(); ensureAround(); }
+    prefetch();
+    if (playing) raf = requestAnimationFrame(stepLoop);
+  };
+  const seekFrame = (i) => {
+    i = clamp(Math.floor(i), 0, total - 1);
+    if (i === tile.frame) return;
+    tile.frame = i; f0 = i; t0 = performance.now();
+    draw(); ensureAround(); prefetch();
+  };
+  const onPlayState = () => {
+    playBtn.textContent = playing ? '❚❚' : '▶';
+    el.classList.toggle('paused-badge', !playing);
+    if (tile.group && tile.group === active) renderGroupBar();
+  };
+  const pb = tile.pb = {
+    web: false, kind: 'frames', settling: false,
+    get frameSlack() { return 1.5 / tile.fps; },
+    get time() { return tile.frame / tile.fps; }, // frame i covers [i / fps, (i + 1) / fps)
+    set time(t) { seekFrame(t * tile.fps + 1e-6); },
+    get duration() { return total / tile.fps; },
+    get paused() { return !playing; },
+    play() {
+      if (playing) return;
+      if (tile.frame >= total - 1) tile.frame = 0; // like a video: play after the end starts over
+      playing = true; f0 = tile.frame; t0 = performance.now();
+      cancelAnimationFrame(raf); raf = requestAnimationFrame(stepLoop); onPlayState();
+    },
+    pause() { if (!playing) return; playing = false; cancelAnimationFrame(raf); onPlayState(); },
+    get rate() { return rate; },
+    set rate(r) { f0 = tile.frame; t0 = performance.now(); rate = Number(r) > 0 ? Number(r) : 1; rateSel.value = String(rate); },
+    rebase() { f0 = tile.frame; t0 = performance.now(); },
+  };
+
+  // ----- controls -----
+  const refreshTime = () => { timeEl.textContent = Frames.format(pb.time, pb.duration, tile.fps, layout.timeDisplay); };
+  tile.refreshTime = refreshTime;
+  tile.tick = () => {
+    if (!tile.scrubbing) {
+      const frac = total > 1 ? tile.frame / (total - 1) : 0;
+      seek.value = String(Math.round(frac * 10000));
+      seek.style.setProperty('--progress', (frac * 100).toFixed(2) + '%');
+    }
+    refreshTime();
+    if (!playing) prefetch();
+  };
+  tile.seekTo = (t) => { pb.time = clamp(t, 0, pb.duration); tile.tick(); broadcast(tile, 'seek'); };
+  tile.seekBy = (dt) => tile.seekTo(pb.time + dt);
+  tile.togglePlay = () => { playing ? pb.pause() : pb.play(); broadcast(tile, playing ? 'play' : 'pause'); };
+  tile.stepFrame = (dir) => { pb.pause(); broadcast(tile, 'pause'); seekFrame(tile.frame + dir); tile.tick(); broadcast(tile, 'seek'); };
+  playBtn.addEventListener('click', () => tile.togglePlay());
+  el.querySelector('.fstep-back').addEventListener('click', () => tile.stepFrame(-1));
+  el.querySelector('.fstep-fwd').addEventListener('click', () => tile.stepFrame(1));
+  el.querySelector('.back').addEventListener('click', (e) => tile.seekBy(e.shiftKey ? -30 : -5));
+  el.querySelector('.fwd').addEventListener('click', (e) => tile.seekBy(e.shiftKey ? 30 : 5));
+  for (const s of ['.play', '.fstep-back', '.fstep-fwd', '.back', '.fwd']) el.querySelector(s).addEventListener('dblclick', (e) => e.stopPropagation());
+  timeEl.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const modes = ['clock', 'frames', 'timecode'];
+    layout.timeDisplay = modes[(modes.indexOf(layout.timeDisplay) + 1) % modes.length];
+    for (const t of tiles) t.refreshTime && t.refreshTime();
+    renderTimeline();
+  });
+  const beginScrub = () => { tile.scrubbing = true; el.classList.add('scrubbing'); };
+  const endScrub = () => { tile.scrubbing = false; el.classList.remove('scrubbing'); };
+  seek.addEventListener('pointerdown', beginScrub);
+  seek.addEventListener('pointerup', endScrub);
+  seek.addEventListener('pointercancel', endScrub);
+  seek.addEventListener('input', () => {
+    const frac = Number(seek.value) / 10000;
+    seekFrame(Math.round(frac * (total - 1)));
+    seek.style.setProperty('--progress', (frac * 100).toFixed(2) + '%');
+    refreshTime();
+    broadcast(tile, 'seek');
+  });
+  rateSel.addEventListener('change', () => { pb.rate = Number(rateSel.value); broadcast(tile, 'rate', pb.rate); });
+  cv.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.suppressClick) tile.togglePlay(); });
+  cv.addEventListener('dblclick', () => { if (!cmp.el.hidden) return; toggleTileFullscreen(el); });
+  el.addEventListener('click', (e) => {
+    if (isBoard() || !e.shiftKey || e.target.closest('button, input, select, .bm-panel')) return;
+    setSelected(tile, !selection.has(tile));
+    selectionStatus();
+  });
+  const { renderMarkers } = attachBookmarks(tile, el, pb);
+  const loopBtn = el.querySelector('.loop');
+  loopBtn.addEventListener('click', () => setTileLoop(tile, !tile.loop));
+  loopBtn.addEventListener('dblclick', (e) => e.stopPropagation());
+  applyTileLoop(tile);
+  wireSettingsButton(tile);
+
+  el.addEventListener('pointerenter', () => { hoveredTile = tile; });
+  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; });
+  el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
+  wireFullscreenButton(el);
+  for (const h of el.querySelectorAll('.handle')) {
+    h.addEventListener('pointerdown', (e) => startResize(tile, h.dataset.corner, e));
+    h.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      if (isBoard() && tile.board) {
+        const entry = recordResize([tile]);
+        tile.board.h = layout.rowHeight; tile.board.w = layout.rowHeight * tile.aspect;
+        layoutTile(tile);
+        finishRects(entry);
+      } else fitAll();
+    });
+  }
+  attachTileDrag(tile);
+  tile.destroy = () => {
+    playing = false; cancelAnimationFrame(raf);
+    if (tile.cacheKey && !tiles.some((t) => t !== tile && t.cacheKey === tile.cacheKey)) window.api.cancelFrames(tile.cacheKey);
+    cache.dispose();
+  };
+
+  // start where the session left off
+  const wantTime = Number(state.currentTime) > 0 ? Number(state.currentTime) : 0;
+  tile.frame = clamp(Math.floor(wantTime * tile.fps + 1e-6), 0, total - 1);
+  onPlayState(); refreshTime(); renderMarkers(); draw();
+  if (state.paused === false) pb.play();
+  canvas.appendChild(frag);
+  if (isBoard() && !tile.board && at) placeOnBoard([tile], at);
+  updateChrome();
+  return tile;
+}
+
+// ---------- ⚙ tile settings (fps; EXR exposure and colour) ----------
+let tsEl = null;
+function closeTileSettings() { if (!tsEl) return; tsEl._btn.classList.remove('open'); tsEl.remove(); tsEl = null; }
+window.addEventListener('pointerdown', (e) => { if (tsEl && !tsEl.contains(e.target) && e.target !== tsEl._btn) closeTileSettings(); }, true);
+function wireSettingsButton(tile) {
+  const b = tile.el.querySelector('.settings'); if (!b) return;
+  b.addEventListener('click', (e) => { e.stopPropagation(); openTileSettings(tile, b); });
+  b.addEventListener('dblclick', (e) => e.stopPropagation());
+  refreshSettingsMark(tile);
+}
+// the ⚙ turns yellow when something differs from the default
+function refreshSettingsMark(tile) {
+  const b = tile.el.querySelector('.settings'); if (!b) return;
+  const custom = tile.type === 'sequence' ? (tile.fps !== 24 || tile.exposure !== 0 || tile.colour !== 'srgb') : !!tile.fpsOverride;
+  b.classList.toggle('custom', custom);
+}
+function openTileSettings(tile, btn) {
+  if (tsEl && tsEl._tile === tile) { closeTileSettings(); return; }
+  closeTileSettings();
+  const seq = tile.type === 'sequence';
+  const p = document.createElement('div');
+  p.className = 'tile-settings'; p._tile = tile; p._btn = btn;
+  const h = document.createElement('h4'); h.textContent = tileName(tile); h.title = tile.path; p.appendChild(h);
+  const row = (label, ...els) => { const l = document.createElement('label'); const s = document.createElement('span'); s.textContent = label; l.append(s, ...els); p.appendChild(l); return l; };
+  const note = (text) => { const n = document.createElement('div'); n.className = 'ts-note'; n.textContent = text; p.appendChild(n); return n; };
+  const fps = document.createElement('input');
+  fps.type = 'number'; fps.min = '1'; fps.max = '240'; fps.step = 'any';
+  if (seq) fps.value = String(tile.fps);
+  else { fps.value = tile.fpsOverride ? String(tile.fpsOverride) : ''; fps.placeholder = tile.fps ? String(Math.round(tile.fps * 1000) / 1000) : '24?'; }
+  row('Frame rate', fps);
+  fps.addEventListener('change', () => {
+    const v = Number(fps.value);
+    if (seq) { if (v > 0) tile.setFps(v); else fps.value = String(tile.fps); }
+    else { tile.fpsOverride = v > 0 ? clamp(v, 1, 240) : null; if (tile.refreshTime) tile.refreshTime(); renderTimeline(); refreshSettingsMark(tile); }
+  });
+  if (!seq) note(`Frame step and timecode only; playback speed is untouched. Empty = the file's own (${tile.fps ? Math.round(tile.fps * 1000) / 1000 + ' fps' : 'unknown, 24 assumed'}).`);
+  if (seq && Sequence.isExr(tile.seq)) {
+    const exp = document.createElement('input'); exp.type = 'range'; exp.min = '-10'; exp.max = '10'; exp.step = '0.5'; exp.value = String(tile.exposure);
+    const expN = document.createElement('input'); expN.type = 'number'; expN.min = '-10'; expN.max = '10'; expN.step = '0.5'; expN.value = String(tile.exposure);
+    row('Exposure', exp, expN);
+    const col = document.createElement('select');
+    for (const c of Sequence.COLOURS) { const o = document.createElement('option'); o.value = c; o.textContent = COLOUR_LABELS[c]; col.appendChild(o); }
+    col.value = tile.colour;
+    row('Colour', col);
+    note('Exposure is in stops, applied in linear light before the colour transform. Changing either re-decodes the frames in the background.');
+    let timer = null;
+    const apply = () => { clearTimeout(timer); timer = setTimeout(() => tile.setLook(Number(expN.value), col.value), 250); };
+    exp.addEventListener('input', () => { expN.value = exp.value; apply(); });
+    expN.addEventListener('change', () => { expN.value = String(clamp(Math.round(Number(expN.value) * 2) / 2, -10, 10)); exp.value = expN.value; apply(); });
+    col.addEventListener('change', apply);
+  }
+  if (seq && String(tile.seq.ext).toLowerCase() === 'dpx') note('Log DPX shows as stored (no log-to-linear conversion yet).');
+  if (seq && Sequence.needsDecode(tile.seq.ext)) {
+    const re = document.createElement('button'); re.textContent = 'Re-decode'; re.title = 'Only needed if decoding failed';
+    re.addEventListener('click', () => tile.redecode());
+    p.appendChild(re);
+  }
+  for (const x of p.querySelectorAll('input, select')) x.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeTileSettings(); e.stopPropagation(); } });
+  document.body.appendChild(p);
+  const r = btn.getBoundingClientRect(), pr = p.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight; // window.innerWidth/Height are shadowed by this file's own innerWidth()/innerHeight()
+  p.style.left = clamp(r.right - pr.width, 4, vw - pr.width - 4) + 'px';
+  p.style.top = (r.top - pr.height - 6 >= 4 ? r.top - pr.height - 6 : Math.min(r.bottom + 6, vh - pr.height - 4)) + 'px';
+  btn.classList.add('open');
+  tsEl = p;
+}
+
 /* DISABLED (Mark, 2026-09-10): no offline handling for web tiles; they just need a connection.
 // Offline web tiles retry when the connection comes back, and every 30 s.
 window.addEventListener('online', () => { for (const t of tiles) if (t.offline && t.reload) t.reload(); });
@@ -2134,13 +2540,48 @@ function clearAll() {
 
 function addVideos(paths, at = null) {
   const wasEmpty = tiles.length === 0;
-  // images become image tiles; everything else a video tile
-  const added = paths.map((p) => (Sources.kindOf(basename(p)) === 'image' ? addImageTile(p) : addVideo(p)));
+  // images become image tiles, a lone exr / tif / dpx a one-frame sequence; everything else a video tile
+  const added = paths.map((p) => {
+    const kind = Sources.kindOf(basename(p));
+    return kind === 'image' ? addImageTile(p) : kind === 'frame' ? addSequenceTile(Sources.parentDir(p), Sequence.single(basename(p))) : addVideo(p);
+  });
   if (isBoard()) placeOnBoard(added.filter((t) => !t.board), at);
   layoutTiles();
   if (wasEmpty && tiles.length) scheduleFit();
   markOnBoard();
   renderTimeline(); // "All videos" follows what's on the board
+}
+
+// Picker and drop: a picked frame that belongs to a run of frames asks whether to add the whole
+// sequence (once per run, however many of its frames were picked). No: png / jpg frames become
+// image tiles and an exr / tif / dpx frame a one-frame sequence.
+async function addPaths(paths, at = null) {
+  const plain = [], runs = [], asked = new Map();
+  for (const p of paths) {
+    const name = basename(p);
+    if (Sequence.isFrameExt(name)) {
+      const seq = await window.api.sequenceFor(p);
+      if (seq) {
+        const k = seq.dir + '|' + Sequence.label(seq);
+        if (!asked.has(k)) {
+          const yes = confirm(`${Sequence.label(seq)}\n\nAdd as a sequence of ${seq.count} frames?${seq.missing.length ? ` (${seq.missing.length} missing)` : ''}`);
+          asked.set(k, yes);
+          if (yes) runs.push(seq);
+        }
+        if (asked.get(k)) continue;
+      }
+    }
+    plain.push(p);
+  }
+  if (plain.length) addVideos(plain, at);
+  if (runs.length) {
+    const wasEmpty = tiles.length === 0;
+    const added = runs.map((s, n) => addSequenceTile(s.dir, s, {}, at ? { x: at.x + n * 24, y: at.y + n * 24 } : null));
+    if (isBoard()) placeOnBoard(added.filter((t) => !t.board));
+    layoutTiles();
+    if (wasEmpty) scheduleFit();
+    markOnBoard(); renderTimeline();
+  }
 }
 
 let toolsWarned = false; // one status message if ffmpeg/ffprobe are missing
@@ -2171,7 +2612,15 @@ function collectSession() {
       timelineHeight: layout.timelineHeight,
     },
     masterVolume,
-    videos: tiles.map((t) => (t.type === 'image' ? {
+    videos: tiles.map((t) => (t.type === 'sequence' ? {
+      // image sequence: folder + run description + its look; the decoded-frame cache is found again by key
+      type: 'sequence', dir: t.dir, path: t.path,
+      seq: { name: t.seq.name, sep: t.seq.sep, pad: t.seq.pad, ext: t.seq.ext, start: t.seq.start, end: t.seq.end, count: t.seq.count, missing: t.seq.missing, single: !!t.seq.single, fps: t.fps, exposure: t.exposure, colour: t.colour },
+      color: t.hue, loop: !!t.loop, currentTime: t.pb.time, volume: 0, muted: false, playbackRate: t.pb.rate, paused: t.pb.paused, aspect: t.aspect,
+      board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
+      bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
+      sync: t.sync ? { start: t.sync.start } : null,
+    } : t.type === 'image' ? {
       type: 'image', path: t.path, aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: [], sync: null, volume: 0, muted: false, playbackRate: 1, paused: true, currentTime: 0,
@@ -2189,6 +2638,7 @@ function collectSession() {
       path: t.path,
       color: t.hue,
       loop: !!t.loop,
+      fpsOverride: t.fpsOverride || null,
       currentTime: isFinite(t.video.currentTime) ? t.video.currentTime : 0,
       volume: t.volume,
       muted: t.group ? !!t.ownMuted : t.video.muted, // own mute, not the group's
@@ -2235,6 +2685,13 @@ async function applySession(data) {
     if (v.type === 'youtube' || v.type === 'twitch') {
       const parsed = typeof v.url === 'string' ? WebUrl.parse(v.url) : null;
       if (parsed && parsed.kind !== 'playlist') byIndex.set(i, addWebTile(v.url, parsed, v));
+      continue;
+    }
+    if (v.type === 'sequence') {
+      const seq = v.seq;
+      if (typeof v.dir !== 'string' || !seq || typeof seq.name !== 'string') continue;
+      if (!(await window.api.fileExists(joinPath(v.dir, Sequence.framePath(seq, seq.start))))) missing++;
+      byIndex.set(i, addSequenceTile(v.dir, seq, v));
       continue;
     }
     if (typeof v.path !== 'string') continue;
@@ -2308,7 +2765,7 @@ window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) 
 document.getElementById('add-local').addEventListener('click', async () => {
   menuList.hidden = true;
   const paths = await window.api.pickVideos();
-  addVideos(paths);
+  await addPaths(paths);
   if (paths.length) sidebar.addFolder(Sources.parentDir(paths[0])); // becomes the sidebar's Recent row
 });
 document.getElementById('add-url').addEventListener('click', () => { menuList.hidden = true; urlBar.hidden = false; urlInput.focus(); });
@@ -2553,22 +3010,34 @@ const thumbObserver = new IntersectionObserver((entries) => {
     const it = en.target; thumbObserver.unobserve(it);
     const img = it.querySelector('.sb-thumb');
     if (it.dataset.thumbUrl) { img.src = it.dataset.thumbUrl; continue; }
-    window.api.thumb(it.dataset.path).then((p) => { if (p) img.src = window.api.videoUrl(p); else img.classList.add('generic'); });
+    window.api.thumb(it.dataset.thumbPath || it.dataset.path).then((p) => { if (p) img.src = window.api.videoUrl(p); else img.classList.add('generic'); });
   }
 }, { root: null, rootMargin: '200px' });
 
 function buildItem(data) {
   // data: { type:'file', path, name, kind } | { type:'youtube', url, id, title, duration, thumbUrl }
+  // | { type:'sequence', dir, seq, name } (a run of frames) ; files of kind 'frame' are lone exr / tif / dpx frames
   const it = document.getElementById('sb-item-template').content.firstElementChild.cloneNode(true);
-  it.dataset.type = data.type === 'file' && data.kind === 'image' ? 'image' : data.type;
-  it.dataset.path = data.type === 'file' ? data.path : data.url;
+  const isSeq = data.type === 'sequence';
+  it.dataset.type = data.type === 'file' && (data.kind === 'image' || data.kind === 'frame') ? data.kind : data.type;
+  it.dataset.path = isSeq ? joinPath(data.dir, Sequence.pattern(data.seq)) : data.type === 'file' ? data.path : data.url;
+  if (isSeq) {
+    it.dataset.seq = JSON.stringify({ dir: data.dir, seq: data.seq });
+    // thumbnail from the middle frame (the nearest one that exists)
+    let mid = Math.round((data.seq.start + data.seq.end) / 2);
+    const gone = new Set(data.seq.missing); while (gone.has(mid) && mid > data.seq.start) mid--;
+    it.dataset.thumbPath = joinPath(data.dir, Sequence.framePath(data.seq, mid));
+    it.dataset.reveal = joinPath(data.dir, Sequence.framePath(data.seq, data.seq.start));
+  }
   if (data.thumbUrl) it.dataset.thumbUrl = data.thumbUrl;
-  if (data.type === 'file') it.dataset.name = data.name; else it.dataset.title = data.title;
+  if (data.type === 'file' || isSeq) it.dataset.name = data.name; else it.dataset.title = data.title;
   const nameEl = it.querySelector('.sb-item-name');
-  nameEl.textContent = data.type === 'file' ? data.name : data.title;
-  if (it.dataset.type === 'image') { const k = document.createElement('span'); k.className = 'sb-kind'; k.textContent = 'IMG'; nameEl.prepend(k); }
-  it.title = it.dataset.path + (data.type === 'file' ? '\nRight-click: ' + REVEAL_LABEL : '\nRight-click: copy URL');
-  it.querySelector('.sb-dur').textContent = data.duration ? fmtTime(data.duration) : '';
+  nameEl.textContent = data.type === 'file' || isSeq ? data.name : data.title;
+  const tag = { image: 'IMG', frame: 'IMG', sequence: 'SEQ' }[it.dataset.type];
+  if (tag) { const k = document.createElement('span'); k.className = 'sb-kind'; k.textContent = tag; nameEl.prepend(k); }
+  it.title = it.dataset.path + (isSeq ? `\n${data.seq.count} frames${data.seq.missing.length ? `, ${data.seq.missing.length} missing` : ''}` : '')
+    + (data.type === 'file' || isSeq ? '\nRight-click: ' + REVEAL_LABEL : '\nRight-click: copy URL');
+  it.querySelector('.sb-dur').textContent = isSeq ? `${data.seq.count} fr${data.seq.missing.length ? ` · ${data.seq.missing.length} missing` : ''}` : data.duration ? fmtTime(data.duration) : '';
   it.addEventListener('click', (e) => {
     if (modKey(e)) { it.classList.toggle('selected'); it.classList.contains('selected') ? sbSelected.add(it) : sbSelected.delete(it); updateAddSelected(); return; }
     if (e.shiftKey && sbSelected.size) {
@@ -2583,7 +3052,11 @@ function buildItem(data) {
   });
   it.addEventListener('dblclick', () => addItemsToBoard([itemPayload(it)], null));
   // right-click: local rows offer Show in Explorer / Reveal in Finder; YouTube / Twitch rows copy their URL
-  it.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); sourceContext(e, it.dataset.type, it.dataset.path); });
+  it.addEventListener('contextmenu', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    if (isSeq) sourceContext(e, 'file', it.dataset.reveal); // a sequence reveals its first frame
+    else sourceContext(e, it.dataset.type === 'frame' ? 'file' : it.dataset.type, it.dataset.path);
+  });
   it.addEventListener('dragstart', (e) => {
     if (!sbSelected.has(it)) { clearSbSelection(); it.classList.add('selected'); sbSelected.add(it); updateAddSelected(); }
     e.dataTransfer.setData('application/x-ozy-items', JSON.stringify([...sbSelected].map(itemPayload)));
@@ -2606,9 +3079,9 @@ function showRowMenu(e, items) {
     ctxEl.appendChild(b);
   }
   document.body.appendChild(ctxEl);
-  const r = ctxEl.getBoundingClientRect(); // keep it on screen
-  ctxEl.style.left = Math.min(e.clientX, window.innerWidth - r.width - 4) + 'px';
-  ctxEl.style.top = Math.min(e.clientY, window.innerHeight - r.height - 4) + 'px';
+  const r = ctxEl.getBoundingClientRect(); // keep it on screen (window.innerWidth/Height are shadowed by innerWidth()/innerHeight() above)
+  ctxEl.style.left = Math.min(e.clientX, document.documentElement.clientWidth - r.width - 4) + 'px';
+  ctxEl.style.top = Math.min(e.clientY, document.documentElement.clientHeight - r.height - 4) + 'px';
 }
 window.addEventListener('pointerdown', (e) => { if (ctxEl && !ctxEl.contains(e.target)) closeRowMenu(); }, true);
 // Shared by sidebar rows and tile names. type: 'file' | 'image' | 'youtube' | 'twitch'; where: path or URL.
@@ -2622,16 +3095,21 @@ function sourceContext(e, type, where) {
 }
 
 function itemPayload(it) {
-  if (it.dataset.type === 'file' || it.dataset.type === 'image') return { type: it.dataset.type, path: it.dataset.path };
+  if (it.dataset.type === 'sequence') return { type: 'sequence', ...JSON.parse(it.dataset.seq) };
+  if (it.dataset.type === 'file' || it.dataset.type === 'image' || it.dataset.type === 'frame') return { type: it.dataset.type, path: it.dataset.path };
   return { type: 'youtube', url: it.dataset.path, title: it.dataset.title };
 }
-// file rows become file tiles, image rows image tiles (addVideos routes by extension),
-// playlist rows YouTube tiles (cascaded 24 px when dropped at a point)
+// file rows become file tiles, image rows image tiles, lone frames one-frame sequences (addVideos
+// routes by extension), SEQ rows sequence tiles, playlist rows YouTube tiles (cascaded 24 px when
+// dropped at a point)
 function addItemsToBoard(items, at) {
-  const files = items.filter((i) => i.type === 'file' || i.type === 'image').map((i) => i.path);
+  const files = items.filter((i) => i.type === 'file' || i.type === 'image' || i.type === 'frame').map((i) => i.path);
   if (files.length) addVideos(files, at);
   const wasEmpty = tiles.length === 0;
   const web = [];
+  items.filter((i) => i.type === 'sequence').forEach((i, n) => {
+    web.push(addSequenceTile(i.dir, i.seq, {}, at ? { x: at.x + n * 24, y: at.y + n * 24 } : null));
+  });
   items.filter((i) => i.type === 'youtube').forEach((i, n) => {
     const parsed = WebUrl.parse(i.url);
     if (!parsed) return;
@@ -2657,13 +3135,13 @@ function buildSource({ id, name, count, missing, items, onRefresh, onRemove, onP
   expand.addEventListener('click', () => { itemsEl.hidden = !itemsEl.hidden; expand.textContent = itemsEl.hidden ? '▸' : '▾'; });
   // Add all = every video; "+ images" = everything, images included (only shown when the source has images)
   const addAll = (withImages) => {
-    const payload = [...itemsEl.querySelectorAll('.sb-item')].map(itemPayload).filter((p) => withImages || p.type !== 'image');
+    const payload = [...itemsEl.querySelectorAll('.sb-item')].map(itemPayload).filter((p) => withImages || (p.type !== 'image' && p.type !== 'frame'));
     if (payload.length > 30 && !confirm(`Add ${payload.length} videos?`)) return;
     addItemsToBoard(payload, null);
   };
   src.querySelector('.sb-addall').addEventListener('click', () => addAll(false));
   const addImgBtn = src.querySelector('.sb-addall-img');
-  if (items.some((d) => d.kind === 'image')) addImgBtn.addEventListener('click', () => addAll(true));
+  if (items.some((d) => d.kind === 'image' || d.kind === 'frame')) addImgBtn.addEventListener('click', () => addAll(true));
   else addImgBtn.remove();
   // ⋯ reveals Refresh / Pin / Remove under the row (Electron has no window.prompt)
   const actions = src.querySelector('.sb-actions');
@@ -2681,7 +3159,10 @@ async function renderFolders() {
   const rows = [];
   for (const f of settings.sources.folders) {
     const r = await window.api.listFolder(f.path);
-    const items = r.files.map((x) => ({ type: 'file', path: x.path, name: x.name, kind: x.kind }));
+    // runs of frames are one SEQ row each, sorted in among the files by name
+    const items = [...r.files.map((x) => ({ type: 'file', path: x.path, name: x.name, kind: x.kind })),
+      ...(r.sequences || []).map((s) => ({ type: 'sequence', dir: s.dir, seq: s, name: Sequence.label(s) }))]
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
     const row = buildSource({
       id: f.path, name: (f.recent ? 'Recent: ' : '') + basename(f.path), count: items.length, missing: !r.ok, items,
       pinLabel: f.pinned ? 'Unpin' : 'Pin',
@@ -2732,6 +3213,7 @@ window.addEventListener('keydown', (e) => {
   const ctrl = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
 
+  if (e.key === 'Escape' && tsEl) { e.preventDefault(); closeTileSettings(); return; } // the ⚙ popover first
   // Esc leaves a fullscreen tile (Electron doesn't do this for page fullscreen by itself)
   if (e.key === 'Escape' && document.fullscreenElement) { e.preventDefault(); document.exitFullscreen().catch(() => {}); return; }
 
@@ -2843,7 +3325,7 @@ window.addEventListener('drop', async (e) => {
   const paths = files.map((f) => window.api.getPathForFile(f)).filter(Boolean);
   const sessions = paths.filter((p) => p.toLowerCase().endsWith('.mvp'));
   if (sessions.length) { await openSession(sessions[0]); return; }
-  addVideos(paths, at);
+  await addPaths(paths, at);
   if (paths.length) sidebar.addFolder(Sources.parentDir(paths[0]));
 });
 
