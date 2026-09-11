@@ -13,6 +13,7 @@
     <button id="btn-open" title="Open a saved .mvp session (Ctrl+O)">Open session</button>
     <button id="btn-save" title="Save session (Ctrl+S)">Save</button>
     <button id="btn-save-as" title="Save session to a new file (Ctrl+Shift+S)">Save as…</button>
+    <button id="btn-cache" title="Playable copies made by ffmpeg live in a cache folder">Cache</button>
     <span class="sep"></span>
     <button id="btn-play-all" title="Play every video (Space)">Play all</button>
     <button id="btn-pause-all" title="Pause every video (Space)">Pause all</button>
@@ -96,7 +97,14 @@
           <div class="bm-panel hidden"></div>
         </div>
       </div>
-      <div class="error hidden"></div>
+      <div class="error hidden">
+        <div class="error-text"></div>
+        <div class="error-actions">
+          <button class="make-proxy">Make playable</button>
+          <button class="cancel-proxy hidden">Cancel</button>
+        </div>
+        <div class="proxy-bar hidden"><div class="proxy-fill"></div></div>
+      </div>
       <div class="handle tl" data-corner="tl"></div>
       <div class="handle tr" data-corner="tr"></div>
       <div class="handle bl" data-corner="bl"></div>
@@ -104,6 +112,7 @@
     </div>
   </template>
 
+  <script src="lib/codecs.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

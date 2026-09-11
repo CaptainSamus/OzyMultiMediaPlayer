@@ -564,6 +564,14 @@ body.resizing .tile.resizing { pointer-events: auto; }
   word-break: break-all;
 }
 .tile .error.hidden { display: none; }
+.tile .error { pointer-events: auto; flex-direction: column; gap: 10px; }
+.tile .error-actions { display: flex; gap: 8px; }
+.tile .error-actions button { background: var(--accent); border: none; color: #fff; border-radius: 4px; padding: 5px 10px; cursor: pointer; font: inherit; }
+.tile .error-actions .cancel-proxy { background: rgba(255,255,255,0.15); }
+.tile .error-actions .hidden { display: none; }
+.tile .proxy-bar { width: 70%; height: 6px; border-radius: 3px; background: rgba(255,255,255,0.2); overflow: hidden; }
+.tile .proxy-bar.hidden { display: none; }
+.tile .proxy-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.2s linear; }
 
 .tile.paused-badge::after {
   content: "❚❚";

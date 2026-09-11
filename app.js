@@ -722,6 +722,7 @@ function addVideo(filePath, state = {}) {
     tile.board = { x: Number(sb.x), y: Number(sb.y), w: Number(sb.w), h: Number(sb.h) };
   }
   tiles.push(tile);
+  tile.info = null; tile.proxy = null; tile.fps = null;
 
   nameEl.textContent = basename(filePath);
   nameEl.title = filePath;
@@ -870,7 +871,49 @@ function addVideo(filePath, state = {}) {
   el.addEventListener('pointerenter', () => { hoveredTile = tile; });
   el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; togglePanel(false); });
 
-  video.src = window.api.videoUrl(filePath);
+  const errorText = errorEl.querySelector('.error-text');
+  const makeBtn = errorEl.querySelector('.make-proxy');
+  const cancelBtn = errorEl.querySelector('.cancel-proxy');
+  const bar = errorEl.querySelector('.proxy-bar');
+  const fill = errorEl.querySelector('.proxy-fill');
+
+  const showError = (msg, canProxy) => {
+    errorText.textContent = `${msg}\n${filePath}`;
+    makeBtn.classList.toggle('hidden', !canProxy);
+    errorEl.classList.remove('hidden');
+  };
+  tile.setSource = (url) => { errorEl.classList.add('hidden'); video.src = url; };
+
+  const startProxy = async () => {
+    makeBtn.classList.add('hidden'); cancelBtn.classList.remove('hidden'); bar.classList.remove('hidden');
+    errorText.textContent = 'Making a playable copy…';
+    try {
+      const { proxy } = await window.api.makeProxy(filePath);
+      tile.proxy = proxy;
+      tile.setSource(window.api.videoUrl(proxy));
+    } catch (e) {
+      // ipcRenderer.invoke wraps main-process errors; show only ffmpeg's own message
+      showError(String(e.message).replace(/^Error invoking remote method '[^']*': (Error: )?/, ''), true);
+    } finally {
+      cancelBtn.classList.add('hidden'); bar.classList.add('hidden'); fill.style.width = '0';
+    }
+  };
+  tile.onProxyProgress = (frac) => { fill.style.width = Math.round(frac * 100) + '%'; };
+  makeBtn.addEventListener('click', startProxy);
+  cancelBtn.addEventListener('click', () => window.api.cancelProxy(filePath));
+  for (const b of [makeBtn, cancelBtn]) b.addEventListener('pointerdown', (e) => e.stopPropagation());
+
+  (async () => {
+    const info = await window.api.probe(filePath);
+    if (!tiles.includes(tile)) return; // removed while probing
+    tile.info = info; tile.fps = info.fps || null;
+    if (!info.available && !toolsWarned) { toolsWarned = true; setStatus('ffmpeg / ffprobe not found – Make playable and frame rates are unavailable', 8000); }
+    if (info.proxy) { tile.proxy = info.proxy; tile.setSource(window.api.videoUrl(info.proxy)); return; }
+    // known codec with no mime (prores, mpeg4, ...) can't play; probe failed (no codec) -> let Chromium try
+    const playable = info.mime ? video.canPlayType(info.mime) !== '' : !info.codec;
+    if (!playable && info.available) showError(`${info.codec || 'This codec'} can't play here.`, true);
+    else tile.setSource(window.api.videoUrl(filePath));
+  })();
 
   video.addEventListener('loadedmetadata', () => {
     if (video.videoWidth > 0 && video.videoHeight > 0) {
@@ -898,11 +941,8 @@ function addVideo(filePath, state = {}) {
   video.addEventListener('volumechange', updateMuteBtn);
   video.addEventListener('error', () => {
     const code = video.error ? video.error.code : 0;
-    let why = 'Cannot play this file.';
-    if (code === 4) why = 'File missing, or codec not supported.\n(Chromium plays H.264/MP4, WebM, and Ogg. HEVC/ProRes need transcoding.)';
-    else if (code === 3) why = 'Decoding error – the file may be corrupt or use an unsupported codec.';
-    errorEl.textContent = `${why}\n${filePath}`;
-    errorEl.classList.remove('hidden');
+    const why = code === 3 ? 'Decoding error – corrupt file or unsupported codec.' : 'Cannot play this file.';
+    showError(why, !!(tile.info && tile.info.available) && !tile.proxy);
   });
 
   // click on picture = play/pause; double-click = fullscreen this tile
@@ -1037,6 +1077,9 @@ function addVideos(paths, at = null) {
   if (wasEmpty && tiles.length) scheduleFit();
 }
 
+let toolsWarned = false; // one status message if ffmpeg/ffprobe are missing
+window.api.onProxyProgress((p, frac) => { const t = tiles.find((x) => x.path === p); if (t && t.onProxyProgress) t.onProxyProgress(frac); });
+
 // smooth seek-bar updates for every tile (timeupdate alone is too coarse)
 (function loop() {
   for (const t of tiles) t.tick && t.tick();
@@ -1141,6 +1184,12 @@ document.getElementById('btn-add').addEventListener('click', async () => {
 document.getElementById('btn-open').addEventListener('click', () => openSession());
 document.getElementById('btn-save').addEventListener('click', saveSession);
 document.getElementById('btn-save-as').addEventListener('click', saveSessionAs);
+document.getElementById('btn-cache').addEventListener('click', async () => {
+  const { bytes, files } = await window.api.cacheInfo();
+  const mb = (bytes / 1048576).toFixed(0);
+  if (!files) { setStatus('Cache is empty'); return; }
+  if (confirm(`${files} playable copies use ${mb} MB. Clear the cache?`)) { await window.api.clearCache(); setStatus('Cache cleared'); }
+});
 document.getElementById('btn-play-all').addEventListener('click', () => tiles.forEach((t) => t.video.play().catch(() => {})));
 document.getElementById('btn-pause-all').addEventListener('click', () => tiles.forEach((t) => t.video.pause()));
 document.getElementById('btn-mute-all').addEventListener('click', () => tiles.forEach((t) => { t.video.muted = true; }));
