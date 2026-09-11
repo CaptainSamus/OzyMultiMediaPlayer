@@ -161,7 +161,11 @@ itself when you click **Update yt-dlp** in the sidebar.
     (double-click a corner to reset its size). Middle-mouse or `Alt`-drag
     pans, the wheel scrolls, `Ctrl`+wheel zooms at the cursor, and the
     **✋ Pan** tool (`H`) makes plain left-drag pan too. **Fit all** frames
-    everything; **Tidy** lines tiles up in rows keeping their sizes.
+    everything. **Tidy ▾** has two arrangements: **Fit to view** makes every
+    tile the same height, as big as fits in the current view, in reading
+    order; **Grid** keeps each tile's size and packs them edge to edge into a
+    rough square (Linked spaces them out again on the next drag). `Ctrl+Z`
+    undoes either.
   - **Lasso.** Left-drag on empty board to draw a rectangle; everything it
     touches is selected. `Shift`-click adds or removes one tile, `Ctrl+A`
     selects all, `Esc` clears. Drag any selected tile and they all move.

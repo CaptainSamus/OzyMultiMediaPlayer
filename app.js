@@ -2139,7 +2139,36 @@ document.getElementById('btn-unmute-all').addEventListener('click', () => {
   renderGroupBar();
 });
 document.getElementById('btn-fit').addEventListener('click', fitAll);
-document.getElementById('btn-tidy').addEventListener('click', tidyBoard);
+// DISABLED (Mark, 2026-09-11): old Tidy wrapped at the tiles' own width and collapsed into 2 columns; replaced by the Tidy menu
+// document.getElementById('btn-tidy').addEventListener('click', tidyBoard);
+
+// ---------- Tidy menu (board) ----------
+function boardTilesInOrder() { return tiles.filter((t) => t.board).sort((a, b) => (a.board.y - b.board.y) || (a.board.x - b.board.x)); }
+// Fit to view: every tile the same height, the largest that flow-wraps inside the current view (undo = resize).
+function tidyFitToView() {
+  const list = boardTilesInOrder(); if (!list.length) return;
+  const entry = recordResize(list);
+  const r = gridRect(); const W = (r.width - 2 * GAP) / board.zoom, H = (r.height - 2 * GAP) / board.zoom;
+  const origin = toCanvas(r.left + GAP, r.top + GAP);
+  const { rects } = Arrange.fitToView(list.map((t) => ({ aspect: t.aspect })), W, H, GAP);
+  list.forEach((t, i) => { t.board = { x: origin.x + rects[i].x, y: origin.y + rects[i].y, w: rects[i].w, h: rects[i].h }; layoutTile(t); });
+  finishRects(entry); setStatus('Arranged to fit the view');
+}
+// Grid: sizes kept, ceil(sqrt(n)) columns edge to edge, then frame them (undo = move).
+function tidyGrid() {
+  const list = boardTilesInOrder(); if (!list.length) return;
+  const entry = recordMove(list);
+  const bb = boardBounds(list);
+  const rects = Arrange.grid(list.map((t) => ({ w: t.board.w, h: t.board.h })), 0);
+  list.forEach((t, i) => { t.board.x = bb.minX + rects[i].x; t.board.y = bb.minY + rects[i].y; layoutTile(t); });
+  finishRects(entry); fitBoard(); setStatus('Packed into a grid');
+}
+const tidyMenu = document.getElementById('tidy-menu');
+const tidyList = tidyMenu.querySelector('.menu-list');
+document.getElementById('btn-tidy-menu').addEventListener('click', (e) => { e.stopPropagation(); tidyList.hidden = !tidyList.hidden; });
+window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !tidyMenu.contains(e.target)) tidyList.hidden = true; });
+document.getElementById('tidy-fit').addEventListener('click', () => { tidyList.hidden = true; tidyFitToView(); });
+document.getElementById('tidy-grid').addEventListener('click', () => { tidyList.hidden = true; tidyGrid(); });
 document.getElementById('btn-link').addEventListener('click', () => setLinked(!board.linked));
 document.getElementById('btn-hand').addEventListener('click', () => setHand(!board.hand));
 

@@ -649,7 +649,8 @@ body.resizing .tile.resizing { pointer-events: auto; }
 .menu-list[hidden] { display: none; }
 #toolbar .menu-list button { text-align: left; border: none; background: transparent; display: flex; justify-content: space-between; gap: 12px; }
 #toolbar .menu-list button:hover { background: #35353c; }
-.menu-list kbd { color: var(--muted); font: inherit; font-size: 11px; }
+.menu-list kbd, .menu-list small { color: var(--muted); font: inherit; font-size: 11px; }
+#tidy-menu .menu-list { min-width: 250px; }
 #url-bar { display: flex; gap: 6px; flex: 1 1 100%; }
 #url-bar[hidden] { display: none; }
 #url-input { flex: 1 1 auto; background: var(--bg); color: var(--text); border: 1px solid #333338; border-radius: 6px; padding: 6px 10px; font: inherit; }
