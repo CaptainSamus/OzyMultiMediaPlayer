@@ -94,13 +94,21 @@ const isBoard = () => layout.mode === 'board';
 // ---------- volume ----------
 
 function applyTileVolume(tile) {
-  tile.video.volume = clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1);
+  const v = clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1);
+  if (tile.video) tile.video.volume = v;
+  else if (tile.yt) tile.yt.volume(v); // Twitch embeds expose no volume control
 }
 // A tile's own mute is remembered separately so a group mute can be undone.
 function setOwnMuted(tile, m) {
   tile.ownMuted = !!m;
-  tile.video.muted = tile.ownMuted || !!(tile.group && tile.group.muted);
+  const muted = tile.ownMuted || !!(tile.group && tile.group.muted);
+  if (tile.video) tile.video.muted = muted;
+  else if (tile.yt) { muted ? tile.yt.mute() : tile.yt.unmute(); if (tile.refreshMute) tile.refreshMute(); }
 }
+// Play state across local <video> tiles and YouTube tiles (Twitch has no API: skipped).
+function playTile(t) { if (t.video) t.video.play().catch(() => {}); else if (t.yt) t.yt.play(); }
+function pauseTile(t) { if (t.video) t.video.pause(); else if (t.yt) t.yt.pause(); }
+function isPlaying(t) { return t.video ? !t.video.paused : !!(t.yt && !t.yt.paused); }
 
 function setMasterVolume(v, { updateSlider = true } = {}) {
   masterVolume = clamp(Number(v), 0, 1);
@@ -280,7 +288,7 @@ function createGroup(list, opts = {}) {
 // back to the tile's own mute and volume once it leaves its group
 function releaseTile(t) {
   t.group = null; t.sync = null; paintGroup(t);
-  if (t.video) { setOwnMuted(t, t.ownMuted); applyTileVolume(t); }
+  setOwnMuted(t, t.ownMuted); applyTileVolume(t);
 }
 function removeFromGroup(g, t) {
   g.members.delete(t); releaseTile(t);
@@ -295,9 +303,9 @@ function dissolveGroup(g) {
 }
 function applyGroupAudio(g) {
   for (const t of g.members) {
+    setOwnMuted(t, t.ownMuted); // web tiles join groups for mute / volume (YouTube only) and Sticky
+    applyTileVolume(t);
     if (t.video) {
-      setOwnMuted(t, t.ownMuted);
-      applyTileVolume(t);
       t.video.playbackRate = g.rate;
       t.el.querySelector('.rate').value = String(g.rate);
     }
@@ -322,7 +330,7 @@ function renderGroupBar() {
   const g = active;
   gbQ('.gb-swatch').style.background = Groups.PALETTE[g.color];
   if (document.activeElement !== gbQ('.gb-name')) gbQ('.gb-name').value = g.name;
-  const anyPlaying = [...g.members].some((t) => t.video && !t.video.paused);
+  const anyPlaying = [...g.members].some(isPlaying);
   gbQ('.gb-play').textContent = anyPlaying ? '❚❚' : '▶';
   gbQ('.gb-mute').textContent = g.muted ? '🔇' : '🔊';
   gbQ('.gb-vol').value = String(Math.round(g.volume * 100));
@@ -371,8 +379,10 @@ function seekGroup(g, gt) {
 }
 function playPauseGroup(g) {
   const ms = memberModel(g);
-  const anyPlaying = ms.some((m) => !m.tile.video.paused);
-  if (anyPlaying) { for (const m of ms) m.tile.video.pause(); return; }
+  const web = [...g.members].filter((t) => !t.video && t.yt); // YouTube members play/pause with the group, never synced
+  const anyPlaying = ms.some((m) => !m.tile.video.paused) || web.some(isPlaying);
+  if (anyPlaying) { for (const m of ms) m.tile.video.pause(); for (const t of web) pauseTile(t); renderGroupBar(); return; }
+  for (const t of web) playTile(t);
   if (g.sync) {
     const end = Groups.end(ms);
     if (groupTimeOf(g) >= end - 0.05) seekGroup(g, g.loop === 'range' && g.range ? g.range.in : 0); // Loop Off: play after the end restarts
@@ -382,7 +392,7 @@ function playPauseGroup(g) {
   renderGroupBar();
 }
 function toggleGroupFromSelection() {
-  const sel = [...selection].filter((t) => t.video);
+  const sel = [...selection]; // web tiles may join for Sticky / mute / volume; Sync and the timeline skip them
   if (sel.length < 2) { setStatus('Select at least two videos to group (Shift-click, or lasso on the board)'); return; }
   createGroup(sel);
   setStatus(`${sel.length} videos grouped`);
@@ -1635,14 +1645,208 @@ function removeTile(tile, { record = true } = {}) {
   if (tile.group) removeFromGroup(tile.group, tile);
   selection.delete(tile);
   syncActiveFromSelection();
-  try {
-    tile.video.pause();
-    tile.video.removeAttribute('src');
-    tile.video.load();
-  } catch {}
+  if (tile.video) {
+    try {
+      tile.video.pause();
+      tile.video.removeAttribute('src');
+      tile.video.load();
+    } catch {}
+  }
+  if (tile.destroy) tile.destroy();
   tile.el.remove();
   updateChrome();
 }
+
+// ---------- web tiles (YouTube / Twitch) ----------
+const webTileTemplate = document.getElementById('web-tile-template');
+// Must match the page's host for Twitch's frame-ancestors check; main says 127.0.0.1.
+let twitchParent = location.hostname;
+window.api.parent().then((p) => { if (p) twitchParent = p; });
+
+// Minimal YouTube iframe-API client over postMessage (no external script needed).
+function ytController(iframe) {
+  const msg = (o) => iframe.contentWindow && iframe.contentWindow.postMessage(JSON.stringify({ ...o, id: 1, channel: 'widget' }), '*');
+  const post = (func, args = []) => msg({ event: 'command', func, args });
+  const st = { ready: false, state: -1, time: 0, duration: 0, muted: false, volume: 100 };
+  const listeners = new Set();
+  let hello = null;
+  const onMsg = (e) => {
+    if (e.source !== iframe.contentWindow) return;
+    let d; try { d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data; } catch { return; }
+    if (!d || typeof d !== 'object') return;
+    if (d.event === 'onReady') { st.ready = true; clearInterval(hello); post('addEventListener', ['onStateChange']); }
+    if (d.event === 'infoDelivery' && d.info) {
+      if (!st.ready) { st.ready = true; clearInterval(hello); }
+      if ('currentTime' in d.info) st.time = d.info.currentTime;
+      if ('duration' in d.info) st.duration = d.info.duration;
+      if ('playerState' in d.info) st.state = d.info.playerState;
+      if ('muted' in d.info) st.muted = d.info.muted;
+      if ('volume' in d.info) st.volume = d.info.volume;
+    }
+    if (d.event === 'onStateChange') st.state = d.info;
+    for (const l of listeners) l(st, d.event);
+  };
+  window.addEventListener('message', onMsg);
+  // keep saying hello until the player answers (it ignores messages sent before it has loaded)
+  const listen = () => { clearInterval(hello); let n = 0; hello = setInterval(() => { msg({ event: 'listening' }); if (++n > 40) clearInterval(hello); }, 250); };
+  iframe.addEventListener('load', listen);
+  return {
+    st, onChange: (l) => listeners.add(l),
+    play: () => post('playVideo'), pause: () => post('pauseVideo'),
+    seek: (t) => post('seekTo', [t, true]), mute: () => post('mute'), unmute: () => post('unMute'),
+    volume: (v) => post('setVolume', [Math.round(v * 100)]), rate: (r) => post('setPlaybackRate', [r]),
+    get paused() { return st.state !== 1 && st.state !== 3; }, // 1 playing, 3 buffering
+    destroy: () => { clearInterval(hello); window.removeEventListener('message', onMsg); },
+  };
+}
+
+// state: a session record ({ currentTime, volume, muted, paused, aspect, board, title }); at: board drop point.
+function addWebTile(url, parsed, state = {}, at = null) {
+  const frag = webTileTemplate.content.cloneNode(true);
+  const el = frag.querySelector('.tile');
+  const iframe = el.querySelector('iframe');
+  const nameEl = el.querySelector('.name');
+  const seek = el.querySelector('.seek');
+  const playBtn = el.querySelector('.play');
+  const timeEl = el.querySelector('.time');
+  const muteBtn = el.querySelector('.mute');
+  const errorEl = el.querySelector('.error');
+  const errorText = el.querySelector('.error-text');
+  const retryBtn = el.querySelector('.retry');
+  el.classList.add(parsed.type, parsed.kind);
+
+  const tile = {
+    path: url, url, type: parsed.type, kind: parsed.kind, el, video: null, seek, time: timeEl, scrubbing: false,
+    volume: clamp(Number(state.volume ?? DEFAULT_VIDEO_VOLUME), 0, 1),
+    aspect: Number(state.aspect) > 0 ? Number(state.aspect) : (parsed.kind === 'short' ? 9 / 16 : 16 / 9),
+    board: null, suppressClick: false, bookmarks: [], info: null, proxy: null, fps: null,
+    group: null, sync: null, ownMuted: !!state.muted,
+    title: typeof state.title === 'string' && state.title ? state.title : WebUrl.label(parsed),
+  };
+  const sb = state.board;
+  if (sb && isFinite(sb.x) && isFinite(sb.y) && sb.w > 0 && sb.h > 0) tile.board = { x: Number(sb.x), y: Number(sb.y), w: Number(sb.w), h: Number(sb.h) };
+  tiles.push(tile);
+  nameEl.textContent = tile.title;
+  nameEl.title = url;
+
+  // ----- loading -----
+  // Web tiles need a connection; there is no offline state. A YouTube embed that hasn't
+  // reported ready after 10 s shows "Could not load" + Retry over its cached thumbnail.
+  // YouTube gets our origin so its postMessage events reach this page.
+  const embedSrc = () => WebUrl.embed(parsed, twitchParent) + (parsed.type === 'youtube' ? '&origin=' + encodeURIComponent(location.origin) : '');
+  let loadTimer = null;
+  const load = () => {
+    clearTimeout(loadTimer);
+    /* DISABLED (Mark, 2026-09-10): no offline handling for web tiles; they just need a connection.
+    tile.offline = !navigator.onLine;
+    if (tile.offline) { iframe.removeAttribute('src'); errorText.textContent = 'Offline – will load when connected'; errorEl.classList.remove('hidden'); return; }
+    */
+    errorEl.classList.add('hidden');
+    iframe.src = embedSrc();
+    // the iframe's onerror is unreliable; YouTube tells us when it is ready, Twitch doesn't
+    if (tile.yt) {
+      tile.yt.st.ready = false;
+      loadTimer = setTimeout(() => { if (!tile.yt.st.ready) { errorText.textContent = 'Could not load'; errorEl.classList.remove('hidden'); } }, 10000);
+    }
+  };
+  retryBtn.addEventListener('click', load);
+  retryBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+  // YouTube thumbnail, cached by main in userData/thumbs (so it shows on reload even offline)
+  if (parsed.type === 'youtube') {
+    window.api.webThumb(parsed.id).then((p) => {
+      if (!p || !tiles.includes(tile)) return;
+      const img = `url("${window.api.videoUrl(p)}")`;
+      el.style.backgroundImage = img;
+      errorEl.style.backgroundImage = `linear-gradient(rgba(0,0,0,0.55), rgba(0,0,0,0.55)), ${img}`;
+    });
+  }
+
+  // ----- YouTube controls -----
+  const wantTime = Number(state.currentTime) > 0 ? Number(state.currentTime) : 0;
+  const wantPlaying = state.paused === false;
+  const refreshMute = () => { muteBtn.textContent = tile.ownMuted || (tile.group && tile.group.muted) || tile.volume === 0 ? '🔇' : '🔊'; };
+  tile.refreshMute = refreshMute;
+  if (parsed.type === 'youtube') {
+    const yt = tile.yt = ytController(iframe);
+    let first = true;
+    yt.onChange((st, ev) => {
+      if (st.ready && !errorEl.classList.contains('hidden')) errorEl.classList.add('hidden'); // a late load clears "Could not load"
+      if (first && st.ready) {
+        first = false;
+        clearTimeout(loadTimer);
+        setOwnMuted(tile, tile.ownMuted); applyTileVolume(tile);
+        if (wantTime > 0) yt.seek(wantTime);
+        if (wantPlaying) yt.play();
+      }
+      if (ev === 'onStateChange' && tile.group && tile.group === active) renderGroupBar();
+    });
+    tile.togglePlay = () => { yt.paused ? yt.play() : yt.pause(); };
+    tile.seekBy = (dt) => yt.seek(clamp(yt.st.time + dt, 0, yt.st.duration || Infinity));
+    tile.tick = () => {
+      const st = yt.st;
+      playBtn.textContent = yt.paused ? '▶' : '❚❚';
+      if (!tile.scrubbing) {
+        timeEl.textContent = `${fmtTime(st.time)} / ${fmtTime(st.duration)}`;
+        if (st.duration > 0) {
+          const frac = clamp(st.time / st.duration, 0, 1);
+          seek.value = String(Math.round(frac * 10000));
+          seek.style.setProperty('--progress', (frac * 100).toFixed(2) + '%');
+        }
+      }
+    };
+    playBtn.addEventListener('click', () => tile.togglePlay());
+    seek.addEventListener('pointerdown', () => { tile.scrubbing = true; el.classList.add('scrubbing'); });
+    const endScrub = () => { tile.scrubbing = false; el.classList.remove('scrubbing'); };
+    seek.addEventListener('pointerup', endScrub);
+    seek.addEventListener('pointercancel', endScrub);
+    seek.addEventListener('input', () => {
+      if (!yt.st.duration) return;
+      const t = Number(seek.value) / 10000 * yt.st.duration;
+      yt.seek(t); yt.st.time = t;
+      timeEl.textContent = `${fmtTime(t)} / ${fmtTime(yt.st.duration)}`;
+    });
+    muteBtn.addEventListener('click', () => { setOwnMuted(tile, !tile.ownMuted); refreshMute(); });
+  }
+  tile.setVolume = (pct) => { tile.volume = clamp(pct, 0, 100) / 100; applyTileVolume(tile); if (tile.volume > 0 && tile.ownMuted) setOwnMuted(tile, false); refreshMute(); };
+  tile.destroy = () => { clearTimeout(loadTimer); if (tile.yt) tile.yt.destroy(); };
+  for (const b of [playBtn, muteBtn]) b.addEventListener('dblclick', (e) => e.stopPropagation());
+
+  // ----- shared tile behaviour: hover, select, remove, resize, drag -----
+  el.addEventListener('pointerenter', () => { hoveredTile = tile; });
+  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; });
+  el.addEventListener('click', (e) => {
+    if (isBoard() || !e.shiftKey || e.target.closest('button, input, select')) return;
+    setSelected(tile, !selection.has(tile));
+    selectionStatus();
+  });
+  el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
+  for (const h of el.querySelectorAll('.handle')) {
+    h.addEventListener('pointerdown', (e) => startResize(tile, h.dataset.corner, e));
+    h.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      if (isBoard() && tile.board) {
+        const entry = recordResize([tile]);
+        tile.board.h = layout.rowHeight; tile.board.w = layout.rowHeight * tile.aspect;
+        layoutTile(tile);
+        finishRects(entry);
+      } else fitAll();
+    });
+  }
+  attachTileDrag(tile);
+
+  refreshMute();
+  canvas.appendChild(frag);
+  load();
+  if (isBoard() && !tile.board && at) placeOnBoard([tile], at);
+  updateChrome();
+  return tile;
+}
+/* DISABLED (Mark, 2026-09-10): no offline handling for web tiles; they just need a connection.
+// Offline web tiles retry when the connection comes back, and every 30 s.
+window.addEventListener('online', () => { for (const t of tiles) if (t.offline && t.reload) t.reload(); });
+window.addEventListener('offline', () => { for (const t of tiles) if (t.reload && !t.video) t.reload(); });
+setInterval(() => { if (navigator.onLine) for (const t of tiles) if (t.offline && t.reload) t.reload(); }, 30000);
+*/
 
 function clearAll() {
   while (tiles.length) removeTile(tiles[tiles.length - 1], { record: false });
@@ -1685,7 +1889,15 @@ function collectSession() {
       timelineExpanded: layout.timelineExpanded,
     },
     masterVolume,
-    videos: tiles.map((t) => ({
+    videos: tiles.map((t) => (!t.video ? {
+      // web tile (YouTube / Twitch)
+      type: t.type, kind: t.kind, url: t.url, title: t.title,
+      currentTime: t.yt ? t.yt.st.time : 0, volume: t.volume, muted: !!t.ownMuted, playbackRate: 1,
+      paused: t.yt ? t.yt.paused : true, aspect: t.aspect,
+      board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
+      bookmarks: [], sync: null,
+    } : {
+      type: 'file',
       path: t.path,
       currentTime: isFinite(t.video.currentTime) ? t.video.currentTime : 0,
       volume: t.volume,
@@ -1728,7 +1940,13 @@ async function applySession(data) {
   let missing = 0;
   const byIndex = new Map(); // index in data.videos -> tile (v3 files and bad entries leave gaps)
   for (const [i, v] of data.videos.entries()) {
-    if (!v || typeof v.path !== 'string') continue;
+    if (!v) continue;
+    if (v.type === 'youtube' || v.type === 'twitch') {
+      const parsed = typeof v.url === 'string' ? WebUrl.parse(v.url) : null;
+      if (parsed && parsed.kind !== 'playlist') byIndex.set(i, addWebTile(v.url, parsed, v));
+      continue;
+    }
+    if (typeof v.path !== 'string') continue;
     if (!(await window.api.fileExists(v.path))) missing++;
     byIndex.set(i, addVideo(v.path, v));
   }
@@ -1788,9 +2006,29 @@ async function openSession(filePath) {
 
 // ---------- toolbar ----------
 
-document.getElementById('btn-add').addEventListener('click', async () => {
-  addVideos(await window.api.pickVideos());
-});
+// ---------- add-videos pulldown + URL bar ----------
+const addMenu = document.getElementById('add-menu');
+const menuList = addMenu.querySelector('.menu-list');
+const urlBar = document.getElementById('url-bar');
+const urlInput = document.getElementById('url-input');
+const closeUrlBar = () => { urlBar.hidden = true; urlInput.value = ''; };
+document.getElementById('btn-add').addEventListener('click', (e) => { e.stopPropagation(); menuList.hidden = !menuList.hidden; });
+window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !addMenu.contains(e.target)) menuList.hidden = true; });
+document.getElementById('add-local').addEventListener('click', async () => { menuList.hidden = true; addVideos(await window.api.pickVideos()); });
+document.getElementById('add-url').addEventListener('click', () => { menuList.hidden = true; urlBar.hidden = false; urlInput.focus(); });
+document.getElementById('url-cancel').addEventListener('click', closeUrlBar);
+function submitUrl() {
+  const parsed = WebUrl.parse(urlInput.value);
+  if (!parsed) { setStatus('That is not a YouTube or Twitch link I understand'); return; }
+  if (parsed.kind === 'playlist') { setStatus('Playlists open in the Sources sidebar (coming in the next update)'); return; } // Task 13 replaces this line
+  const t = addWebTile(urlInput.value.trim(), parsed);
+  if (isBoard()) placeOnBoard([t]);
+  layoutTiles();
+  if (tiles.length === 1) scheduleFit();
+  closeUrlBar();
+}
+document.getElementById('url-go').addEventListener('click', submitUrl);
+urlInput.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') submitUrl(); if (e.key === 'Escape') closeUrlBar(); });
 document.getElementById('btn-open').addEventListener('click', () => openSession());
 document.getElementById('btn-save').addEventListener('click', saveSession);
 document.getElementById('btn-save-as').addEventListener('click', saveSessionAs);
@@ -1798,10 +2036,10 @@ document.getElementById('btn-cache').addEventListener('click', async () => {
   const { bytes, files } = await window.api.cacheInfo();
   const mb = (bytes / 1048576).toFixed(0);
   if (!files) { setStatus('Cache is empty'); return; }
-  if (confirm(`${files} playable copies use ${mb} MB. Clear the cache?`)) { await window.api.clearCache(); setStatus('Cache cleared'); }
+  if (confirm(`${files} cached files (playable copies and thumbnails) use ${mb} MB. Clear the cache?`)) { await window.api.clearCache(); setStatus('Cache cleared'); }
 });
-document.getElementById('btn-play-all').addEventListener('click', () => tiles.forEach((t) => t.video.play().catch(() => {})));
-document.getElementById('btn-pause-all').addEventListener('click', () => tiles.forEach((t) => t.video.pause()));
+document.getElementById('btn-play-all').addEventListener('click', () => tiles.forEach(playTile));
+document.getElementById('btn-pause-all').addEventListener('click', () => tiles.forEach(pauseTile));
 document.getElementById('btn-mute-all').addEventListener('click', () => tiles.forEach((t) => setOwnMuted(t, true)));
 document.getElementById('btn-unmute-all').addEventListener('click', () => {
   for (const g of groups) g.muted = false; // "all" includes group mutes
@@ -1856,7 +2094,7 @@ window.addEventListener('keydown', (e) => {
   if (ctrl && key === 'z' && !inControl) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if (ctrl && key === 'y' && !inControl) { e.preventDefault(); redo(); return; }
   if (ctrl && e.key.toLowerCase() === 'g' && !inControl) { e.preventDefault(); e.shiftKey ? (active && dissolveGroup(active)) : toggleGroupFromSelection(); return; }
-  if (ctrl && e.key.toLowerCase() === 'a' && !isBoard()) { e.preventDefault(); document.getElementById('btn-add').click(); return; }
+  if (ctrl && e.key.toLowerCase() === 'a' && !isBoard() && !inControl) { e.preventDefault(); document.getElementById('add-local').click(); return; }
 
   if (inControl) return;
   if (key === 'c' && !ctrl) { tryOpenCompare(); return; }
@@ -1864,24 +2102,25 @@ window.addEventListener('keydown', (e) => {
   // shortcuts that act on the video under the mouse
   const h = hoveredTile && tiles.includes(hoveredTile) ? hoveredTile : null;
   if (h) {
+    // web tiles have no bookmarks or frame step, and Twitch tiles have no playback API at all
     const big = e.shiftKey ? 30 : 5;
-    if (e.key === 'ArrowLeft') { e.preventDefault(); h.seekBy(-big); return; }
-    if (e.key === 'ArrowRight') { e.preventDefault(); h.seekBy(big); return; }
-    if (e.key === 'ArrowUp') { e.preventDefault(); h.setVolume(Math.round(h.volume * 100) + 5); return; }
-    if (e.key === 'ArrowDown') { e.preventDefault(); h.setVolume(Math.round(h.volume * 100) - 5); return; }
-    if (key === 'b') { h.addBookmark(); return; }
-    if (e.key === '[') { h.jumpBookmark(-1); return; }
-    if (e.key === ']') { h.jumpBookmark(1); return; }
-    if (key === 'k') { h.togglePlay(); return; }
-    if (key === 'm') { setOwnMuted(h, !h.ownMuted); return; }
-    if (e.key === ',') { h.stepFrame(-1); return; }
-    if (e.key === '.') { h.stepFrame(1); return; }
+    if (e.key === 'ArrowLeft' && h.seekBy) { e.preventDefault(); h.seekBy(-big); return; }
+    if (e.key === 'ArrowRight' && h.seekBy) { e.preventDefault(); h.seekBy(big); return; }
+    if (e.key === 'ArrowUp' && h.setVolume) { e.preventDefault(); h.setVolume(Math.round(h.volume * 100) + 5); return; }
+    if (e.key === 'ArrowDown' && h.setVolume) { e.preventDefault(); h.setVolume(Math.round(h.volume * 100) - 5); return; }
+    if (key === 'b' && h.addBookmark) { h.addBookmark(); return; }
+    if (e.key === '[' && h.jumpBookmark) { h.jumpBookmark(-1); return; }
+    if (e.key === ']' && h.jumpBookmark) { h.jumpBookmark(1); return; }
+    if (key === 'k' && h.togglePlay) { h.togglePlay(); return; }
+    if (key === 'm' && (h.video || h.yt)) { setOwnMuted(h, !h.ownMuted); return; }
+    if (e.key === ',' && h.stepFrame) { h.stepFrame(-1); return; }
+    if (e.key === '.' && h.stepFrame) { h.stepFrame(1); return; }
   }
 
   if (e.code === 'Space') {
     e.preventDefault();
-    const anyPlaying = tiles.some((t) => !t.video.paused);
-    tiles.forEach((t) => (anyPlaying ? t.video.pause() : t.video.play().catch(() => {})));
+    const anyPlaying = tiles.some(isPlaying);
+    tiles.forEach((t) => (anyPlaying ? pauseTile(t) : playTile(t)));
   } else if (e.key === 'Escape') {
     clearSelection();
   } else if (key === 'l' && isBoard()) {

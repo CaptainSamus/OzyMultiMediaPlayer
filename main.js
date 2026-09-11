@@ -1,6 +1,7 @@
-// Multi Video Player - main process.
-// Entirely local: no remote content is ever loaded, and every http/https/ws
-// request is cancelled at the network layer as a hard guarantee.
+// Ozy Multi Media Player - main process.
+// Local files never leave the machine. The UI is served from a loopback-only
+// http server (YouTube and Twitch embeds need a real http origin), and every
+// other network request is cancelled unless it goes to a YouTube/Twitch host.
 
 const { app, BrowserWindow, ipcMain, dialog, protocol, session } = require('electron');
 const path = require('path');
@@ -23,6 +24,7 @@ const MIME = {
   '.mkv': 'video/x-matroska', '.mov': 'video/quicktime', '.ogv': 'video/ogg',
   '.ogg': 'video/ogg', '.avi': 'video/x-msvideo',
   '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.flac': 'audio/flac',
+  '.jpg': 'image/jpeg', // cached thumbnails
 };
 
 // Where ffmpeg.exe / ffprobe.exe live: bundled next to the app when packaged,
@@ -82,6 +84,41 @@ function handleVideoRequest(request) {
 
 let win = null;
 
+// ---- UI origin: loopback static server ----
+// Embeds refuse file:// and custom-scheme pages (Twitch frame-ancestors, YouTube
+// error 153), so the UI loads from http://127.0.0.1:<random port>. It only
+// serves files under the app folder and is never reachable from the network.
+const http = require('http');
+const APP_ROOT = __dirname;
+const STATIC_MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml' };
+let uiServer = null;
+let uiPort = 0;
+function startUiServer() {
+  return new Promise((resolve) => {
+    uiServer = http.createServer((req, res) => {
+      let urlPath;
+      try { urlPath = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname); } catch { res.writeHead(400); return res.end(); }
+      const file = path.normalize(path.join(APP_ROOT, urlPath === '/' ? 'index.html' : urlPath));
+      if (!file.startsWith(APP_ROOT + path.sep) || file.includes(`${path.sep}node_modules${path.sep}`) || file.includes(`${path.sep}.git${path.sep}`)) { res.writeHead(403); return res.end(); }
+      fs.readFile(file, (err, data) => {
+        if (err) { res.writeHead(404); return res.end(); }
+        res.writeHead(200, { 'Content-Type': STATIC_MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-store' });
+        res.end(data);
+      });
+    });
+    uiServer.listen(0, '127.0.0.1', () => { uiPort = uiServer.address().port; resolve(uiPort); });
+  });
+}
+const TWITCH_PARENT = '127.0.0.1';
+ipcMain.handle('twitch-parent', () => TWITCH_PARENT);
+app.on('will-quit', () => { if (uiServer) uiServer.close(); });
+
+// Only YouTube / Twitch hosts (and our own loopback page) may be reached.
+const ALLOWED = ['youtube.com', 'youtube-nocookie.com', 'ytimg.com', 'googlevideo.com', 'google.com', 'gstatic.com', 'googleapis.com', 'ggpht.com',
+  'twitch.tv', 'jtvnw.net', 'ttvnw.net', 'twitchcdn.net', 'live-video.net',
+  'd1ndex63qxojbr.cloudfront.net']; // Twitch clip video files (exact host, not all of cloudfront.net)
+const allowedHost = (h) => ALLOWED.some((d) => h === d || h.endsWith('.' + d));
+
 function sessionFileFromArgv(argv) {
   return argv.slice(1).find((a) => a.toLowerCase().endsWith('.mvp') && fs.existsSync(a)) || null;
 }
@@ -106,7 +143,7 @@ function createWindow() {
     },
   });
 
-  win.loadFile('index.html');
+  win.loadURL(`http://127.0.0.1:${uiPort}/index.html`);
 
   win.webContents.on('did-finish-load', () => {
     const initial = sessionFileFromArgv(process.argv);
@@ -126,13 +163,19 @@ if (!app.requestSingleInstanceLock()) {
     const f = sessionFileFromArgv(argv);
     if (f) win.webContents.send('open-session', f);
   });
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     protocol.handle('localvideo', handleVideoRequest);
+    await startUiServer();
 
-    // Hard block on any outbound network request from the renderer.
+    // Network allowlist: our loopback page, plus YouTube / Twitch hosts. Everything else is cancelled.
     session.defaultSession.webRequest.onBeforeRequest(
       { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*', 'ftp://*/*'] },
-      (_details, callback) => callback({ cancel: true }),
+      (details, callback) => {
+        let u = null;
+        try { u = new URL(details.url); } catch {}
+        const own = !!u && u.protocol === 'http:' && u.hostname === '127.0.0.1' && Number(u.port) === uiPort;
+        callback({ cancel: !(own || (u && allowedHost(u.hostname))) });
+      },
     );
 
     createWindow();
@@ -281,12 +324,33 @@ ipcMain.on('cancel-proxy', (_e, filePath) => {
   if (job) job.child.kill();
 });
 
+// Cache = playable copies + thumbnails.
 ipcMain.handle('cache-info', () => {
   let bytes = 0, files = 0;
-  try { for (const f of fs.readdirSync(proxyDir())) { bytes += fs.statSync(path.join(proxyDir(), f)).size; files++; } } catch {}
+  for (const dir of [proxyDir(), thumbDir()]) {
+    try { for (const f of fs.readdirSync(dir)) { bytes += fs.statSync(path.join(dir, f)).size; files++; } } catch {}
+  }
   return { bytes, files };
 });
 ipcMain.handle('clear-cache', () => {
   for (const job of proxyJobs.values()) job.child.kill();
-  try { fs.rmSync(proxyDir(), { recursive: true, force: true }); } catch {}
+  for (const dir of [proxyDir(), thumbDir()]) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
+});
+
+// ---- YouTube thumbnails for web tiles ----
+// Fetched once from i.ytimg.com (through the same allowlisted session) and kept in
+// userData/thumbs, so a tile that can't load still looks like its video.
+const thumbDir = () => path.join(app.getPath('userData'), 'thumbs');
+ipcMain.handle('web-thumb', async (_e, id) => {
+  if (!/^[A-Za-z0-9_-]{11}$/.test(String(id))) return null;
+  const file = path.join(thumbDir(), `yt-${id}.jpg`);
+  if (fs.existsSync(file)) return file;
+  try {
+    const { net } = require('electron');
+    const res = await net.fetch(`https://i.ytimg.com/vi/${id}/hqdefault.jpg`);
+    if (!res.ok) return null;
+    fs.mkdirSync(thumbDir(), { recursive: true });
+    fs.writeFileSync(file, Buffer.from(await res.arrayBuffer()));
+    return file;
+  } catch { return null; }
 });

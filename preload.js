@@ -15,4 +15,6 @@ contextBridge.exposeInMainWorld('api', {
   onProxyProgress: (cb) => ipcRenderer.on('proxy-progress', (_e, p, frac) => cb(p, frac)),
   cacheInfo: () => ipcRenderer.invoke('cache-info'),
   clearCache: () => ipcRenderer.invoke('clear-cache'),
+  parent: () => ipcRenderer.invoke('twitch-parent'),
+  webThumb: (id) => ipcRenderer.invoke('web-thumb', id),
 });

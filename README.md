@@ -1,8 +1,12 @@
 # Ozy Multi Media Player
 
-A fully local desktop app that plays many videos at once (20+ if your GPU can
-decode them), with a hover-to-reveal control bar on every video and savable
+A desktop app that plays many videos at once (20+ if your GPU can decode
+them), with a hover-to-reveal control bar on every video and savable
 sessions that remember each video's position.
+
+Fully local for your own files: nothing leaves your machine. The only network
+use is the YouTube and Twitch tiles you add yourself, and the app keeps
+working offline without them.
 
 ## One-time setup
 
@@ -14,9 +18,13 @@ sessions that remember each video's position.
 npm install
 ```
 
-That downloads Electron once into `node_modules/`. After that the app never
-touches the network: it loads no remote content, and every http/https/ws
-request is cancelled at the network layer in `main.js`.
+That downloads Electron, electron-builder and the ffmpeg/ffprobe binaries
+once into `node_modules/`. The app itself loads its UI from a local-only
+server on `127.0.0.1` and cancels every other network request in `main.js`
+unless it goes to YouTube or Twitch (`youtube.com`, `youtube-nocookie.com`,
+`ytimg.com`, `googlevideo.com`, `google.com`, `gstatic.com`,
+`googleapis.com`, `ggpht.com`, `twitch.tv`, `jtvnw.net`, `ttvnw.net`,
+`twitchcdn.net`, `live-video.net`), and only when you add a web tile.
 
 ## Run
 
@@ -83,6 +91,11 @@ Shortcuts: `Ctrl+A` add videos, `Ctrl+O` open session, `Ctrl+S` save,
 
 ## Formats
 
-Chromium's built-in decoders handle H.264 MP4, WebM (VP8/VP9/AV1), and Ogg.
-HEVC, ProRes, and most `.mkv`/`.avi` payloads need to be transcoded to
-H.264 MP4 first (e.g. with FFmpeg or DaVinci Resolve).
+The built-in decoders play H.264, HEVC, VP8/VP9, and AV1 video (MP4, MOV,
+WebM, MKV containers) plus common audio. When you add a file the app checks
+its codec with the bundled ffprobe. Anything it can't play natively (ProRes,
+DNxHD, MPEG-4 Part 2, WMV, …) shows a **Make playable** button: the bundled
+ffmpeg makes an H.264 copy in the background (progress bar, Cancel), and the
+tile switches to it. Copies live in a cache folder and are reused next time;
+the toolbar **Cache** button shows their size and clears them. Your original
+file is never changed.

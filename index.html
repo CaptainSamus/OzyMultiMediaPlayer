@@ -3,13 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; media-src localvideo:; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'">
+        content="default-src 'self'; media-src localvideo:; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'; frame-src https://www.youtube.com https://www.youtube-nocookie.com https://player.twitch.tv https://clips.twitch.tv">
   <title>Ozy Multi Media Player</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header id="toolbar">
-    <button id="btn-add" title="Add one or more video files (Ctrl+A)">+ Add videos</button>
+    <div class="menu" id="add-menu">
+      <button id="btn-add" title="Add local files or a YouTube / Twitch URL">+ Add videos ▾</button>
+      <div class="menu-list" hidden>
+        <button id="add-local">Local files… <kbd>Ctrl+A</kbd></button>
+        <button id="add-url">YouTube / Twitch URL…</button>
+      </div>
+    </div>
     <button id="btn-open" title="Open a saved .mvp session (Ctrl+O)">Open session</button>
     <button id="btn-save" title="Save session (Ctrl+S)">Save</button>
     <button id="btn-save-as" title="Save session to a new file (Ctrl+Shift+S)">Save as…</button>
@@ -44,6 +50,11 @@
       <span id="master-pct">100%</span>
     </label>
     <span id="status"></span>
+    <div id="url-bar" hidden>
+      <input type="url" id="url-input" placeholder="Paste a YouTube video, Short, playlist, Twitch clip or channel URL" spellcheck="false">
+      <button id="url-go">Add</button>
+      <button id="url-cancel" title="Close (Esc)">✕</button>
+    </div>
   </header>
 
   <main id="grid">
@@ -188,7 +199,30 @@
     </div>
   </template>
 
+  <template id="web-tile-template">
+    <div class="tile web">
+      <iframe allow="autoplay; fullscreen; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+      <div class="overlay">
+        <div class="top"><span class="group-swatch" hidden></span><span class="name"></span><button class="remove" title="Remove">✕</button></div>
+        <div class="bottom">
+          <div class="markers"></div>
+          <input type="range" class="seek" min="0" max="10000" value="0" step="1" title="Scrub">
+          <div class="row">
+            <button class="play" title="Play / pause (K)">▶</button>
+            <span class="time">0:00 / 0:00</span>
+            <span class="spacer"></span>
+            <button class="mute" title="Mute / unmute (M)">🔊</button>
+          </div>
+        </div>
+      </div>
+      <div class="error hidden"><div class="error-text"></div><div class="error-actions"><button class="retry">Retry</button></div></div>
+      <div class="handle tl" data-corner="tl"></div><div class="handle tr" data-corner="tr"></div>
+      <div class="handle bl" data-corner="bl"></div><div class="handle br" data-corner="br"></div>
+    </div>
+  </template>
+
   <script src="lib/codecs.js"></script>
+  <script src="lib/weburl.js"></script>
   <script src="lib/frames.js"></script>
   <script src="lib/groups.js"></script>
   <script src="lib/timeline.js"></script>
