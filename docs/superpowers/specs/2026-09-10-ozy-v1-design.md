@@ -44,8 +44,9 @@ a generic icon. Nothing else in the app is affected.
 EXR or image sequences (single still images are in, see feature 8),
 website hosting, board sharing, accounts, home server or network library,
 mood board export. macOS support is v1.1, right after the Windows v1.0
-release (plan Task 16): unsigned Mac build as a self-contained zip (no
-install, all dependencies inside the app bundle, about 200 MB), Cmd
+release (plan Task 16): unsigned Mac builds, a dmg installer and a
+self-contained zip portable per chip (all dependencies inside the app
+bundle, about 200 MB), matching the Windows installer + portable pair; Cmd
 modifiers, open-file, and a GitHub Actions workflow that builds Windows
 and Mac artifacts for one release. Downloads are per OS; the code and
 version are shared.
@@ -63,16 +64,16 @@ portable / zip downloads. Order matters:
    offers "Restart to update"). This is the one place the app phones
    home, so the README must say so and a setting must let it be turned
    off.
-3. Then the .dmg and NSIS become the primary downloads; portable / zip
-   stay available for people who don't want an install.
+3. Installers and portables continue to ship side by side; the
+   auto-updater serves the installed builds.
 
 ## Features
 
 ### 1. Installer and packaging
 
-- Add `electron-builder`. Targets: portable exe (the primary download,
-  no install) and an optional NSIS installer whose only extra is the
-  `.mvp` Explorer association, x64.
+- Add `electron-builder`. Targets: NSIS installer and portable exe, x64,
+  offered as equals (installer adds Start menu, `.mvp` association,
+  uninstaller; portable is a single exe with no install).
 - Product name "Ozy Multi Media Player", app id `com.ozy.multimediaplayer`.
   App icon: Mark's film-reel / disc artwork, supplied as `build/icon.png`
   (square, 512 px or larger). electron-builder derives the `.ico` from
