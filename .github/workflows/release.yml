@@ -44,6 +44,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: Ozy Multi Media Player ${{ github.ref_name }}
+          prerelease: true
           files: |
             dist/*.exe
             dist/*.dmg

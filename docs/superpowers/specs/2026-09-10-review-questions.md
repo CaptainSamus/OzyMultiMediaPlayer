@@ -18,3 +18,14 @@ Deferred decisions to raise once v1 is complete and Mark walks the whole app.
 3. **Sidebar right-click on local rows** opens a one-item menu ("Show in
    Explorer"). Mark first asked for a straight right-click → Explorer.
    Keep the menu (room for more actions) or go direct? Raised after Task 14.
+
+4. **YouTube tile duration before first play.** YouTube's embed reports
+   duration 0 until the video has played once, so a fresh YouTube tile shows
+   no pins and no length on the timeline until then. Fetching the duration
+   via yt-dlp when the tile is added would fix it at ~2 s per tile. Worth it?
+   Raised 2026-09-11 after Task 21.
+
+5. **Middle-drag over embedded pictures.** Decided 2026-09-11: keep as
+   built. Middle-drag pans from anywhere except the YouTube/Twitch picture
+   itself (the iframe swallows the press); Pan + zoom on makes it work there
+   too. Revisit only if it keeps annoying.
