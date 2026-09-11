@@ -662,7 +662,8 @@ function tickTimeline() {
   const model = tl._model; if (!model || tl.hidden) return;
   const gt = tlTime(model), end = tl._end;
   tlQ('.tl-playhead').style.left = Timeline.xFor(gt, end, tlQ('.tl-bar').clientWidth) + 'px';
-  tlQ('.tl-time').textContent = Frames.format(gt, end, model.fps, layout.timeDisplay);
+  const only = !model.group && model.members.length === 1 ? model.members[0].tile : null; // one sequence: its own frame numbers
+  tlQ('.tl-time').textContent = only && only.type === 'sequence' ? timeReadout(only, gt) : Frames.format(gt, end, model.fps, layout.timeDisplay);
 }
 function toggleTimelineExpanded() { layout.timelineExpanded = !layout.timelineExpanded; renderTimeline(); }
 function setRangeAtPlayhead(which) {
@@ -757,7 +758,7 @@ function openCompare(a, b) {
   cmp.tick = () => {
     const p = a.pb;
     cmpQ('.cmp-play').textContent = p.paused ? '▶' : '❚❚';
-    cmpQ('.cmp-time').textContent = Frames.format(p.time, p.duration, effectiveFps(a), layout.timeDisplay);
+    cmpQ('.cmp-time').textContent = timeReadout(a);
     if (p.duration && !cmp.scrubbing) cmpQ('.cmp-seek').value = String(Math.round(p.time / p.duration * 10000));
   };
   cmp.tick();
@@ -2369,7 +2370,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
   };
 
   // ----- controls -----
-  const refreshTime = () => { timeEl.textContent = Frames.format(pb.time, pb.duration, tile.fps, layout.timeDisplay); };
+  const refreshTime = () => { timeEl.textContent = timeReadout(tile); };
   tile.refreshTime = refreshTime;
   tile.tick = () => {
     if (!tile.scrubbing) {
@@ -2456,6 +2457,16 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
   if (isBoard() && !tile.board && at) placeOnBoard([tile], at);
   updateChrome();
   return tile;
+}
+
+// Time label for any playable tile. Sequences in 'frames' mode read like Nuke: the file's own frame
+// number and the run's range ("1005 / 1001-1048"); clock and timecode stay index-based.
+function timeReadout(t, time = t.pb.time) {
+  if (t.type === 'sequence' && layout.timeDisplay === 'frames') {
+    const i = clamp(Frames.toFrame(time, t.fps), 0, t.seq.end - t.seq.start);
+    return `${t.seq.start + i} / ${t.seq.start}-${t.seq.end}`;
+  }
+  return Frames.format(time, t.pb.duration, effectiveFps(t), layout.timeDisplay);
 }
 
 // ---------- ⚙ tile settings (fps; EXR exposure and colour) ----------
