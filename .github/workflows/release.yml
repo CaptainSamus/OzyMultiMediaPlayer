@@ -1,0 +1,52 @@
+# Push a version tag (e.g. v0.2.0.1) to build Windows and macOS and attach everything to one release:
+#   Windows: installer (NSIS) and portable exe
+#   macOS:   dmg (drag to Applications) and zip (portable) for Apple Silicon and Intel
+# package.json keeps a 3-part version (npm needs semver); the artifacts are renamed to the tag.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # create the release and upload files
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false # one OS failing shouldn't cancel the other
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+      # yt-dlp for this OS; on macOS also ffmpeg for both arm64 and x64 (ffmpeg-static only installs one)
+      - run: npm run prefetch
+
+      # buildVersion from the tag so file properties / CFBundleVersion carry all four parts
+      - run: npx electron-builder --publish never -c.buildVersion="${GITHUB_REF_NAME#v}"
+
+      - run: node scripts/rename-artifacts.js "${GITHUB_REF_NAME}"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Ozy Multi Media Player ${{ github.ref_name }}
+          files: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

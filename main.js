@@ -31,11 +31,12 @@ const MIME = {
 // Where ffmpeg.exe / ffprobe.exe / yt-dlp.exe live: bundled next to the app when packaged,
 // straight out of node_modules (ffmpeg, ffprobe) or bin/ (yt-dlp) in development.
 // yt-dlp prefers a self-updated copy in userData/bin (the install folder may not be writable).
-const bundledYtdlp = () => (app.isPackaged ? path.join(process.resourcesPath, 'bin', 'yt-dlp.exe') : path.join(__dirname, 'bin', 'yt-dlp.exe'));
-const userYtdlp = () => path.join(app.getPath('userData'), 'bin', 'yt-dlp.exe');
+const EXE = process.platform === 'win32' ? '.exe' : ''; // bundled tools are bin/ffmpeg.exe on Windows, bin/ffmpeg on macOS
+const bundledYtdlp = () => (app.isPackaged ? path.join(process.resourcesPath, 'bin', 'yt-dlp' + EXE) : path.join(__dirname, 'bin', 'yt-dlp' + EXE));
+const userYtdlp = () => path.join(app.getPath('userData'), 'bin', 'yt-dlp' + EXE);
 function binPath(name) {
   if (name === 'yt-dlp') return fs.existsSync(userYtdlp()) ? userYtdlp() : bundledYtdlp();
-  if (app.isPackaged) return path.join(process.resourcesPath, 'bin', name + '.exe');
+  if (app.isPackaged) return path.join(process.resourcesPath, 'bin', name + EXE);
   if (name === 'ffmpeg') return require('ffmpeg-static');
   return require('ffprobe-static').path;
 }
@@ -151,12 +152,23 @@ function createWindow() {
   win.loadURL(`http://127.0.0.1:${uiPort}/index.html`);
 
   win.webContents.on('did-finish-load', () => {
-    const initial = sessionFileFromArgv(process.argv);
+    const initial = pendingOpen || sessionFileFromArgv(process.argv);
+    pendingOpen = null;
     if (initial) win.webContents.send('open-session', initial);
   });
 
   win.on('closed', () => { win = null; });
 }
+
+// macOS: double-clicking a .mvp in Finder (or dropping it on the dock icon) arrives as open-file,
+// often before the window exists; keep it until the page has loaded.
+let pendingOpen = null;
+app.on('open-file', (e, p) => {
+  e.preventDefault();
+  if (!p.toLowerCase().endsWith('.mvp')) return;
+  if (win && !win.webContents.isLoading()) win.webContents.send('open-session', p);
+  else pendingOpen = p;
+});
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -182,6 +194,12 @@ if (!app.requestSingleInstanceLock()) {
         callback({ cancel: !(own || (u && allowedHost(u.hostname))) });
       },
     );
+
+    // macOS needs an application menu for Cmd+Q / Cmd+H and Cmd+C / V / A in text fields.
+    if (process.platform === 'darwin') {
+      const { Menu } = require('electron');
+      Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }]));
+    }
 
     createWindow();
 

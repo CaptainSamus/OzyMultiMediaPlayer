@@ -74,6 +74,21 @@ function fmtTime(t) {
   return (h ? h + ':' : '') + mm + ':' + String(s).padStart(2, '0');
 }
 
+// macOS uses Cmd where Windows uses Ctrl for "just this one" clicks and multi-select.
+// (Ctrl+wheel stays Ctrl everywhere: a trackpad pinch arrives as a Ctrl+wheel event.)
+const IS_MAC = navigator.platform.startsWith('Mac');
+const modKey = (e) => (IS_MAC ? e.metaKey : e.ctrlKey);
+const MOD_LABEL = IS_MAC ? 'Cmd' : 'Ctrl';
+const REVEAL_LABEL = IS_MAC ? 'Reveal in Finder' : 'Show in Explorer';
+// Tooltips and menu hints say Cmd on a Mac (templates too); Ctrl+wheel hints stay Ctrl.
+if (IS_MAC) {
+  const roots = [document, ...[...document.querySelectorAll('template')].map((t) => t.content)];
+  for (const root of roots) {
+    for (const el of root.querySelectorAll('[title]')) if (!/wheel/i.test(el.title)) el.title = el.title.replace(/\bCtrl\b/g, 'Cmd');
+    for (const k of root.querySelectorAll('kbd')) k.textContent = k.textContent.replace(/\bCtrl\b/g, 'Cmd');
+  }
+}
+
 function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, isFinite(v) ? v : lo)); }
 
 function setStatus(msg, ms = 4000) {
@@ -1063,7 +1078,7 @@ function attachTileDrag(tile) {
     }
     // Ctrl: just this tile, even inside a sticky group. Otherwise clicking a
     // member selects its whole group (so its settings bar shows).
-    const single = e.ctrlKey;
+    const single = modKey(e);
     if (single) selectOnly(tile);
     else if (tile.group && !selection.has(tile)) selectGroupOf(tile);
     const start = { x: e.clientX, y: e.clientY };
@@ -1264,7 +1279,7 @@ function addVideo(filePath, state = {}) {
   tile.group = null; tile.sync = null; tile.ownMuted = !!state.muted;
 
   nameEl.textContent = basename(filePath);
-  nameEl.title = filePath + '\nRight-click: show in Explorer';
+  nameEl.title = filePath + '\nRight-click: ' + REVEAL_LABEL;
   nameEl.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); sourceContext(e, 'file', filePath); });
 
   // initial per-video state (from a session file, or defaults)
@@ -1860,7 +1875,7 @@ function addImageTile(filePath, state = {}, at = null) {
   if (sb && isFinite(sb.x) && isFinite(sb.y) && sb.w > 0 && sb.h > 0) tile.board = { x: +sb.x, y: +sb.y, w: +sb.w, h: +sb.h };
   tiles.push(tile);
   el.querySelector('.name').textContent = basename(filePath);
-  el.querySelector('.name').title = filePath + '\nRight-click: show in Explorer';
+  el.querySelector('.name').title = filePath + '\nRight-click: ' + REVEAL_LABEL;
   el.querySelector('.name').addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); sourceContext(e, 'image', filePath); });
   img.addEventListener('load', () => {
     if (img.naturalWidth > 0) {
@@ -2097,8 +2112,18 @@ function submitUrl() {
 document.getElementById('url-go').addEventListener('click', submitUrl);
 urlInput.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') submitUrl(); if (e.key === 'Escape') closeUrlBar(); });
 document.getElementById('btn-open').addEventListener('click', () => openSession());
-document.getElementById('btn-save').addEventListener('click', saveSession);
-document.getElementById('btn-save-as').addEventListener('click', saveSessionAs);
+// Save saves in place (or asks for a file the first time); right-click always opens Save as…
+const saveBtn = document.getElementById('btn-save');
+saveBtn.addEventListener('click', saveSession);
+saveBtn.addEventListener('contextmenu', (e) => { e.preventDefault(); saveSessionAs(); });
+// DISABLED (Mark, 2026-09-11): replaced by Clear board; Save right-click = Save as
+// document.getElementById('btn-save-as').addEventListener('click', saveSessionAs);
+document.getElementById('btn-clear').addEventListener('click', () => {
+  if (!tiles.length) { setStatus('Board is already empty'); return; }
+  if (!confirm(`Remove all ${tiles.length} video${tiles.length === 1 ? '' : 's'} from the board?`)) return;
+  clearAll(); // removes tiles, dissolves groups, clears undo history
+  sessionPath = null; updateChrome(); setStatus('Board cleared');
+});
 document.getElementById('btn-cache').addEventListener('click', async () => {
   const { bytes, files } = await window.api.cacheInfo();
   const mb = (bytes / 1048576).toFixed(0);
@@ -2264,10 +2289,10 @@ function buildItem(data) {
   const nameEl = it.querySelector('.sb-item-name');
   nameEl.textContent = data.type === 'file' ? data.name : data.title;
   if (it.dataset.type === 'image') { const k = document.createElement('span'); k.className = 'sb-kind'; k.textContent = 'IMG'; nameEl.prepend(k); }
-  it.title = it.dataset.path + (data.type === 'file' ? '\nRight-click: show in Explorer' : '\nRight-click: copy URL');
+  it.title = it.dataset.path + (data.type === 'file' ? '\nRight-click: ' + REVEAL_LABEL : '\nRight-click: copy URL');
   it.querySelector('.sb-dur').textContent = data.duration ? fmtTime(data.duration) : '';
   it.addEventListener('click', (e) => {
-    if (e.ctrlKey) { it.classList.toggle('selected'); it.classList.contains('selected') ? sbSelected.add(it) : sbSelected.delete(it); updateAddSelected(); return; }
+    if (modKey(e)) { it.classList.toggle('selected'); it.classList.contains('selected') ? sbSelected.add(it) : sbSelected.delete(it); updateAddSelected(); return; }
     if (e.shiftKey && sbSelected.size) {
       const all = [...it.parentElement.querySelectorAll('.sb-item')];
       const last = [...sbSelected].pop(); const a = all.indexOf(last), b = all.indexOf(it);
@@ -2279,7 +2304,7 @@ function buildItem(data) {
     it.classList.add('selected'); sbSelected.add(it); updateAddSelected();
   });
   it.addEventListener('dblclick', () => addItemsToBoard([itemPayload(it)], null));
-  // right-click: local rows offer Show in Explorer; YouTube / Twitch rows copy their URL
+  // right-click: local rows offer Show in Explorer / Reveal in Finder; YouTube / Twitch rows copy their URL
   it.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); sourceContext(e, it.dataset.type, it.dataset.path); });
   it.addEventListener('dragstart', (e) => {
     if (!sbSelected.has(it)) { clearSbSelection(); it.classList.add('selected'); sbSelected.add(it); updateAddSelected(); }
@@ -2311,7 +2336,7 @@ window.addEventListener('pointerdown', (e) => { if (ctxEl && !ctxEl.contains(e.t
 // Shared by sidebar rows and tile names. type: 'file' | 'image' | 'youtube' | 'twitch'; where: path or URL.
 function sourceContext(e, type, where) {
   if (type === 'file' || type === 'image') {
-    showRowMenu(e, [['Show in Explorer', async () => { if (!(await window.api.showInExplorer(where))) setStatus('File not found: ' + where); }]]);
+    showRowMenu(e, [[REVEAL_LABEL, async () => { if (!(await window.api.showInExplorer(where))) setStatus('File not found: ' + where); }]]);
   } else {
     window.api.copyText(where);
     setStatus('Copied ' + where);

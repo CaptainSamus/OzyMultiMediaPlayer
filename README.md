@@ -10,19 +10,29 @@ Fully local for your own files: nothing leaves your machine. The only network
 use is the YouTube and Twitch tiles you add yourself, and the app keeps
 working offline without them.
 
-## Get it (Windows)
+## Downloads
 
-Use the portable build: `OzyMultiMediaPlayer-1.0.0-portable.exe`. No
-install; double-click it and it runs. ffmpeg, ffprobe and yt-dlp are bundled
-inside, so nothing is downloaded on first run.
+Every release on the [Releases page](https://github.com/CaptainSamus/OzyMultiMediaPlayer/releases)
+has an installer and a portable version for each system. All of them are
+self-contained: ffmpeg, ffprobe and yt-dlp are bundled inside, so nothing is
+downloaded on first run.
 
-To open a saved session with the portable exe, drag the `.mvp` onto the
-running window, use **Open session**, or run
-`OzyMultiMediaPlayer-1.0.0-portable.exe "C:\path\to\session.mvp"`.
+| System | Installer | Portable (nothing to install) |
+|---|---|---|
+| Windows | `Ozy Multi Media Player Setup <version>.exe`: Start menu entry, double-click `.mvp` files to open them, uninstaller | `OzyMultiMediaPlayer-<version>-portable.exe`: a single exe, run it from anywhere |
+| Mac, Apple Silicon (M1 and later) | `OzyMultiMediaPlayer-<version>-mac-arm64.dmg`: open it and drag the app to Applications | `OzyMultiMediaPlayer-<version>-mac-arm64.zip`: unzip anywhere and double-click |
+| Mac, Intel | `OzyMultiMediaPlayer-<version>-mac-x64.dmg` | `OzyMultiMediaPlayer-<version>-mac-x64.zip` |
 
-Optional: `Ozy Multi Media Player Setup 1.0.0.exe` is a regular installer.
-You only need it if you want to double-click `.mvp` files in Explorer to
-open them (it registers the file type and adds a Start menu entry).
+**Mac:** the app isn't signed with an Apple developer certificate yet. The
+first time you open it (from the dmg or the zip), right-click the app and
+choose **Open**, then **Open** again, or run
+`xattr -dr com.apple.quarantine "/path/to/Ozy Multi Media Player.app"`.
+After that it opens normally.
+
+With the portable versions, open a saved session by dragging the `.mvp` onto
+the window, with **Open session**, or by passing it on the command line
+(`OzyMultiMediaPlayer-<version>-portable.exe "C:\path\to\session.mvp"`).
+The installers also let you double-click `.mvp` files in Explorer / Finder.
 
 ## Build from source (Windows)
 
@@ -33,19 +43,21 @@ open them (it registers the file type and adds a Start menu entry).
 npm install
 npm start          # run it
 npm test           # unit tests
-npm run dist       # build dist\OzyMultiMediaPlayer-1.0.0-portable.exe (and an installer)
+npm run dist       # build the installer and portable exe into dist\
 ```
 
 `npm install` downloads Electron, electron-builder and the ffmpeg/ffprobe
 binaries once into `node_modules/`. `npm run dist` (or `npm run prefetch`)
-downloads `yt-dlp.exe` once into `bin/` for packaging. You can also
+downloads `yt-dlp.exe` once into `bin/` for packaging. Releases are built by
+GitHub Actions (`.github/workflows/release.yml`) when a `v*` tag is pushed:
+Windows and macOS, all attached to one release. You can also
 double-click `start.bat`, or open a session straight away with
 `npm start -- "C:\path\to\session.mvp"` / by dragging a `.mvp` onto
 `open-session.bat`.
 
 ## Run from source on Mac
 
-Proper Mac builds come later. Until then you can run it from source:
+The Mac downloads above are the easy way. To run from source instead:
 
 ```
 git clone https://github.com/CaptainSamus/OzyMultiMediaPlayer.git
@@ -54,9 +66,10 @@ npm install
 npm start
 ```
 
-Node.js LTS is required. On a Mac the bundled Windows yt-dlp won't run, so
-YouTube playlists in the sidebar are unavailable there for now; everything
-else works.
+Node.js LTS is required. Run `npm run prefetch` once to fetch the Mac
+yt-dlp (for sidebar playlists) into `bin/`. On a Mac, `Cmd` takes the place
+of `Ctrl` in the shortcuts and clicks below, and "Show in Explorer" is
+**Reveal in Finder**.
 
 ## Network use
 
@@ -160,10 +173,13 @@ itself when you click **Update yt-dlp** in the sidebar.
   videos start at a quiet 10% so twenty of them don't blast you.
 - **Cache** (toolbar) shows how much space playable copies and thumbnails
   use, and clears them.
-- **Save / Save as** writes a `.mvp` session file (plain JSON): every tile
-  with its time, volume, mute, speed, position, bookmarks and group, plus
-  the layout. **Open session** (or dropping a `.mvp` on the window) rebuilds
-  everything. Older session files still open.
+- **Save** writes a `.mvp` session file (plain JSON): every tile with its
+  time, volume, mute, speed, position, bookmarks and group, plus the layout.
+  It saves in place once the session has a file; **right-click Save** (or
+  `Ctrl+Shift+S`) for Save as… to a new file. **Open session** (or dropping
+  a `.mvp` on the window) rebuilds everything. Older session files still open.
+- **Clear board** removes every tile (it asks first) and starts a new,
+  unsaved session.
 
 **Shortcuts.** Anywhere: `Ctrl+A` add videos (Gallery) / select all (Board),
 `Ctrl+O` open session, `Ctrl+S` save, `Ctrl+Shift+S` save as, `Ctrl+Z` undo,

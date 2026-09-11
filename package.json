@@ -1,6 +1,6 @@
 {
   "name": "ozy-multi-media-player",
-  "version": "0.0.2",
+  "version": "0.2.0",
   "description": "Local multi-video player and comparison board with YouTube/Twitch tiles",
   "main": "main.js",
   "private": true,
@@ -8,7 +8,7 @@
     "start": "electron .",
     "test": "node --test",
     "prefetch": "node scripts/fetch-ytdlp.js",
-    "dist": "node scripts/fetch-ytdlp.js && electron-builder --win"
+    "dist": "node scripts/fetch-ytdlp.js && electron-builder"
   },
   "devDependencies": {
     "electron": "^33.0.0",
@@ -22,14 +22,35 @@
   "build": {
     "appId": "com.ozy.multimediaplayer",
     "productName": "Ozy Multi Media Player",
+    "buildVersion": "0.2.0.1",
     "directories": { "output": "dist" },
     "files": ["main.js", "preload.js", "index.html", "app.js", "style.css", "lib/**/*", "!lib/**/*.test.js"],
-    "extraResources": [
-      { "from": "node_modules/ffmpeg-static/ffmpeg.exe", "to": "bin/ffmpeg.exe" },
-      { "from": "node_modules/ffprobe-static/bin/win32/x64/ffprobe.exe", "to": "bin/ffprobe.exe" },
-      { "from": "bin/yt-dlp.exe", "to": "bin/yt-dlp.exe" }
-    ],
-    "win": { "target": ["nsis", "portable"], "icon": "build/icon.png" },
+    "afterPack": "scripts/adhoc-sign.js",
+    "win": {
+      "target": ["nsis", "portable"],
+      "icon": "build/icon.png",
+      "extraResources": [
+        { "from": "node_modules/ffmpeg-static/ffmpeg.exe", "to": "bin/ffmpeg.exe" },
+        { "from": "node_modules/ffprobe-static/bin/win32/${arch}/ffprobe.exe", "to": "bin/ffprobe.exe" },
+        { "from": "bin/yt-dlp.exe", "to": "bin/yt-dlp.exe" }
+      ]
+    },
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ],
+      "category": "public.app-category.video",
+      "icon": "build/icon.png",
+      "hardenedRuntime": false,
+      "identity": null,
+      "artifactName": "OzyMultiMediaPlayer-${version}-mac-${arch}.${ext}",
+      "extraResources": [
+        { "from": "bin/darwin-${arch}/ffmpeg", "to": "bin/ffmpeg" },
+        { "from": "node_modules/ffprobe-static/bin/darwin/${arch}/ffprobe", "to": "bin/ffprobe" },
+        { "from": "bin/yt-dlp", "to": "bin/yt-dlp" }
+      ]
+    },
     "publish": null,
     "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true },
     "portable": { "artifactName": "OzyMultiMediaPlayer-${version}-portable.exe" },
