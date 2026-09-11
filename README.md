@@ -2,92 +2,177 @@
 
 A desktop app that plays many videos at once (20+ if your GPU can decode
 them), with a hover-to-reveal control bar on every video and savable
-sessions that remember each video's position.
+sessions that remember each video's position. Built for comparing renders
+and edits: frame stepping, synced groups, a shared timeline, and A/B wipes,
+next to YouTube and Twitch tiles on the same board.
 
 Fully local for your own files: nothing leaves your machine. The only network
 use is the YouTube and Twitch tiles you add yourself, and the app keeps
 working offline without them.
 
-## One-time setup
+## Get it (Windows)
 
-1. Install Node.js (LTS) from https://nodejs.org — this is the only download
-   besides the Electron runtime itself.
+Use the portable build: `OzyMultiMediaPlayer-1.0.0-portable.exe`. No
+install; double-click it and it runs. ffmpeg, ffprobe and yt-dlp are bundled
+inside, so nothing is downloaded on first run.
+
+To open a saved session with the portable exe, drag the `.mvp` onto the
+running window, use **Open session**, or run
+`OzyMultiMediaPlayer-1.0.0-portable.exe "C:\path\to\session.mvp"`.
+
+Optional: `Ozy Multi Media Player Setup 1.0.0.exe` is a regular installer.
+You only need it if you want to double-click `.mvp` files in Explorer to
+open them (it registers the file type and adds a Start menu entry).
+
+## Build from source (Windows)
+
+1. Install Node.js (LTS) from https://nodejs.org.
 2. In this folder run:
 
 ```
 npm install
+npm start          # run it
+npm test           # unit tests
+npm run dist       # build dist\OzyMultiMediaPlayer-1.0.0-portable.exe (and an installer)
 ```
 
-That downloads Electron, electron-builder and the ffmpeg/ffprobe binaries
-once into `node_modules/`. The app itself loads its UI from a local-only
-server on `127.0.0.1` and cancels every other network request in `main.js`
-unless it goes to YouTube or Twitch (`youtube.com`, `youtube-nocookie.com`,
-`ytimg.com`, `googlevideo.com`, `google.com`, `gstatic.com`,
-`googleapis.com`, `ggpht.com`, `twitch.tv`, `jtvnw.net`, `ttvnw.net`,
-`twitchcdn.net`, `live-video.net`), and only when you add a web tile.
+`npm install` downloads Electron, electron-builder and the ffmpeg/ffprobe
+binaries once into `node_modules/`. `npm run dist` (or `npm run prefetch`)
+downloads `yt-dlp.exe` once into `bin/` for packaging. You can also
+double-click `start.bat`, or open a session straight away with
+`npm start -- "C:\path\to\session.mvp"` / by dragging a `.mvp` onto
+`open-session.bat`.
 
-## Run
+## Run from source on Mac
+
+Proper Mac builds come later. Until then you can run it from source:
 
 ```
+git clone https://github.com/CaptainSamus/OzyMultiMediaPlayer.git
+cd OzyMultiMediaPlayer
+npm install
 npm start
 ```
 
-or double-click `start.bat`.
+Node.js LTS is required. On a Mac the bundled Windows yt-dlp won't run, so
+YouTube playlists in the sidebar are unavailable there for now; everything
+else works.
 
-To open a saved session straight away, drag a `.mvp` file onto
-`open-session.bat`, or run `npm start -- "C:\path\to\session.mvp"`.
+## Network use
+
+The app loads its own UI from a local-only server on `127.0.0.1` and cancels
+every other network request in `main.js` unless it goes to YouTube or Twitch:
+`youtube.com`, `youtube-nocookie.com`, `ytimg.com`, `googlevideo.com`,
+`google.com`, `gstatic.com`, `googleapis.com`, `ggpht.com`, `twitch.tv`,
+`jtvnw.net`, `ttvnw.net`, `twitchcdn.net`, `live-video.net`, and
+`d1ndex63qxojbr.cloudfront.net` (Twitch clip files). That only happens when
+you add a web tile. Listing a YouTube playlist runs the bundled **yt-dlp** as
+its own process; it talks to YouTube directly (outside the app's allowlist)
+and nothing else. The app never checks for updates; yt-dlp only updates
+itself when you click **Update yt-dlp** in the sidebar.
 
 ## Using it
 
-- **+ Add videos** (or drag files onto the window) adds tiles. Nothing
-  autoplays; hit **Play all** or press **Space**.
-- **Hover a tile** to get its own controls: scrub bar, play/pause, −5 s /
-  +5 s (Shift for 30 s), time, bookmarks, mute, and speed. Move the mouse
-  to the **right side** of the picture and a big white volume bar appears:
-  click or drag anywhere on it to set the level (mouse wheel works too).
-  Click the picture to play/pause it, double-click for fullscreen.
-  On the board the controls stay the same size on screen at any zoom.
+- **+ Add videos ▾** has two choices. **Local files…** (`Ctrl+A` in the
+  Gallery) opens the file picker (videos, audio and images); you can also
+  drag files onto the window. **YouTube / Twitch URL…** opens a URL bar that
+  accepts YouTube videos (`watch?v=`, `youtu.be/`, `embed/`), Shorts (tall
+  tiles), playlists (they open in the sidebar), Twitch clips and Twitch
+  channels. Nothing autoplays; hit **Play all** or press **Space**.
+- **Hover a tile** to get its own controls: scrub bar, play/pause, frame
+  step `|◀` `▶|`, −5 s / +5 s (Shift for 30 s), time, bookmarks, mute, and
+  speed. Move the mouse to the **right side** of the picture and a big white
+  volume bar appears: click or drag anywhere on it (mouse wheel works too).
+  Click the picture to play/pause it, double-click for fullscreen. On the
+  board the controls stay the same size on screen at any zoom.
+- **Make playable.** Files the built-in decoders can't play show a button
+  that makes an H.264 copy with the bundled ffmpeg (see Formats).
+- **Frame step and time.** `,` and `.` step one frame back / forward (the
+  video pauses first). Click the time label to switch between clock,
+  frame count, and `HH:MM:SS:FF` timecode; the choice is saved per session.
 - **Bookmarks.** `🔖+` (or `B` while hovering) drops a bookmark at the
-  current time. They show as yellow pins above the scrub bar: click a pin to
-  jump there, right-click to delete. The `🔖 n` button opens a list where
-  you can name, jump to, or delete each one. `[` and `]` jump to the
-  previous / next bookmark. Bookmarks are saved in the session file.
-- **Per-video keys** (with the mouse over a video): `←`/`→` seek 5 s,
-  `↑`/`↓` volume, `K` play/pause, `M` mute, `B` bookmark, `[` `]` bookmarks.
-- **Two layouts.** Tiles always use each video's real aspect ratio.
-  - **Gallery** (attached): videos flow in rows and share one size. Drag any
+  current time; they show as pins above the scrub bar. Click a pin to jump,
+  right-click to delete, Shift-right-click to change its colour. The `🔖 n`
+  list lets you name, recolour (click the dot), jump to, or delete each one.
+  `[` and `]` jump to the previous / next bookmark.
+- **Groups.** Select two or more tiles (lasso or Shift-click) and press
+  **Group** (`Ctrl+G`); **Ungroup** is `Ctrl+Shift+G`. A group gets a name,
+  a colour dot on each member, and a settings bar at the bottom: play/pause,
+  mute, volume and speed for the whole group, plus
+  - **⛓ Sync**: members share one timeline, so play, pause, scrub, frame
+    step and speed on any member apply to all, keeping their offsets.
+  - **📌 Sticky** (board): dragging one member moves the whole group;
+    `Ctrl`-drag moves just one.
+  - **Loop**: off, when the shortest ends, when the longest ends, or a
+    timeline range.
+  Clicking a member selects its group; `Ctrl`-click selects just that tile.
+- **Timeline.** With a group (or one tile) selected, a strip at the bottom
+  shows the shared playhead and every member's bookmarks in colour. `T`
+  expands it to one lane per member. Scrub it, click a marker to jump,
+  `I` / `O` set the loop In / Out at the playhead, or drag the blue handles.
+- **A/B compare.** Select exactly two videos and press `C` (or **A/B**).
+  Both fill the window, synced: drag the white line to wipe between them, or
+  pick **Flip** and press `Tab` to swap. `Space`, `,` `.` work as usual;
+  `Esc` returns them to their tiles.
+- **Undo.** `Ctrl+Z` / `Ctrl+Shift+Z` (or `Ctrl+Y`) undo and redo removing,
+  moving and resizing tiles, 10 steps back.
+- **Sources sidebar** (`` ` `` or **☰ Sources**), with two tabs:
+  - **Local**: **+ Folder** adds a folder; adding files from another folder
+    makes a *Recent* row you can pin with **⋯**. Rows show thumbnails;
+    pictures are tagged IMG. **Add all** adds a folder's videos, **+ images**
+    adds everything including pictures.
+  - **YouTube / Twitch**: **+ Playlist** (or pasting a playlist URL) lists
+    every video with the bundled yt-dlp; the list is kept, so it shows next
+    time without re-reading. If YouTube changes and yt-dlp stops working, an
+    **Update yt-dlp** button appears.
+  Drag rows onto the grid (they land under the cursor on the board),
+  double-click a row, or Ctrl-click several (across folders and tabs) and
+  press **Add selected** / `Enter`. Rows already on the board show a dot.
+  Right-click a local row (or a tile's name) → **Show in Explorer**;
+  right-click a YouTube / Twitch row (or web tile's name) to copy its URL.
+  The sidebar is resizable and remembers its folders, playlists, width and
+  tab in every session.
+- **Image tiles.** jpg, png, gif, webp and bmp become picture tiles: title
+  bar, move, resize, groups and sessions, no playback controls.
+- **YouTube / Twitch tiles.** YouTube tiles use the app's own play, scrub,
+  mute and volume controls and join Play all / Pause all and group mute /
+  volume. Twitch tiles use Twitch's own player. Drag web tiles by their
+  title bar. They can be grouped (Sticky, mute, volume) but don't take part
+  in Sync, the timeline or A/B.
+- **Two layouts.** Tiles always use each item's real aspect ratio.
+  - **Gallery** (attached): tiles flow in rows and share one size. Drag any
     tile's corner, move the zoom slider, or `Ctrl`+wheel and they all resize.
     **Fit all** (`F`) picks the largest size with no scrolling.
-  - **Board** (detached): an infinite canvas, Miro-style. Drag a video by its
+  - **Board** (detached): an infinite canvas, Miro-style. Drag a tile by its
     title bar or picture to move it; pull a corner to resize just that one
     (double-click a corner to reset its size). Middle-mouse or `Alt`-drag
     pans, the wheel scrolls, `Ctrl`+wheel zooms at the cursor, and the
     **✋ Pan** tool (`H`) makes plain left-drag pan too. **Fit all** frames
-    every video; **Tidy** lines them up in rows keeping their sizes. Dropping
-    files onto the board puts them under the cursor. Switching Gallery →
-    Board starts from the exact gallery layout.
+    everything; **Tidy** lines tiles up in rows keeping their sizes.
   - **Lasso.** Left-drag on empty board to draw a rectangle; everything it
-    touches is selected. `Shift`-click adds or removes one video, `Ctrl+A`
-    selects all, `Esc` clears. Drag any selected video and the whole group
-    moves together.
-  - **🔗 Linked** (`L`, on by default). While it's on, moving or resizing a
-    video pushes its neighbours just far enough out of the way that nothing
-    overlaps, and they slide back if you shrink again mid-drag. Turn it off
-    and videos can overlap freely. Hold `Alt` while dragging to bypass it.
-  - **Snapping.** While moving, edges snap to other videos' edges and to a
+    touches is selected. `Shift`-click adds or removes one tile, `Ctrl+A`
+    selects all, `Esc` clears. Drag any selected tile and they all move.
+  - **🔗 Linked** (`L`, on by default): moving or resizing a tile pushes its
+    neighbours out of the way so nothing overlaps. Hold `Alt` to bypass it.
+  - **Snapping.** While moving, edges snap to other tiles' edges and to a
     neat gap beside them; a pink guide line shows the match. `Alt` disables.
-  - Positions, sizes, the board's pan/zoom, and the gallery size are all
-    saved in the session file.
-- **Master volume** (toolbar slider) scales every video's own volume at
-  once. New videos start at a quiet 10% so twenty of them don't blast you;
-  raise a single video with its own slider or everything with the master.
-- **Save / Save as** writes a `.mvp` session file (plain JSON). It stores,
-  for every video: file path, current time, volume, mute state, speed, and
-  whether it was playing. **Open session** (or dropping a `.mvp` on the
-  window) rebuilds the grid and seeks every video back to where it was.
+- **Master volume** (toolbar slider) scales every video's own volume. New
+  videos start at a quiet 10% so twenty of them don't blast you.
+- **Cache** (toolbar) shows how much space playable copies and thumbnails
+  use, and clears them.
+- **Save / Save as** writes a `.mvp` session file (plain JSON): every tile
+  with its time, volume, mute, speed, position, bookmarks and group, plus
+  the layout. **Open session** (or dropping a `.mvp` on the window) rebuilds
+  everything. Older session files still open.
 
-Shortcuts: `Ctrl+A` add videos, `Ctrl+O` open session, `Ctrl+S` save,
-`Ctrl+Shift+S` save as, `Space` play/pause everything.
+**Shortcuts.** Anywhere: `Ctrl+A` add videos (Gallery) / select all (Board),
+`Ctrl+O` open session, `Ctrl+S` save, `Ctrl+Shift+S` save as, `Ctrl+Z` undo,
+`Ctrl+Shift+Z` / `Ctrl+Y` redo, `Ctrl+G` group, `Ctrl+Shift+G` ungroup,
+`Space` play/pause everything, `C` A/B compare, `T` timeline lanes,
+`I` / `O` loop In / Out, `` ` `` sidebar, `F` fit all, `L` linked, `H` pan
+tool, `+` / `-` zoom, `Esc` deselect. Over a video: `←`/`→` seek 5 s
+(Shift 30 s), `↑`/`↓` volume, `K` play/pause, `M` mute, `,` `.` frame step,
+`B` bookmark, `[` `]` previous / next bookmark.
 
 ## Formats
 
