@@ -9,4 +9,10 @@ contextBridge.exposeInMainWorld('api', {
   getPathForFile: (file) => webUtils.getPathForFile(file),
   videoUrl: (p) => 'localvideo://v/' + Buffer.from(p, 'utf8').toString('base64url'),
   onOpenSession: (cb) => ipcRenderer.on('open-session', (_e, p) => cb(p)),
+  probe: (p) => ipcRenderer.invoke('probe', p),
+  makeProxy: (p) => ipcRenderer.invoke('make-proxy', p),
+  cancelProxy: (p) => ipcRenderer.send('cancel-proxy', p),
+  onProxyProgress: (cb) => ipcRenderer.on('proxy-progress', (_e, p, frac) => cb(p, frac)),
+  cacheInfo: () => ipcRenderer.invoke('cache-info'),
+  clearCache: () => ipcRenderer.invoke('clear-cache'),
 });

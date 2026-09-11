@@ -194,3 +194,99 @@ ipcMain.handle('load-session', async (_e, filePath) => {
 ipcMain.handle('file-exists', (_e, p) => {
   try { return fs.existsSync(p); } catch { return false; }
 });
+
+// ---- ffprobe / ffmpeg proxies ----
+
+const { execFile, spawn } = require('child_process');
+const Codecs = require('./lib/codecs');
+const ProxyCache = require('./lib/proxy');
+
+const proxyDir = () => path.join(app.getPath('userData'), 'proxies');
+function proxyPathFor(filePath, stat) {
+  return path.join(proxyDir(), ProxyCache.name(filePath, stat.size, stat.mtimeMs));
+}
+let toolsAvailable = null;
+function checkTools() {
+  if (toolsAvailable === null) {
+    try { toolsAvailable = fs.existsSync(binPath('ffmpeg')) && fs.existsSync(binPath('ffprobe')); }
+    catch { toolsAvailable = false; }
+  }
+  return toolsAvailable;
+}
+
+ipcMain.handle('probe', async (_e, filePath) => {
+  const base = { codec: null, width: null, height: null, fps: null, duration: null, mime: null, proxy: null, available: checkTools() };
+  let stat;
+  try { stat = fs.statSync(filePath); } catch { return base; }
+  const proxy = proxyPathFor(filePath, stat);
+  if (fs.existsSync(proxy)) base.proxy = proxy;
+  if (!base.available) return base;
+  const json = await new Promise((resolve) => {
+    execFile(binPath('ffprobe'), [
+      '-v', 'error', '-show_entries',
+      'stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate:format=duration',
+      '-of', 'json', filePath,
+    ], { windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+      if (err) return resolve(null);
+      try { resolve(JSON.parse(stdout)); } catch { resolve(null); }
+    });
+  });
+  if (!json) return base;
+  return { ...base, ...Codecs.parseProbe(json, path.extname(filePath).toLowerCase()) };
+});
+
+// One ffmpeg at a time; others wait their turn.
+const proxyJobs = new Map(); // filePath -> { child, reject }
+let proxyQueue = Promise.resolve();
+
+ipcMain.handle('make-proxy', (e, filePath) => {
+  const send = (...args) => { if (!e.sender.isDestroyed()) e.sender.send('proxy-progress', ...args); };
+  const run = () => new Promise((resolve, reject) => {
+    if (!checkTools()) return reject(new Error('ffmpeg not found'));
+    let stat;
+    try { stat = fs.statSync(filePath); } catch { return reject(new Error('File not found')); }
+    fs.mkdirSync(proxyDir(), { recursive: true });
+    const out = proxyPathFor(filePath, stat);
+    if (fs.existsSync(out)) return resolve({ proxy: out });
+    const tmp = out + '.part.mp4';
+    const child = spawn(binPath('ffmpeg'), ProxyCache.args(filePath, tmp), { windowsHide: true });
+    proxyJobs.set(filePath, { child, reject });
+    let duration = 0, tail = '';
+    child.stderr.on('data', (buf) => {
+      const s = buf.toString();
+      tail = (tail + s).slice(-2000);
+      if (!duration) { const m = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(s); if (m) duration = +m[1] * 3600 + +m[2] * 60 + +m[3]; }
+      const t = ProxyCache.parseTime(s);
+      if (t !== null && duration) send(filePath, Math.min(0.99, t / duration));
+    });
+    child.on('close', (code) => {
+      proxyJobs.delete(filePath);
+      if (code === 0) {
+        try { fs.renameSync(tmp, out); } catch (err) { return reject(new Error('Could not save playable copy: ' + err.message)); }
+        send(filePath, 1);
+        resolve({ proxy: out });
+      } else {
+        try { fs.unlinkSync(tmp); } catch {}
+        reject(new Error(code === null ? 'Cancelled' : 'ffmpeg failed:\n' + tail.split('\n').slice(-4).join('\n')));
+      }
+    });
+  });
+  const p = proxyQueue.then(run, run);
+  proxyQueue = p.catch(() => {});
+  return p;
+});
+
+ipcMain.on('cancel-proxy', (_e, filePath) => {
+  const job = proxyJobs.get(filePath);
+  if (job) job.child.kill();
+});
+
+ipcMain.handle('cache-info', () => {
+  let bytes = 0, files = 0;
+  try { for (const f of fs.readdirSync(proxyDir())) { bytes += fs.statSync(path.join(proxyDir(), f)).size; files++; } } catch {}
+  return { bytes, files };
+});
+ipcMain.handle('clear-cache', () => {
+  for (const job of proxyJobs.values()) job.child.kill();
+  try { fs.rmSync(proxyDir(), { recursive: true, force: true }); } catch {}
+});
