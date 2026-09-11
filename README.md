@@ -93,7 +93,9 @@ itself when you click **Update yt-dlp** in the sidebar.
   tiles), playlists (they open in the sidebar), Twitch clips and Twitch
   channels. Nothing autoplays; hit **Play all** or press **Space**.
 - **Hover a tile** to get its own controls: scrub bar, play/pause, frame
-  step `|◀` `▶|`, −5 s / +5 s (Shift for 30 s), time, bookmarks, mute, and
+  step `|◀` `▶|`, −5 s / +5 s (Shift for 30 s), time, bookmarks, mute,
+  **🔁 loop** (`L`; repeats that video on its own, and is ignored while the
+  tile is in a synced group, where the group's Loop setting rules), and
   speed. Move the mouse to the **right side** of the picture and a big white
   volume bar appears: click or drag anywhere on it (mouse wheel works too).
   Click the picture to play/pause it. Every tile's title bar has **✕**
@@ -126,8 +128,9 @@ itself when you click **Update yt-dlp** in the sidebar.
     timeline range.
   Clicking a member selects its group; `Ctrl`-click selects just that tile.
 - **Timeline.** A strip at the bottom is always there while any local or
-  YouTube video is open (Twitch tiles and pictures never appear on it). It follows the selected group, else the selected videos
-  ("N selected"), else **All videos**, and shows the shared playhead and
+  YouTube video is open (Twitch tiles and pictures never appear on it).
+  It follows the selected group, else the selected videos ("N selected"),
+  else **All videos**, and shows the shared playhead and
   every bookmark. With one video its markers keep their bookmark colours;
   with several, each video has its own colour (shown in the legend and on
   its lane). Scrub it, click a marker to jump, `I` / `O` set the loop In /
@@ -184,10 +187,13 @@ itself when you click **Update yt-dlp** in the sidebar.
     touches is selected. `Shift`-click adds or removes one tile (it never
     plays or pauses, and a grouped tile toggles on its own), `Ctrl+A`
     selects all, `Esc` clears. Drag any selected tile and they all move.
-  - **🔗 Linked** (`L`, on by default): moving or resizing a tile pushes its
+  - **🔗 Linked** (`Shift+L`, on by default): moving or resizing a tile pushes its
     neighbours out of the way so nothing overlaps. Hold `Alt` to bypass it.
   - **Snapping.** While moving, edges snap to other tiles' edges and to a
     neat gap beside them; a pink guide line shows the match. `Alt` disables.
+- **🔇 Mute all** (toolbar) mutes every video; once every one is muted it
+  reads **🔊 Unmute all**. **🔁 Loop all** turns on every video's own loop
+  (it lights up), and a second click turns them all off.
 - **Master volume** (toolbar slider) scales every video's own volume. New
   videos start at a quiet 10% so twenty of them don't blast you.
 - **Cache** (toolbar) shows how much space playable copies and thumbnails
@@ -206,9 +212,9 @@ itself when you click **Update yt-dlp** in the sidebar.
 `Space` play/pause everything, `C` A/B compare, `T` expand / collapse the timeline,
 `I` / `O` loop In / Out, `` ` `` sidebar, `F` fullscreen the selected video
 (again to exit), `Esc` leave fullscreen, `Shift+F` fill the view with the
-selected videos (Board; `Ctrl+Z` undoes), `L` linked, `H` pan +
+selected videos (Board; `Ctrl+Z` undoes), `Shift+L` linked, `H` pan +
 zoom tool, `+` / `-` zoom, `Esc` deselect. Over a video: `←`/`→` seek 5 s
-(Shift 30 s), `↑`/`↓` volume, `K` play/pause, `M` mute, `,` `.` frame step,
+(Shift 30 s), `↑`/`↓` volume, `K` play/pause, `M` mute, `L` loop, `,` `.` frame step,
 `B` bookmark, `[` `]` previous / next bookmark.
 
 ## Formats

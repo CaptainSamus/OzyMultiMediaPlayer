@@ -102,6 +102,7 @@ function updateChrome() {
   countEl.textContent = tiles.length ? `${tiles.length} video${tiles.length === 1 ? '' : 's'}` : '';
   const name = sessionPath ? basename(sessionPath) : 'Unsaved session';
   document.title = `${name} – Ozy Multi Media Player`;
+  refreshToolbarToggles();
 }
 
 const isBoard = () => layout.mode === 'board';
@@ -119,6 +120,36 @@ function setOwnMuted(tile, m) {
   const muted = tile.ownMuted || !!(tile.group && tile.group.muted);
   if (tile.video) tile.video.muted = muted;
   else if (tile.yt) { muted ? tile.yt.mute() : tile.yt.unmute(); if (tile.refreshMute) tile.refreshMute(); }
+  refreshToolbarToggles();
+}
+const isMuted = (t) => !!(t.ownMuted || (t.group && t.group.muted));
+
+// ---------- per-tile loop ----------
+// tile.loop repeats a local or YouTube video on its own. Inside a synced group the group's timeline
+// is in charge (its Loop setting, or holding at the end), so the tile's loop is ignored and its
+// button dims.
+const loopOverridden = (t) => !!(t.group && t.group.sync);
+function applyTileLoop(t) {
+  if (!t.pb) return;
+  const on = !!t.loop && !loopOverridden(t);
+  if (t.video) t.video.loop = on;
+  const b = t.el.querySelector('.loop');
+  b.classList.toggle('toggled', !!t.loop);
+  b.classList.toggle('overridden', loopOverridden(t));
+  b.title = loopOverridden(t) ? 'Loop this video (L). Off while its group is synced: the group\'s Sync / Loop is in charge.' : 'Loop this video (L)';
+}
+function setTileLoop(t, on) { t.loop = !!on; applyTileLoop(t); refreshToolbarToggles(); }
+function applyLoops() { for (const t of tiles) applyTileLoop(t); }
+
+// Toolbar: one Mute all / Unmute all toggle (Twitch has no mute, so it doesn't count) and Loop all.
+function refreshToolbarToggles() {
+  const mutable = tiles.filter((t) => t.video || t.yt);
+  const allMuted = mutable.length > 0 && mutable.every(isMuted);
+  const m = document.getElementById('btn-mute-all');
+  m.textContent = allMuted ? '🔊 Unmute all' : '🔇 Mute all';
+  m.title = allMuted ? 'Unmute every video' : 'Mute every video';
+  const loopable = tiles.filter((t) => t.pb);
+  document.getElementById('btn-loop-all').classList.toggle('toggled', loopable.length > 0 && loopable.every((t) => t.loop));
 }
 // Play state across local <video> tiles and YouTube tiles (Twitch has no API: skipped).
 function playTile(t) { if (t.video) t.video.play().catch(() => {}); else if (t.yt) t.yt.play(); }
@@ -340,7 +371,7 @@ function createGroup(list, opts = {}) {
 // back to the tile's own mute and volume once it leaves its group
 function releaseTile(t) {
   t.group = null; t.sync = null; paintGroup(t);
-  setOwnMuted(t, t.ownMuted); applyTileVolume(t);
+  setOwnMuted(t, t.ownMuted); applyTileVolume(t); applyTileLoop(t);
 }
 function removeFromGroup(g, t) {
   g.members.delete(t); releaseTile(t);
@@ -375,6 +406,7 @@ function syncActiveFromSelection() {
 const gb = document.getElementById('groupbar');
 const gbQ = (s) => gb.querySelector(s);
 function renderGroupBar() {
+  applyLoops(); // Sync on/off changes whether each tile's own loop counts
   gb.hidden = !active;
   if (!active) return;
   const g = active;
@@ -839,6 +871,7 @@ function restoreRemoved(entry) {
   layoutTiles();
   if (typeof markOnBoard === 'function') markOnBoard(); // sidebar arrives in Task 12
   if (active) renderGroupBar();
+  applyLoops(); // back in a synced group: its own loop is overridden again
 }
 function applyEntry(entry, dir) {
   if (entry.kind === 'move' || entry.kind === 'resize') applyRects(entry, dir);
@@ -1487,6 +1520,7 @@ function addVideo(filePath, state = {}) {
   tile.group = null; tile.sync = null; tile.ownMuted = !!state.muted;
   // its own colour for multi-video timelines: saved, else round-robin by position at creation
   tile.hue = GROUP_PALETTE.includes(state.color) ? state.color : GROUP_PALETTE[(tiles.length - 1) % GROUP_PALETTE.length];
+  tile.loop = state.loop === true;
 
   nameEl.textContent = basename(filePath);
   nameEl.title = filePath + '\nRight-click: ' + REVEAL_LABEL;
@@ -1701,6 +1735,10 @@ function addVideo(filePath, state = {}) {
   };
   tile.setVolume = setTileVolume;
   muteBtn.addEventListener('click', () => setOwnMuted(tile, !tile.ownMuted));
+  const loopBtn = el.querySelector('.loop');
+  loopBtn.addEventListener('click', () => setTileLoop(tile, !tile.loop));
+  loopBtn.addEventListener('dblclick', (e) => e.stopPropagation());
+  applyTileLoop(tile);
   rate.addEventListener('change', () => { video.playbackRate = Number(rate.value); broadcast(tile, 'rate', video.playbackRate); });
 
   // volume bar: click or drag anywhere on it; the level is wherever the mouse is
@@ -1934,8 +1972,11 @@ function addWebTile(url, parsed, state = {}, at = null) {
   if (parsed.type === 'youtube') {
     const yt = tile.yt = ytController(iframe);
     const pb = tile.pb = ytPlayback(yt);
-    let first = true, knownDuration = 0;
+    let first = true, knownDuration = 0, lastState = yt.st.state;
     yt.onChange((st, ev) => {
+      // its own loop: YouTube has no loop-one-video flag, so restart when it ends
+      if (st.state === 0 && lastState !== 0 && tile.loop && !loopOverridden(tile)) { pb.time = 0; yt.play(); }
+      lastState = st.state;
       if (st.ready && !errorEl.classList.contains('hidden')) errorEl.classList.add('hidden'); // a late load clears "Could not load"
       if (first && st.ready) {
         first = false;
@@ -1983,6 +2024,11 @@ function addWebTile(url, parsed, state = {}, at = null) {
       broadcast(tile, 'seek');
     });
     muteBtn.addEventListener('click', () => { setOwnMuted(tile, !tile.ownMuted); refreshMute(); });
+    tile.loop = state.loop === true;
+    const loopBtn = el.querySelector('.loop');
+    loopBtn.addEventListener('click', () => setTileLoop(tile, !tile.loop));
+    loopBtn.addEventListener('dblclick', (e) => e.stopPropagation());
+    applyTileLoop(tile);
   }
   tile.setVolume = (pct) => { tile.volume = clamp(pct, 0, 100) / 100; applyTileVolume(tile); if (tile.volume > 0 && tile.ownMuted) setOwnMuted(tile, false); refreshMute(); };
   tile.destroy = () => { clearTimeout(loadTimer); if (tile.yt) tile.yt.destroy(); };
@@ -2135,13 +2181,14 @@ function collectSession() {
       currentTime: t.pb ? t.pb.time : 0, volume: t.volume, muted: !!t.ownMuted, playbackRate: 1,
       paused: t.yt ? t.yt.paused : true, aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
-      color: t.hue, // YouTube only
+      color: t.hue, loop: !!t.loop, // YouTube only
       bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
       sync: t.sync && t.pb ? { start: t.sync.start } : null,
     } : {
       type: 'file',
       path: t.path,
       color: t.hue,
+      loop: !!t.loop,
       currentTime: isFinite(t.video.currentTime) ? t.video.currentTime : 0,
       volume: t.volume,
       muted: t.group ? !!t.ownMuted : t.video.muted, // own mute, not the group's
@@ -2299,11 +2346,29 @@ document.getElementById('btn-cache').addEventListener('click', async () => {
 });
 document.getElementById('btn-play-all').addEventListener('click', () => tiles.forEach(playTile));
 document.getElementById('btn-pause-all').addEventListener('click', () => tiles.forEach(pauseTile));
+/* DISABLED (Mark, 2026-09-11): Mute all + Unmute all merged into one toggle (below)
 document.getElementById('btn-mute-all').addEventListener('click', () => tiles.forEach((t) => setOwnMuted(t, true)));
 document.getElementById('btn-unmute-all').addEventListener('click', () => {
   for (const g of groups) g.muted = false; // "all" includes group mutes
   tiles.forEach((t) => setOwnMuted(t, false));
   renderGroupBar();
+});
+*/
+// Mute all while any video is audible; once every one is muted it becomes Unmute all
+document.getElementById('btn-mute-all').addEventListener('click', () => {
+  const mutable = tiles.filter((t) => t.video || t.yt);
+  if (mutable.length && mutable.every(isMuted)) {
+    for (const g of groups) g.muted = false; // "all" includes group mutes
+    tiles.forEach((t) => setOwnMuted(t, false));
+  } else tiles.forEach((t) => setOwnMuted(t, true));
+  renderGroupBar();
+  refreshToolbarToggles();
+});
+document.getElementById('btn-loop-all').addEventListener('click', () => {
+  const loopable = tiles.filter((t) => t.pb);
+  const on = !(loopable.length && loopable.every((t) => t.loop));
+  for (const t of loopable) setTileLoop(t, on);
+  setStatus(on ? 'Every video loops (a synced group still follows its own Loop setting)' : 'Loops off');
 });
 document.getElementById('btn-fit').addEventListener('click', fitAll);
 // DISABLED (Mark, 2026-09-11): old Tidy wrapped at the tiles' own width and collapsed into 2 columns; replaced by the Tidy menu
@@ -2704,6 +2769,7 @@ window.addEventListener('keydown', (e) => {
     if (e.key === ']' && h.jumpBookmark) { h.jumpBookmark(1); return; }
     if (key === 'k' && h.togglePlay) { h.togglePlay(); return; }
     if (key === 'm' && (h.video || h.yt)) { setOwnMuted(h, !h.ownMuted); return; }
+    if (key === 'l' && !e.shiftKey && !ctrl && h.pb) { setTileLoop(h, !h.loop); setStatus(h.loop ? `Looping ${tileName(h)}` : `Loop off – ${tileName(h)}`); return; }
     if (e.key === ',' && h.stepFrame) { h.stepFrame(-1); return; }
     if (e.key === '.' && h.stepFrame) { h.stepFrame(1); return; }
   }
@@ -2714,9 +2780,16 @@ window.addEventListener('keydown', (e) => {
     tiles.forEach((t) => (anyPlaying ? pauseTile(t) : playTile(t)));
   } else if (e.key === 'Escape') {
     clearSelection();
+  /* DISABLED (Mark, 2026-09-11): plain L now loops the hovered video; Linked moved to Shift+L
   } else if (key === 'l' && isBoard()) {
     setLinked(!board.linked);
     setStatus(board.linked ? 'Linked: neighbours move out of the way' : 'Unlinked: videos may overlap');
+  */
+  } else if (key === 'l' && e.shiftKey && !ctrl && isBoard()) {
+    setLinked(!board.linked);
+    setStatus(board.linked ? 'Linked: neighbours move out of the way' : 'Unlinked: videos may overlap');
+  } else if (key === 'l' && !ctrl) {
+    setStatus('L loops the video under the mouse' + (isBoard() ? '; Shift+L toggles Linked' : ''));
   } else if (key === 'h' && isBoard()) {
     setHand(!board.hand);
   } else if (ctrl && key === 'a' && isBoard()) {

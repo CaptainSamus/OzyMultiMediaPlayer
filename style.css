@@ -549,7 +549,7 @@ body.resizing .tile.resizing { pointer-events: auto; }
 .overlay .row { display: flex; align-items: center; gap: 8px; }
 .overlay .spacer { flex: 1 1 auto; }
 
-.overlay .play, .overlay .mute {
+.overlay .play, .overlay .mute, .overlay .loop {
   background: rgba(255,255,255,0.12);
   border: none;
   color: #fff;
@@ -559,7 +559,9 @@ body.resizing .tile.resizing { pointer-events: auto; }
   cursor: pointer;
   font-size: 13px;
 }
-.overlay .play:hover, .overlay .mute:hover { background: rgba(255,255,255,0.25); }
+.overlay .play:hover, .overlay .mute:hover, .overlay .loop:hover { background: rgba(255,255,255,0.25); }
+.overlay .loop.toggled { background: var(--accent); }
+.overlay .loop.overridden { opacity: 0.4; } /* a synced group's Sync / loop is in charge */
 
 .overlay .time { font-variant-numeric: tabular-nums; font-size: 12px; text-shadow: 0 1px 2px #000; white-space: nowrap; cursor: pointer; }
 
@@ -577,7 +579,7 @@ body.resizing .tile.resizing { pointer-events: auto; }
 .overlay .bm-add, .overlay .bm-list, .overlay .back, .overlay .fwd, .overlay .fstep-back, .overlay .fstep-fwd {
   min-width: clamp(26px, 3.2cqi, 40px); height: clamp(26px, 3.2cqi, 40px); font-size: clamp(11px, 1.35cqi, 17px);
 }
-.overlay .play, .overlay .mute { min-width: clamp(30px, 3.7cqi, 46px); height: clamp(26px, 3.2cqi, 40px); font-size: clamp(13px, 1.6cqi, 20px); }
+.overlay .play, .overlay .mute, .overlay .loop { min-width: clamp(30px, 3.7cqi, 46px); height: clamp(26px, 3.2cqi, 40px); font-size: clamp(13px, 1.6cqi, 20px); }
 .overlay .time, .overlay .rate { font-size: clamp(12px, 1.5cqi, 18px); }
 
 /* range inputs */

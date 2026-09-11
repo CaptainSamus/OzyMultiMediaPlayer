@@ -27,8 +27,12 @@
     <span class="sep"></span>
     <button id="btn-play-all" title="Play every video (Space)">Play all</button>
     <button id="btn-pause-all" title="Pause every video (Space)">Pause all</button>
+    <!-- DISABLED (Mark, 2026-09-11): Mute all + Unmute all merged into one toggle; Loop all took the freed slot
     <button id="btn-mute-all" title="Mute every video">Mute all</button>
     <button id="btn-unmute-all" title="Unmute every video">Unmute all</button>
+    -->
+    <button id="btn-mute-all" title="Mute every video, or unmute them all when every one is muted">🔇 Mute all</button>
+    <button id="btn-loop-all" title="Loop every video; click again to turn every loop off">🔁 Loop all</button>
     <span class="sep"></span>
     <div class="seg" id="mode">
       <button data-mode="gallery" class="active" title="Attached: videos flow in rows and share one size. Pull any corner to resize them all.">Gallery</button>
@@ -53,7 +57,7 @@
         <button id="tidy-grid" title="Keep sizes and pack edge to edge into a rough square (Ctrl+Z undoes). Linked spaces them out again on the next drag.">Grid <small>keep sizes, no gaps</small></button>
       </div>
     </div>
-    <button id="btn-link" class="board-only" title="Linked: when you move or resize a video, its neighbours slide out of the way so nothing overlaps (L). Off: videos can overlap freely.">🔗 Linked</button>
+    <button id="btn-link" class="board-only" title="Linked: when you move or resize a video, its neighbours slide out of the way so nothing overlaps (Shift+L). Off: videos can overlap freely.">🔗 Linked</button>
     <button id="btn-hand" class="board-only" title="Pan + zoom: left-drag pans, wheel zooms (H). Middle-mouse or Alt-drag always pans.">✋ Pan + zoom</button>
     <span id="count"></span>
     <span class="sep"></span>
@@ -226,6 +230,7 @@
             <button class="bm-add" title="Add a bookmark at the current time (B)">🔖+</button>
             <button class="bm-list" title="Bookmarks: click to list, rename, or delete. [ and ] jump between them.">🔖<span class="bm-count">0</span></button>
             <button class="mute" title="Mute / unmute (M)">🔊</button>
+            <button class="loop" title="Loop this video (L)">🔁</button>
             <select class="rate" title="Playback speed">
               <option value="0.25">0.25×</option>
               <option value="0.5">0.5×</option>
@@ -281,6 +286,7 @@
             <button class="bm-add" title="Add a bookmark at the current time (B)">🔖+</button>
             <button class="bm-list" title="Bookmarks: click to list, rename, or delete. [ and ] jump between them.">🔖<span class="bm-count">0</span></button>
             <button class="mute" title="Mute / unmute (M)">🔊</button>
+            <button class="loop" title="Loop this video (L)">🔁</button>
           </div>
           <div class="bm-panel hidden"></div>
         </div>
