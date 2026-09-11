@@ -1,6 +1,6 @@
 {
   "name": "ozy-multi-media-player",
-  "version": "1.0.0",
+  "version": "0.0.2",
   "description": "Local multi-video player and comparison board with YouTube/Twitch tiles",
   "main": "main.js",
   "private": true,

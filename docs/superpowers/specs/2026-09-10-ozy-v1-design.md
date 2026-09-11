@@ -26,31 +26,53 @@ accounts are v2 and are out of scope here.
 
 The app must work fully offline. Every local feature (file tiles, layouts,
 bookmarks, sessions, ffmpeg proxies, frame step, sync, A/B) runs with no
-network access at all. Only web tiles need a connection. When offline:
+network access at all. Only web tiles need a connection. Their only offline
+handling: a YouTube tile that doesn't report ready within 10 s shows a
+"Could not load" panel with a Retry button over the video's cached
+thumbnail (fetched once when the tile was added, stored with the other
+thumbnails), so it still looks like the video it is. Twitch tiles show
+a generic icon. Nothing else in the app is affected.
 
-- Adding a URL is still allowed; the tile shows "Offline – will load when
-  connected" and retries every 30 s (or on a Retry button) instead of
-  spinning forever.
-- Sessions containing web tiles open normally; web tiles sit in their
-  saved position in the offline state, and nothing else is blocked.
 - The app never phones home, checks for updates, or loads any remote
   asset for its own UI. All scripts, styles, fonts, and icons ship in the
   package. The installer must not require a connection to run.
 - ffmpeg, ffprobe, and yt-dlp ship inside the installer, never downloaded
   on first run. yt-dlp's self-update runs only when the user clicks it.
-- Playlists already listed show from the settings cache while offline;
-  their thumbnails fall back to a generic icon.
 
 ## Out of scope for v1
 
-EXR or image sequences, website hosting, board sharing, accounts, home
-server or network library, mood board export.
+EXR or image sequences (single still images are in, see feature 8),
+website hosting, board sharing, accounts, home server or network library,
+mood board export. macOS support is v1.1, right after the Windows v1.0
+release (plan Task 16): unsigned Mac build as a self-contained zip (no
+install, all dependencies inside the app bundle, about 200 MB), Cmd
+modifiers, open-file, and a GitHub Actions workflow that builds Windows
+and Mac artifacts for one release. Downloads are per OS; the code and
+version are shared.
+
+## Later: auto-update, then installers (v2, Mark 2026-09-10)
+
+Long term the app auto-updates so nobody reinstalls by hand, and only
+then do installers (Windows NSIS as primary, Mac .dmg) replace the
+portable / zip downloads. Order matters:
+1. Apple Developer account, code signing and notarization for the Mac
+   build; Windows Authenticode signing is optional but avoids SmartScreen
+   warnings. Mac auto-update cannot work on an unsigned app.
+2. `electron-updater` pulling from GitHub Releases (`publish` switches
+   from `null` to the github provider; the app checks on launch and
+   offers "Restart to update"). This is the one place the app phones
+   home, so the README must say so and a setting must let it be turned
+   off.
+3. Then the .dmg and NSIS become the primary downloads; portable / zip
+   stay available for people who don't want an install.
 
 ## Features
 
 ### 1. Installer and packaging
 
-- Add `electron-builder`. Targets: NSIS installer and portable exe, x64.
+- Add `electron-builder`. Targets: portable exe (the primary download,
+  no install) and an optional NSIS installer whose only extra is the
+  `.mvp` Explorer association, x64.
 - Product name "Ozy Multi Media Player", app id `com.ozy.multimediaplayer`.
   App icon: Mark's film-reel / disc artwork, supplied as `build/icon.png`
   (square, 512 px or larger). electron-builder derives the `.ico` from
@@ -112,7 +134,7 @@ of 8, and settings. A tile is in at most one group; grouping selected
 tiles that are already in other groups pulls them out of those. Members
 show the group colour as a swatch on the title bar. **Ungroup**
 (`Ctrl+Shift+G`) dissolves it. Clicking a member selects the whole group
-(Alt-click selects only that tile). Groups exist in both layouts; the
+(Ctrl-click selects only that tile; Alt is already pan). Groups exist in both layouts; the
 spatial behaviour below only applies on the board.
 
 **Group settings bar.** Appears above the unified timeline whenever a
@@ -130,7 +152,7 @@ group is selected. Controls, each applying only to that group:
   check every 500 ms re-seeks any follower more than 80 ms off. When off, members play independently but still share
   mute, volume, speed, and loop settings.
 - **Sticky** on/off (board only). When on, dragging any member moves the
-  whole group and lasso treats the group as one; Alt-drag moves one
+  whole group and lasso treats the group as one; Ctrl-drag moves one
   member. When off, members move independently.
 - **Loop** mode:
   - *Off*: each member stops at its end; pressing Play on a group whose
@@ -187,6 +209,21 @@ Version 3 files still load (no groups, default colours).
 - `Esc` or the close button returns the elements to their tiles, drops
   the temporary group, and re-runs layout.
 
+### 5b. Undo (Ctrl+Z)
+
+- `Ctrl+Z` reverts the last of these actions: removing a tile (✕ or
+  session clear is excluded), moving tiles on the board (a group or
+  lasso drag is one entry), resizing a tile on the board, and resizing
+  the gallery (row height). `Ctrl+Shift+Z` redoes.
+- History holds at most 10 entries; the oldest drops off. Entries store
+  only what they need: for a move or resize, the previous board rects (or
+  row height) of the affected tiles; for a removal, the tile's full
+  session record (path or url, time, volume, mute, rate, bookmarks,
+  board rect, group id and start) so it comes back exactly as it was,
+  re-joining its group if that group still exists.
+- Opening a session or clearing all resets history. A status message
+  names what was undone ("Undo: move 3 videos").
+
 ### 6. Web tiles (YouTube, Twitch)
 
 - The existing **+ Add videos** button becomes a small pulldown with two
@@ -219,28 +256,46 @@ Version 3 files still load (no groups, default colours).
   (`videos[i].url`, `type`), Play all / Pause all, and master volume
   (YouTube only). They can join groups for Sticky, mute, and volume
   (YouTube only), but not Sync, Loop, the timeline, or A/B in v1.
-- Network: the hard block in `main.js` becomes an allowlist for
-  `youtube.com`, `youtube-nocookie.com`, `ytimg.com`, `googlevideo.com`,
-  `twitch.tv`, `jtvnw.net`, `ttvnw.net`, `twitchcdn.net`. CSP gains
-  `frame-src` for the same. README's "never touches the network" claim
-  is updated to "only when you add a web tile".
-- **Spike before planning this feature:** Twitch's embed requires a
-  `parent` that matches the page's origin, and file:// pages have none.
-  Try (a) the `localvideo://` privileged scheme with `parent=localvideo`,
-  (b) serving `index.html` from a localhost http server bound to
-  127.0.0.1 with a random port. Pick whichever works; if neither does,
-  Twitch tiles drop to v1.1 and YouTube ships alone.
+- **Page origin (spike result, 2026-09-10).** Both YouTube (error 153)
+  and Twitch refuse to embed from `file://` or a custom scheme. So main
+  serves the UI from a loopback http server: bound to `127.0.0.1`,
+  random port, serving only files under the app directory (normalised
+  path, nothing outside it, no directory listing), closed on quit. The
+  window loads `http://127.0.0.1:<port>/index.html`; `localvideo://`
+  keeps streaming local files. Twitch embeds use `parent=127.0.0.1`.
+  This works offline. Findings: `docs/superpowers/specs/2026-09-10-twitch-spike.md`.
+- Network: the hard block in `main.js` becomes an allowlist (host or any
+  subdomain): `youtube.com`, `youtube-nocookie.com`, `ytimg.com`,
+  `googlevideo.com`, `google.com`, `gstatic.com`, `googleapis.com`,
+  `ggpht.com`, `twitch.tv`, `jtvnw.net`, `ttvnw.net`, `twitchcdn.net`,
+  `live-video.net`, plus the exact host `d1ndex63qxojbr.cloudfront.net`
+  (Twitch's clip video CDN; exact host rather than all of cloudfront.net,
+  update it if Twitch moves). Everything else stays blocked, including ad and
+  tracking hosts the embeds try (`amazon-adsystem.com`,
+  `iabtechnologylab.com`, `cdndex.io`), which has no visible effect on
+  playback. CSP gains `frame-src` for `player.twitch.tv`,
+  `clips.twitch.tv`, `www.youtube.com`, `www.youtube-nocookie.com`.
+  README's "never touches the network" claim is updated to "only when
+  you add a web tile".
 
 ### 7. Sources sidebar (folders and playlists)
 
 - A collapsible panel on the left of the grid (toggle button in the
   toolbar and key `\``; width drag-resizable, 220–480 px, remembered).
-  Two sections: **Folders** and **Playlists**. Each source is a row with
+  Two tabs: **Local** (folders) and **YouTube / Twitch** (playlists);
+  the active tab is remembered. An **Add selected** button in the panel
+  head adds every highlighted row (across sources and tabs), confirming
+  above 30. Each source is a row with
   a name, item count, and a menu (Refresh, Add all, Pin/Unpin, Remove).
   Clicking a source expands it into a scrollable list of items:
   thumbnail, name, duration. Sources and the panel state live in a global
   settings file `app.getPath('userData')/settings.json`, not in the
   session, so favourites show in every session.
+- **Right-click on a row.** Local tab: right-click a file row opens a
+  small menu with "Show in Explorer" (selects the file in a new Explorer
+  window). YouTube / Twitch tab: right-click a playlist row copies the
+  video's URL to the clipboard and the status bar says "Copied". The
+  same two actions exist on tiles' title bars for file and web tiles.
 - **Folders.** Added by the **Add folder…** button (Windows folder picker)
   or automatically as the "Recent" entry whenever the user adds local
   files: the parent folder of the last pick becomes the single Recent
@@ -261,10 +316,9 @@ Version 3 files still load (no groups, default colours).
   (feature 6) or via **Add playlist…** in the sidebar. Main runs the
   bundled **yt-dlp** (`yt-dlp --flat-playlist -J <url>`), which returns
   title, id, duration, and thumbnail URL for every entry with no API key
-  and no size cap. The list is cached in settings.json (so it shows
-  offline) and refreshed on demand. Thumbnails are YouTube's own
-  `i.ytimg.com` images, loaded by the renderer through the network
-  allowlist; offline they fall back to the generic icon.
+  and no size cap. The list is cached in settings.json and refreshed on
+  demand. Thumbnails are YouTube's own `i.ytimg.com` images, loaded by
+  the renderer through the network allowlist.
 - **yt-dlp lifecycle.** The binary ships in the installer. If it exits
   non-zero with an "unsupported"/"unable to extract" style error, the
   sidebar shows "yt-dlp needs updating" with a button that runs
@@ -280,6 +334,25 @@ Version 3 files still load (no groups, default colours).
   on the board show a small dot.
 - The pulldown's **YouTube / Twitch URL…** flow is unchanged for single
   videos, Shorts, clips, and streams.
+
+### 8. Image tiles and "Add all + images"
+
+- Still images (`.jpg .jpeg .png .gif .webp .bmp`) can be tiles. An
+  image tile shows the picture (`<img>`, `object-fit: contain`) with the
+  title bar, remove, move, resize, lasso, Linked and snapping, sessions
+  (`type: 'image'`), undo, and group membership for Sticky only. No
+  playback controls, no bookmarks, no sync, no timeline, no A/B.
+  Aspect comes from the image's natural size.
+- Images arrive from the sidebar or from dropping image files on the
+  window, and from the Local files… picker (its filter gains an
+  "Images" entry). GIFs animate as the browser animates them; nothing
+  more.
+- Sidebar folder rows list images alongside video and audio, with a
+  small "IMG" tag on the row and a thumbnail made by ffmpeg like the
+  others. Each folder row has two buttons: **Add all** (video and audio
+  only, as before) and **Add all + images** (everything). Both confirm
+  above 30 items. Dragging or double-clicking an image row makes an
+  image tile.
 
 ## Session format v4
 
@@ -302,11 +375,10 @@ Loading v3 sets `type: 'file'`, `sync: null`, `groups: []`,
   status message says the binaries were not found.
 - Transcode failure: error text from ffmpeg's last stderr lines in the
   tile panel, button returns to Make playable.
-- Web tile fails to load: the iframe's onerror is unreliable, so a 10 s
-  timeout without the player's `onReady` shows "Could not load" in the
-  tile. If `navigator.onLine` is false the tile shows the offline state
-  from the Offline requirement section instead and retries when
-  `window` fires `online`.
+- Web tile fails to load (YouTube): 10 s without the player's `onReady`
+  shows "Could not load" + Retry over the cached thumbnail
+  (`userData/thumbs/yt-<id>.jpg`, fetched via Electron `net` when the
+  tile is first added). Twitch: the embed's own error.
 
 ## Testing
 
@@ -321,8 +393,7 @@ No test framework exists and the renderer is DOM-bound. Per feature:
   the manual checks per task.
 - Offline check, run once per feature and again on the packaged build:
   disable the network adapter, launch the app, and confirm every local
-  feature works and web tiles show the offline state without blocking
-  anything.
+  feature works.
 
 ## Build order
 
@@ -331,8 +402,10 @@ No test framework exists and the renderer is DOM-bound. Per feature:
 3. Frame step and timecode
 4. Groups and settings bar, then unified timeline and marker colours
 5. A/B compare
+5b. Undo
 6. Web tiles (after the Twitch spike)
 7. Sources sidebar: folders and thumbnails, then playlists via yt-dlp
+8. Image tiles and Add all + images
 
 Each step is a separate task for the opus window; the sonnet window
 commits after each and builds the installer at the end.
