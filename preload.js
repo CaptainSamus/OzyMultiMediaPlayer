@@ -25,4 +25,6 @@ contextBridge.exposeInMainWorld('api', {
   listPlaylist: (u) => ipcRenderer.invoke('list-playlist', u),
   updateYtdlp: () => ipcRenderer.invoke('update-ytdlp'),
   ytdlpAvailable: () => ipcRenderer.invoke('ytdlp-available'),
+  showInExplorer: (p) => ipcRenderer.invoke('show-in-explorer', p),
+  copyText: (t) => ipcRenderer.invoke('copy-text', t),
 });

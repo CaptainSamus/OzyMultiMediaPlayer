@@ -702,7 +702,8 @@ function applyRects(entry, dir) { // dir: 'before' | 'after'
 }
 function restoreRemoved(entry) {
   const v = entry.record;
-  const t = v.type && v.type !== 'file' && typeof addWebTile === 'function' ? addWebTile(v.url, WebUrl.parse(v.url), v) : addVideo(v.path, v);
+  const t = v.type === 'image' ? addImageTile(v.path, v)
+    : v.type && v.type !== 'file' ? addWebTile(v.url, WebUrl.parse(v.url), v) : addVideo(v.path, v);
   // put it back at its old index so gallery order is preserved
   tiles.splice(tiles.indexOf(t), 1); tiles.splice(Math.min(entry.index, tiles.length), 0, t);
   canvas.insertBefore(t.el, canvas.children[entry.index] || null);
@@ -1263,7 +1264,8 @@ function addVideo(filePath, state = {}) {
   tile.group = null; tile.sync = null; tile.ownMuted = !!state.muted;
 
   nameEl.textContent = basename(filePath);
-  nameEl.title = filePath;
+  nameEl.title = filePath + '\nRight-click: show in Explorer';
+  nameEl.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); sourceContext(e, 'file', filePath); });
 
   // initial per-video state (from a session file, or defaults)
   tile.volume = clamp(Number(state.volume ?? DEFAULT_VIDEO_VOLUME), 0, 1);
@@ -1728,7 +1730,8 @@ function addWebTile(url, parsed, state = {}, at = null) {
   if (sb && isFinite(sb.x) && isFinite(sb.y) && sb.w > 0 && sb.h > 0) tile.board = { x: Number(sb.x), y: Number(sb.y), w: Number(sb.w), h: Number(sb.h) };
   tiles.push(tile);
   nameEl.textContent = tile.title;
-  nameEl.title = url;
+  nameEl.title = url + '\nRight-click: copy URL';
+  nameEl.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); sourceContext(e, parsed.type, url); });
 
   // ----- loading -----
   // Web tiles need a connection; there is no offline state. A YouTube embed that hasn't
@@ -1842,6 +1845,58 @@ function addWebTile(url, parsed, state = {}, at = null) {
   updateChrome();
   return tile;
 }
+// Image tiles: a static picture with a title bar. Move, resize, lasso, Sticky groups,
+// sessions and undo work; no playback controls, and audio/sync paths skip them (no video/yt).
+function addImageTile(filePath, state = {}, at = null) {
+  const frag = document.getElementById('image-tile-template').content.cloneNode(true);
+  const el = frag.querySelector('.tile');
+  const img = el.querySelector('img');
+  const tile = {
+    type: 'image', path: filePath, el, img, video: null, yt: null,
+    aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
+    board: null, bookmarks: [], sync: null, group: null, suppressClick: false, volume: 0, ownMuted: false,
+  };
+  const sb = state.board;
+  if (sb && isFinite(sb.x) && isFinite(sb.y) && sb.w > 0 && sb.h > 0) tile.board = { x: +sb.x, y: +sb.y, w: +sb.w, h: +sb.h };
+  tiles.push(tile);
+  el.querySelector('.name').textContent = basename(filePath);
+  el.querySelector('.name').title = filePath + '\nRight-click: show in Explorer';
+  el.querySelector('.name').addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); sourceContext(e, 'image', filePath); });
+  img.addEventListener('load', () => {
+    if (img.naturalWidth > 0) {
+      const ar = img.naturalWidth / img.naturalHeight;
+      if (Math.abs(ar - tile.aspect) > 0.001) { tile.aspect = ar; if (tile.board) tile.board.w = tile.board.h * ar; layoutTiles(); }
+    }
+    if (pendingFit) scheduleFit();
+  });
+  img.src = window.api.videoUrl(filePath);
+  el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
+  el.addEventListener('pointerenter', () => { hoveredTile = tile; });
+  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; });
+  el.addEventListener('click', (e) => {
+    if (isBoard() || !e.shiftKey || e.target.closest('button')) return;
+    setSelected(tile, !selection.has(tile));
+    selectionStatus();
+  });
+  for (const h of el.querySelectorAll('.handle')) {
+    h.addEventListener('pointerdown', (e) => startResize(tile, h.dataset.corner, e));
+    h.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      if (isBoard() && tile.board) {
+        const entry = recordResize([tile]);
+        tile.board.h = layout.rowHeight; tile.board.w = layout.rowHeight * tile.aspect;
+        layoutTile(tile);
+        finishRects(entry);
+      } else fitAll();
+    });
+  }
+  attachTileDrag(tile);
+  canvas.appendChild(frag);
+  if (isBoard() && !tile.board && at) placeOnBoard([tile], at);
+  updateChrome();
+  return tile;
+}
+
 /* DISABLED (Mark, 2026-09-10): no offline handling for web tiles; they just need a connection.
 // Offline web tiles retry when the connection comes back, and every 30 s.
 window.addEventListener('online', () => { for (const t of tiles) if (t.offline && t.reload) t.reload(); });
@@ -1857,7 +1912,8 @@ function clearAll() {
 
 function addVideos(paths, at = null) {
   const wasEmpty = tiles.length === 0;
-  const added = paths.map((p) => addVideo(p));
+  // images become image tiles; everything else a video tile
+  const added = paths.map((p) => (Sources.kindOf(basename(p)) === 'image' ? addImageTile(p) : addVideo(p)));
   if (isBoard()) placeOnBoard(added.filter((t) => !t.board), at);
   layoutTiles();
   if (wasEmpty && tiles.length) scheduleFit();
@@ -1891,7 +1947,11 @@ function collectSession() {
       timelineExpanded: layout.timelineExpanded,
     },
     masterVolume,
-    videos: tiles.map((t) => (!t.video ? {
+    videos: tiles.map((t) => (t.type === 'image' ? {
+      type: 'image', path: t.path, aspect: t.aspect,
+      board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
+      bookmarks: [], sync: null, volume: 0, muted: false, playbackRate: 1, paused: true, currentTime: 0,
+    } : !t.video ? {
       // web tile (YouTube / Twitch)
       type: t.type, kind: t.kind, url: t.url, title: t.title,
       currentTime: t.yt ? t.yt.st.time : 0, volume: t.volume, muted: !!t.ownMuted, playbackRate: 1,
@@ -1950,7 +2010,7 @@ async function applySession(data) {
     }
     if (typeof v.path !== 'string') continue;
     if (!(await window.api.fileExists(v.path))) missing++;
-    byIndex.set(i, addVideo(v.path, v));
+    byIndex.set(i, v.type === 'image' ? addImageTile(v.path, v) : addVideo(v.path, v));
   }
   // groups (session v4); v3 files have none
   nextGroupId = 1;
@@ -2091,6 +2151,14 @@ const sidebar = {
   open() { settings.sidebar.open = true; sbEl.hidden = false; saveSettings(); layoutTiles(); },
   close() { settings.sidebar.open = false; sbEl.hidden = true; saveSettings(); layoutTiles(); },
   toggle() { settings.sidebar.open ? sidebar.close() : sidebar.open(); },
+  // two tabs: 'local' (folders) and 'web' (YouTube / Twitch playlists); remembered in settings
+  setTab(tab) {
+    settings.sidebar.tab = tab === 'web' ? 'web' : 'local';
+    sbEl.classList.toggle('tab-is-local', settings.sidebar.tab === 'local');
+    sbEl.classList.toggle('tab-is-web', settings.sidebar.tab === 'web');
+    for (const b of sbEl.querySelectorAll('.sb-tabs button')) b.classList.toggle('active', b.dataset.tab === settings.sidebar.tab);
+    saveSettings();
+  },
   async addFolder(dir, { pinned = false } = {}) {
     settings = pinned ? Settings.pinFolder(settings, dir, true) : Settings.upsertRecentFolder(settings, dir);
     saveSettings(); await renderFolders();
@@ -2112,6 +2180,7 @@ const sidebar = {
     settings.sources.playlists = list;
     saveSettings();
     renderPlaylists(entry.id);
+    sidebar.setTab('web');
     if (!settings.sidebar.open) sidebar.open();
     setStatus(`${p.title}: ${p.items.length} video${p.items.length === 1 ? '' : 's'}`);
   },
@@ -2147,8 +2216,26 @@ function renderPlaylists(expandId = null) {
     if (open.has(p.id)) { row.querySelector('.sb-items').hidden = false; row.querySelector('.sb-expand').textContent = '▾'; }
     sbLists.playlists.appendChild(row);
   }
+  pruneSelection();
   markOnBoard();
 }
+
+// Row selection (sbSelected) can span sources and tabs; "Add selected" adds all of it.
+const addSelectedBtn = document.getElementById('sb-add-selected');
+function updateAddSelected() { addSelectedBtn.disabled = sbSelected.size === 0; }
+function pruneSelection() { for (const x of [...sbSelected]) if (!x.isConnected) sbSelected.delete(x); updateAddSelected(); } // rows that were re-rendered away
+function clearSbSelection() { for (const x of sbSelected) x.classList.remove('selected'); sbSelected.clear(); updateAddSelected(); }
+function addSelected() {
+  if (!sbSelected.size) return;
+  const payload = [...sbSelected].map(itemPayload);
+  if (payload.length > 30 && !confirm(`Add ${payload.length} videos?`)) return;
+  addItemsToBoard(payload, null);
+  clearSbSelection();
+}
+addSelectedBtn.addEventListener('click', addSelected);
+// Enter adds the selection while the sidebar has focus (a row was clicked)
+sbEl.tabIndex = -1;
+sbEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && sbSelected.size) { e.preventDefault(); e.stopPropagation(); addSelected(); } });
 
 function onBoardPaths() { return new Set(tiles.map((t) => t.path.toLowerCase())); }
 function markOnBoard() {
@@ -2168,43 +2255,77 @@ const thumbObserver = new IntersectionObserver((entries) => {
 }, { root: null, rootMargin: '200px' });
 
 function buildItem(data) {
-  // data: { type:'file', path, name, duration? } | { type:'youtube', url, id, title, duration, thumbUrl }
+  // data: { type:'file', path, name, kind } | { type:'youtube', url, id, title, duration, thumbUrl }
   const it = document.getElementById('sb-item-template').content.firstElementChild.cloneNode(true);
-  it.dataset.type = data.type;
+  it.dataset.type = data.type === 'file' && data.kind === 'image' ? 'image' : data.type;
   it.dataset.path = data.type === 'file' ? data.path : data.url;
   if (data.thumbUrl) it.dataset.thumbUrl = data.thumbUrl;
   if (data.type === 'file') it.dataset.name = data.name; else it.dataset.title = data.title;
-  it.querySelector('.sb-item-name').textContent = data.type === 'file' ? data.name : data.title;
-  it.querySelector('.sb-item-name').title = it.dataset.path;
+  const nameEl = it.querySelector('.sb-item-name');
+  nameEl.textContent = data.type === 'file' ? data.name : data.title;
+  if (it.dataset.type === 'image') { const k = document.createElement('span'); k.className = 'sb-kind'; k.textContent = 'IMG'; nameEl.prepend(k); }
+  it.title = it.dataset.path + (data.type === 'file' ? '\nRight-click: show in Explorer' : '\nRight-click: copy URL');
   it.querySelector('.sb-dur').textContent = data.duration ? fmtTime(data.duration) : '';
   it.addEventListener('click', (e) => {
-    if (e.ctrlKey) { it.classList.toggle('selected'); it.classList.contains('selected') ? sbSelected.add(it) : sbSelected.delete(it); return; }
+    if (e.ctrlKey) { it.classList.toggle('selected'); it.classList.contains('selected') ? sbSelected.add(it) : sbSelected.delete(it); updateAddSelected(); return; }
     if (e.shiftKey && sbSelected.size) {
       const all = [...it.parentElement.querySelectorAll('.sb-item')];
       const last = [...sbSelected].pop(); const a = all.indexOf(last), b = all.indexOf(it);
       for (const x of all.slice(Math.min(a, b), Math.max(a, b) + 1)) { x.classList.add('selected'); sbSelected.add(x); }
+      updateAddSelected();
       return;
     }
-    for (const x of sbSelected) x.classList.remove('selected'); sbSelected.clear();
-    it.classList.add('selected'); sbSelected.add(it);
+    clearSbSelection();
+    it.classList.add('selected'); sbSelected.add(it); updateAddSelected();
   });
   it.addEventListener('dblclick', () => addItemsToBoard([itemPayload(it)], null));
+  // right-click: local rows offer Show in Explorer; YouTube / Twitch rows copy their URL
+  it.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); sourceContext(e, it.dataset.type, it.dataset.path); });
   it.addEventListener('dragstart', (e) => {
-    if (!sbSelected.has(it)) { for (const x of sbSelected) x.classList.remove('selected'); sbSelected.clear(); it.classList.add('selected'); sbSelected.add(it); }
+    if (!sbSelected.has(it)) { clearSbSelection(); it.classList.add('selected'); sbSelected.add(it); updateAddSelected(); }
     e.dataTransfer.setData('application/x-ozy-items', JSON.stringify([...sbSelected].map(itemPayload)));
     e.dataTransfer.effectAllowed = 'copy';
   });
   thumbObserver.observe(it);
   return it;
 }
-function itemPayload(it) {
-  return it.dataset.type === 'file'
-    ? { type: 'file', path: it.dataset.path }
-    : { type: 'youtube', url: it.dataset.path, title: it.dataset.title };
+// Tiny right-click menu: one button per [label, action]; closes on click or the next pointerdown anywhere.
+let ctxEl = null;
+function closeRowMenu() { if (ctxEl) { ctxEl.remove(); ctxEl = null; } }
+function showRowMenu(e, items) {
+  closeRowMenu();
+  ctxEl = document.createElement('div');
+  ctxEl.className = 'ctx';
+  for (const [label, act] of items) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.addEventListener('click', () => { closeRowMenu(); act(); });
+    ctxEl.appendChild(b);
+  }
+  document.body.appendChild(ctxEl);
+  const r = ctxEl.getBoundingClientRect(); // keep it on screen
+  ctxEl.style.left = Math.min(e.clientX, window.innerWidth - r.width - 4) + 'px';
+  ctxEl.style.top = Math.min(e.clientY, window.innerHeight - r.height - 4) + 'px';
 }
-// file rows become file tiles, playlist rows become YouTube tiles (cascaded 24 px when dropped at a point)
+window.addEventListener('pointerdown', (e) => { if (ctxEl && !ctxEl.contains(e.target)) closeRowMenu(); }, true);
+// Shared by sidebar rows and tile names. type: 'file' | 'image' | 'youtube' | 'twitch'; where: path or URL.
+function sourceContext(e, type, where) {
+  if (type === 'file' || type === 'image') {
+    showRowMenu(e, [['Show in Explorer', async () => { if (!(await window.api.showInExplorer(where))) setStatus('File not found: ' + where); }]]);
+  } else {
+    window.api.copyText(where);
+    setStatus('Copied ' + where);
+  }
+}
+
+function itemPayload(it) {
+  if (it.dataset.type === 'file' || it.dataset.type === 'image') return { type: it.dataset.type, path: it.dataset.path };
+  return { type: 'youtube', url: it.dataset.path, title: it.dataset.title };
+}
+// file rows become file tiles, image rows image tiles (addVideos routes by extension),
+// playlist rows YouTube tiles (cascaded 24 px when dropped at a point)
 function addItemsToBoard(items, at) {
-  const files = items.filter((i) => i.type === 'file').map((i) => i.path);
+  const files = items.filter((i) => i.type === 'file' || i.type === 'image').map((i) => i.path);
   if (files.length) addVideos(files, at);
   const wasEmpty = tiles.length === 0;
   const web = [];
@@ -2231,11 +2352,16 @@ function buildSource({ id, name, count, missing, items, onRefresh, onRemove, onP
   for (const d of items) itemsEl.appendChild(buildItem(d));
   const expand = src.querySelector('.sb-expand');
   expand.addEventListener('click', () => { itemsEl.hidden = !itemsEl.hidden; expand.textContent = itemsEl.hidden ? '▸' : '▾'; });
-  src.querySelector('.sb-addall').addEventListener('click', () => {
-    const payload = [...itemsEl.querySelectorAll('.sb-item')].map(itemPayload);
+  // Add all = every video; "+ images" = everything, images included (only shown when the source has images)
+  const addAll = (withImages) => {
+    const payload = [...itemsEl.querySelectorAll('.sb-item')].map(itemPayload).filter((p) => withImages || p.type !== 'image');
     if (payload.length > 30 && !confirm(`Add ${payload.length} videos?`)) return;
     addItemsToBoard(payload, null);
-  });
+  };
+  src.querySelector('.sb-addall').addEventListener('click', () => addAll(false));
+  const addImgBtn = src.querySelector('.sb-addall-img');
+  if (items.some((d) => d.kind === 'image')) addImgBtn.addEventListener('click', () => addAll(true));
+  else addImgBtn.remove();
   // ⋯ reveals Refresh / Pin / Remove under the row (Electron has no window.prompt)
   const actions = src.querySelector('.sb-actions');
   src.querySelector('.sb-menu').addEventListener('click', () => { actions.hidden = !actions.hidden; });
@@ -2252,7 +2378,7 @@ async function renderFolders() {
   const rows = [];
   for (const f of settings.sources.folders) {
     const r = await window.api.listFolder(f.path);
-    const items = r.files.map((x) => ({ type: 'file', path: x.path, name: x.name }));
+    const items = r.files.map((x) => ({ type: 'file', path: x.path, name: x.name, kind: x.kind }));
     const row = buildSource({
       id: f.path, name: (f.recent ? 'Recent: ' : '') + basename(f.path), count: items.length, missing: !r.ok, items,
       pinLabel: f.pinned ? 'Unpin' : 'Pin',
@@ -2265,11 +2391,13 @@ async function renderFolders() {
   }
   sbLists.folders.textContent = '';
   for (const row of rows) sbLists.folders.appendChild(row);
+  pruneSelection();
   markOnBoard();
 }
 
 document.getElementById('btn-sidebar').addEventListener('click', sidebar.toggle);
-document.getElementById('sb-add-folder').addEventListener('click', async () => { const d = await window.api.pickFolder(); if (d) sidebar.addFolder(d, { pinned: true }); });
+document.getElementById('sb-add-folder').addEventListener('click', async () => { const d = await window.api.pickFolder(); if (d) { sidebar.setTab('local'); sidebar.addFolder(d, { pinned: true }); } });
+for (const b of sbEl.querySelectorAll('.sb-tabs button')) b.addEventListener('click', () => sidebar.setTab(b.dataset.tab));
 document.getElementById('sb-add-playlist').addEventListener('click', () => { urlBar.hidden = false; urlInput.focus(); });
 // width drag (220-480 px, remembered)
 document.getElementById('sb-resize').addEventListener('pointerdown', (e) => {
@@ -2283,6 +2411,7 @@ window.api.getSettings().then((s) => {
   settings = s;
   sbEl.style.setProperty('--sb-width', settings.sidebar.width + 'px');
   sbEl.hidden = !settings.sidebar.open;
+  sidebar.setTab(settings.sidebar.tab);
   renderFolders();
   renderPlaylists(); // from the cache in settings.json, no refetch
 });

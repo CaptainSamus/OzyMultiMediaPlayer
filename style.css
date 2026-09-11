@@ -117,8 +117,13 @@ body { display: flex; flex-direction: column; }
 .sb-head button, .sb-row button, .sb-actions button { background: var(--panel-2); color: var(--text); border: 1px solid #333338; border-radius: 4px; padding: 3px 7px; cursor: pointer; font: inherit; font-size: 12px; }
 .sb-head button:disabled { opacity: 0.4; cursor: default; }
 .sb-section { display: flex; flex-direction: column; min-height: 0; }
-.sb-section[data-section="folders"] { flex: 1 1 50%; }
-.sb-section[data-section="playlists"] { flex: 1 1 50%; border-top: 1px solid #2a2a2e; }
+/* two tabs: Local (folders) and YouTube / Twitch (playlists); the visible one takes the full height */
+.sb-tabs { display: flex; border-bottom: 1px solid #2a2a2e; }
+.sb-tabs button { flex: 1 1 0; background: transparent; border: none; color: var(--muted); padding: 6px; cursor: pointer; font: inherit; }
+.sb-tabs button.active { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
+.sb-section { flex: 1 1 auto; }
+#sidebar.tab-is-local .tab-web, #sidebar.tab-is-web .tab-local { display: none !important; }
+.sb-item-name .sb-kind { font-size: 9px; color: var(--muted); border: 1px solid #333338; border-radius: 3px; padding: 0 3px; margin-right: 5px; vertical-align: 1px; }
 .sb-title { padding: 6px 8px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
 .sb-list { overflow-y: auto; flex: 1 1 auto; }
 .sb-note { padding: 8px; color: var(--muted); font-size: 12px; }
@@ -649,6 +654,14 @@ body.resizing .tile.resizing { pointer-events: auto; }
 #url-input { flex: 1 1 auto; background: var(--bg); color: var(--text); border: 1px solid #333338; border-radius: 6px; padding: 6px 10px; font: inherit; }
 
 /* web tiles (YouTube / Twitch iframes). The iframe swallows pointer events, so the title bar is the drag handle. */
+/* right-click menu (sidebar rows, tile names) */
+.ctx { position: fixed; z-index: 200; background: var(--panel-2); border: 1px solid #333338; border-radius: 6px; padding: 4px; display: flex; flex-direction: column; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
+.ctx button { text-align: left; background: transparent; border: none; color: var(--text); padding: 5px 10px; cursor: pointer; font: inherit; border-radius: 4px; }
+.ctx button:hover { background: #35353c; }
+
+/* image tiles: a static picture with just the title bar */
+.tile.image img { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
+
 /* the tile's own background shows the cached YouTube thumbnail (or a Twitch glyph) until the player paints over it */
 .tile.web { background: #000 center / cover no-repeat; }
 .tile.web.twitch::before { content: "▶"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 48px; color: #9146ff; opacity: 0.5; }

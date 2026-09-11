@@ -24,7 +24,8 @@ const MIME = {
   '.mkv': 'video/x-matroska', '.mov': 'video/quicktime', '.ogv': 'video/ogg',
   '.ogg': 'video/ogg', '.avi': 'video/x-msvideo',
   '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.flac': 'audio/flac',
-  '.jpg': 'image/jpeg', // cached thumbnails
+  '.jpg': 'image/jpeg', // cached thumbnails and image tiles
+  '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
 };
 
 // Where ffmpeg.exe / ffprobe.exe / yt-dlp.exe live: bundled next to the app when packaged,
@@ -193,13 +194,15 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 // ---- IPC ----
 
 const VIDEO_EXTS = ['mp4', 'm4v', 'webm', 'mkv', 'mov', 'ogv', 'ogg', 'avi', 'mp3', 'wav', 'm4a', 'flac'];
+const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
 
 ipcMain.handle('pick-videos', async () => {
   const r = await dialog.showOpenDialog(win, {
     title: 'Add videos',
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: 'Video / audio', extensions: VIDEO_EXTS },
+      { name: 'Video / audio / images', extensions: [...VIDEO_EXTS, ...IMAGE_EXTS] },
+      { name: 'Images', extensions: IMAGE_EXTS },
       { name: 'All files', extensions: ['*'] },
     ],
   });
@@ -370,6 +373,14 @@ function readSettings() {
 ipcMain.handle('get-settings', () => readSettings());
 ipcMain.handle('save-settings', (_e, s) => { fs.writeFileSync(settingsPath(), JSON.stringify(Settings.merge(s), null, 2), 'utf8'); });
 
+// Right-click on a local row / tile name: open Explorer with the file selected.
+// Right-click on a web row / tile name: copy its URL.
+ipcMain.handle('show-in-explorer', (_e, p) => {
+  try { if (fs.existsSync(p)) { require('electron').shell.showItemInFolder(path.normalize(p)); return true; } } catch {}
+  return false;
+});
+ipcMain.handle('copy-text', (_e, t) => { require('electron').clipboard.writeText(String(t)); });
+
 ipcMain.handle('pick-folder', async () => {
   const r = await dialog.showOpenDialog(win, { title: 'Add folder', properties: ['openDirectory'] });
   return r.canceled ? null : r.filePaths[0];
@@ -380,9 +391,9 @@ ipcMain.handle('list-folder', (_e, dir) => {
   try { names = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => d.name); }
   catch { return { ok: false, files: [] }; }
   const files = [];
-  for (const n of Sources.filterMedia(names)) {
+  for (const n of Sources.filterMedia(names, { images: true })) {
     const p = path.join(dir, n);
-    try { const st = fs.statSync(p); files.push({ path: p, name: n, size: st.size, mtimeMs: st.mtimeMs }); } catch {}
+    try { const st = fs.statSync(p); files.push({ path: p, name: n, size: st.size, mtimeMs: st.mtimeMs, kind: Sources.kindOf(n) }); } catch {}
   }
   return { ok: true, files };
 });
@@ -400,6 +411,9 @@ ipcMain.handle('thumb', (_e, filePath) => new Promise((resolve) => {
     const out = path.join(thumbDir(), ProxyCache.name(filePath, stat.size, stat.mtimeMs).replace(/\.mp4$/, '.jpg'));
     if (fs.existsSync(out)) return done(out);
     if (!checkTools()) return done(null);
+    if (Sources.kindOf(filePath) === 'image') { // images: no seek, just scale the first frame
+      return execFile(binPath('ffmpeg'), ['-y', '-i', filePath, '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '4', out], { windowsHide: true }, (e2) => done(e2 ? null : out));
+    }
     execFile(binPath('ffprobe'), ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', filePath], { windowsHide: true }, (err, stdout) => {
       const dur = err ? 0 : Number(stdout) || 0;
       const ss = (dur * 0.1).toFixed(2);

@@ -62,11 +62,13 @@
     <aside id="sidebar" hidden>
       <div class="sb-head">
         <span>Sources</span>
-        <button id="sb-add-folder" title="Add a folder">+ Folder</button>
-        <button id="sb-add-playlist" title="Add a YouTube playlist" disabled>+ Playlist</button>
+        <button id="sb-add-selected" title="Add every highlighted row to the board (Enter)" disabled>Add selected</button>
+        <button id="sb-add-folder" class="tab-local" title="Add a folder">+ Folder</button>
+        <button id="sb-add-playlist" class="tab-web" title="Add a YouTube playlist" disabled>+ Playlist</button>
       </div>
-      <div class="sb-section" data-section="folders"><div class="sb-title">Folders</div><div class="sb-list"></div></div>
-      <div class="sb-section" data-section="playlists"><div class="sb-title">Playlists</div><div class="sb-list"></div><div class="sb-note"></div></div>
+      <div class="sb-tabs"><button data-tab="local" class="active">Local</button><button data-tab="web">YouTube / Twitch</button></div>
+      <div class="sb-section tab-local" data-section="folders"><div class="sb-title">Folders</div><div class="sb-list"></div></div>
+      <div class="sb-section tab-web" data-section="playlists"><div class="sb-title">Playlists</div><div class="sb-list"></div><div class="sb-note"></div></div>
       <div id="sb-resize"></div>
     </aside>
     <main id="grid">
@@ -82,7 +84,8 @@
         <button class="sb-expand">▸</button>
         <span class="sb-name"></span>
         <span class="sb-count"></span>
-        <button class="sb-addall" title="Add every item">Add all</button>
+        <button class="sb-addall" title="Add every video">Add all</button>
+        <button class="sb-addall-img" title="Add every item including images">+ images</button>
         <button class="sb-menu" title="Refresh / Pin / Remove">⋯</button>
       </div>
       <div class="sb-actions" hidden>
@@ -234,6 +237,17 @@
       <div class="handle tr" data-corner="tr"></div>
       <div class="handle bl" data-corner="bl"></div>
       <div class="handle br" data-corner="br"></div>
+    </div>
+  </template>
+
+  <template id="image-tile-template">
+    <div class="tile image">
+      <img draggable="false" alt="">
+      <div class="overlay">
+        <div class="top"><span class="group-swatch" hidden></span><span class="name"></span><button class="remove" title="Remove">✕</button></div>
+      </div>
+      <div class="handle tl" data-corner="tl"></div><div class="handle tr" data-corner="tr"></div>
+      <div class="handle bl" data-corner="bl"></div><div class="handle br" data-corner="br"></div>
     </div>
   </template>
 
