@@ -696,6 +696,11 @@ body.resizing .tile.resizing { pointer-events: auto; }
 .tile.web.twitch .bottom { display: none; }
 .tile.web.stream .seek, .tile.web.stream .markers { display: none; }
 body.tile-dragging .tile.web iframe, body.resizing .tile.web iframe { pointer-events: none; } /* keep the drag when the cursor crosses an embed */
+/* An embed swallows mouse presses, so a board pan can't start on one. With ✋ Pan + zoom on (or while
+   a pan is running) this transparent layer takes the presses instead; otherwise it lets them through
+   so the embed's own controls keep working. */
+.tile.web .pan-shield { position: absolute; inset: 0; pointer-events: none; }
+body.mode-board.hand .tile.web .pan-shield, body.mode-board.panning .tile.web .pan-shield { pointer-events: auto; }
 
 /* A/B compare */
 #compare { position: fixed; inset: 0; z-index: 100; background: #000; display: flex; flex-direction: column; }

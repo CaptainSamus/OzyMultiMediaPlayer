@@ -268,6 +268,7 @@
   <template id="web-tile-template">
     <div class="tile web">
       <iframe allow="autoplay; fullscreen; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+      <div class="pan-shield"></div>
       <div class="overlay">
         <div class="top"><button class="remove" title="Remove">✕</button><span class="group-swatch" hidden></span><span class="name"></span><button class="fullscreen" title="Fullscreen (Esc leaves)">⛶</button></div>
         <div class="bottom">
@@ -277,8 +278,11 @@
             <button class="play" title="Play / pause (K)">▶</button>
             <span class="time">0:00 / 0:00</span>
             <span class="spacer"></span>
+            <button class="bm-add" title="Add a bookmark at the current time (B)">🔖+</button>
+            <button class="bm-list" title="Bookmarks: click to list, rename, or delete. [ and ] jump between them.">🔖<span class="bm-count">0</span></button>
             <button class="mute" title="Mute / unmute (M)">🔊</button>
           </div>
+          <div class="bm-panel hidden"></div>
         </div>
       </div>
       <div class="error hidden"><div class="error-text"></div><div class="error-actions"><button class="retry">Retry</button></div></div>

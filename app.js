@@ -125,6 +125,42 @@ function playTile(t) { if (t.video) t.video.play().catch(() => {}); else if (t.y
 function pauseTile(t) { if (t.video) t.video.pause(); else if (t.yt) t.yt.pause(); }
 function isPlaying(t) { return t.video ? !t.video.paused : !!(t.yt && !t.yt.paused); }
 
+// ---------- playback adapter ----------
+// tile.pb: one shape over a local <video> or a YouTube player, so groups, Sync, loops, bookmarks
+// and the timeline don't care which. Twitch and image tiles have none. (t.video stays for
+// DOM-only things: fullscreen, A/B, frame step.)
+function videoPlayback(video) {
+  return {
+    web: false, settling: false,
+    get time() { return video.currentTime || 0; }, set time(t) { video.currentTime = t; },
+    get duration() { return video.duration || 0; },
+    get paused() { return video.paused; },
+    play() { video.play().catch(() => {}); }, pause() { video.pause(); },
+    get rate() { return video.playbackRate; }, set rate(r) { video.playbackRate = r; },
+  };
+}
+// YouTube reports its time about 4x a second; between reports the time is extrapolated while
+// playing. A seek is followed by a second of `settling` (buffering, stale reports) during
+// which the drift engine leaves it alone.
+function ytPlayback(yt) {
+  let seekAt = -Infinity;
+  const st = yt.st;
+  return {
+    web: true,
+    get settling() { return performance.now() - seekAt < 1000; },
+    get time() {
+      const t = st.state === 1 && st.at ? st.time + (performance.now() - st.at) / 1000 * (st.rate || 1) : st.time;
+      return st.duration > 0 ? Math.min(t, st.duration) : t;
+    },
+    set time(t) { yt.seek(t); st.time = t; st.at = performance.now(); seekAt = st.at; },
+    get duration() { return st.duration || 0; },
+    get paused() { return yt.paused; },
+    play() { yt.play(); }, pause() { yt.pause(); },
+    get rate() { return st.rate || 1; }, set rate(r) { st.rate = r; yt.rate(r); },
+  };
+}
+const tileName = (t) => t.title || basename(t.path);
+
 function setMasterVolume(v, { updateSlider = true } = {}) {
   masterVolume = clamp(Number(v), 0, 1);
   if (updateSlider) masterVol.value = String(Math.round(masterVolume * 100));
@@ -275,12 +311,13 @@ function paintGroup(t) {
   sw.hidden = !t.group;
   if (t.group) sw.style.background = Groups.PALETTE[t.group.color];
 }
+// members that can play (local and YouTube); Twitch and image members only share Sticky / mute / volume
 function memberModel(g) {
-  return [...g.members].filter((t) => t.video).map((t) => ({ tile: t, start: t.sync ? t.sync.start : 0, duration: t.video.duration || 0 }));
+  return [...g.members].filter((t) => t.pb).map((t) => ({ tile: t, start: t.sync ? t.sync.start : 0, duration: t.pb.duration }));
 }
 function captureStarts(g) {
-  const ms = [...g.members].filter((t) => t.video);
-  const starts = Groups.starts(ms.map((t) => t.video.currentTime || 0));
+  const ms = [...g.members].filter((t) => t.pb);
+  const starts = Groups.starts(ms.map((t) => t.pb.time));
   ms.forEach((t, i) => { t.sync = { start: starts[i] }; });
 }
 function createGroup(list, opts = {}) {
@@ -320,10 +357,8 @@ function applyGroupAudio(g) {
   for (const t of g.members) {
     setOwnMuted(t, t.ownMuted); // web tiles join groups for mute / volume (YouTube only) and Sticky
     applyTileVolume(t);
-    if (t.video) {
-      t.video.playbackRate = g.rate;
-      t.el.querySelector('.rate').value = String(g.rate);
-    }
+    if (t.pb) t.pb.rate = g.rate;
+    if (t.video) t.el.querySelector('.rate').value = String(g.rate);
   }
 }
 
@@ -353,7 +388,10 @@ function renderGroupBar() {
   gbQ('.gb-sync').classList.toggle('toggled', g.sync);
   gbQ('.gb-sticky').classList.toggle('toggled', g.sticky);
   gbQ('.gb-loop').value = g.loop;
-  gbQ('.gb-note').textContent = g.loop !== 'off' ? 'Loop needs Sync, so Sync is on' : '';
+  const notes = [];
+  if (g.loop !== 'off') notes.push('Loop needs Sync, so Sync is on');
+  if (g.sync && [...g.members].some((t) => t.pb && t.pb.web)) notes.push('YouTube members sync to about ¼ s, not frame-exact');
+  gbQ('.gb-note').textContent = notes.join(' · ');
 }
 gbQ('.gb-swatch').addEventListener('click', () => { active.color = GROUP_PALETTE[(GROUP_PALETTE.indexOf(active.color) + 1) % GROUP_PALETTE.length]; for (const t of active.members) paintGroup(t); renderGroupBar(); });
 gbQ('.gb-name').addEventListener('input', () => { active.name = gbQ('.gb-name').value; });
@@ -378,36 +416,36 @@ function setGroupSync(g, on) {
 // Group time from a member that isn't clamped (playing, or paused inside its own
 // extent). If every member is clamped, a member waiting at 0 means g <= its start,
 // so the earliest such start is g; if all have ended, g is the group's end.
+// A playing local video leads when there is one: its clock is exact, YouTube's is extrapolated.
+const leadOf = (ms) => ms.find((m) => !m.tile.pb.paused && !m.tile.pb.web) || ms.find((m) => !m.tile.pb.paused);
 function groupTimeOf(g) {
   const ms = memberModel(g);
   if (!ms.length) return 0;
-  const inside = (m) => m.tile.video.currentTime > 0 && m.tile.video.currentTime < m.duration;
-  const lead = ms.find((m) => !m.tile.video.paused) || ms.find(inside);
-  if (lead) return Groups.groupTime(lead.tile.video.currentTime, lead.start);
-  const waiting = ms.filter((m) => m.tile.video.currentTime <= 0);
+  const inside = (m) => m.tile.pb.time > 0 && m.tile.pb.time < m.duration;
+  const lead = leadOf(ms) || ms.find(inside);
+  if (lead) return Groups.groupTime(lead.tile.pb.time, lead.start);
+  const waiting = ms.filter((m) => m.tile.pb.time <= 0);
   return waiting.length ? Math.min(...waiting.map((m) => m.start)) : Groups.end(ms);
 }
 function seekGroup(g, gt) {
   syncing = true;
-  try { for (const m of memberModel(g)) m.tile.video.currentTime = Groups.memberTime(gt, m.start, m.duration); }
+  try { for (const m of memberModel(g)) m.tile.pb.time = Groups.memberTime(gt, m.start, m.duration); }
   finally { syncing = false; }
 }
 function playPauseGroup(g) {
   const ms = memberModel(g);
-  const web = [...g.members].filter((t) => !t.video && t.yt); // YouTube members play/pause with the group, never synced
-  const anyPlaying = ms.some((m) => !m.tile.video.paused) || web.some(isPlaying);
-  if (anyPlaying) { for (const m of ms) m.tile.video.pause(); for (const t of web) pauseTile(t); renderGroupBar(); return; }
-  for (const t of web) playTile(t);
+  const anyPlaying = ms.some((m) => !m.tile.pb.paused);
+  if (anyPlaying) { for (const m of ms) m.tile.pb.pause(); renderGroupBar(); return; }
   if (g.sync) {
     const end = Groups.end(ms);
     if (groupTimeOf(g) >= end - 0.05) seekGroup(g, g.loop === 'range' && g.range ? g.range.in : 0); // Loop Off: play after the end restarts
     const gt = groupTimeOf(g);
-    for (const m of ms) if (gt >= m.start && gt < m.start + m.duration) m.tile.video.play().catch(() => {});
-  } else for (const m of ms) m.tile.video.play().catch(() => {});
+    for (const m of ms) if (gt >= m.start && gt < m.start + m.duration) m.tile.pb.play();
+  } else for (const m of ms) m.tile.pb.play();
   renderGroupBar();
 }
 function toggleGroupFromSelection() {
-  const sel = [...selection]; // web tiles may join for Sticky / mute / volume; Sync and the timeline skip them
+  const sel = [...selection]; // Twitch and image tiles may join for Sticky / mute / volume; Sync and the timeline skip them
   if (sel.length < 2) { setStatus('Select at least two videos to group (Shift-click, or lasso on the board)'); return; }
   createGroup(sel);
   setStatus(`${sel.length} videos grouped`);
@@ -425,13 +463,13 @@ function broadcast(leader, action, value) {
   if (syncing || !g.sync || !leader.sync) return;
   syncing = true;
   try {
-    const gt = Groups.groupTime(leader.video.currentTime, leader.sync.start);
+    const gt = Groups.groupTime(leader.pb.time, leader.sync.start);
     for (const m of memberModel(g)) {
       if (m.tile === leader) continue;
-      const v = m.tile.video;
-      if (action === 'play') { if (gt >= m.start && gt < m.start + m.duration) v.play().catch(() => {}); }
-      else if (action === 'pause') v.pause();
-      else if (action === 'seek') v.currentTime = Groups.memberTime(gt, m.start, m.duration);
+      const p = m.tile.pb;
+      if (action === 'play') { if (gt >= m.start && gt < m.start + m.duration) p.play(); }
+      else if (action === 'pause') p.pause();
+      else if (action === 'seek') p.time = Groups.memberTime(gt, m.start, m.duration);
     }
   } finally { syncing = false; }
 }
@@ -441,26 +479,28 @@ setInterval(() => {
   for (const g of groups) {
     if (!g.sync) continue;
     const ms = memberModel(g);
-    const lead = ms.find((m) => !m.tile.video.paused);
+    const lead = leadOf(ms);
     if (!lead) continue;
-    const gt = Groups.groupTime(lead.tile.video.currentTime, lead.start);
+    const gt = Groups.groupTime(lead.tile.pb.time, lead.start);
     const loopEnd = Groups.loopEnd(g.loop, ms.filter((m) => m.duration > 0), g.range); // ignore members still loading
     if (loopEnd !== null && gt >= loopEnd - 0.05) {
       const to = g.loop === 'range' && g.range ? g.range.in : 0;
       seekGroup(g, to);
-      for (const m of ms) if (Groups.memberTime(to, m.start, m.duration) < m.duration && to >= m.start) m.tile.video.play().catch(() => {});
+      for (const m of ms) if (Groups.memberTime(to, m.start, m.duration) < m.duration && to >= m.start) m.tile.pb.play();
       continue;
     }
     syncing = true;
     try {
       for (const m of ms) {
         if (m === lead) continue;
-        const v = m.tile.video;
+        const p = m.tile.pb;
         const want = Groups.memberTime(gt, m.start, m.duration);
         const inside = gt >= m.start && gt < m.start + m.duration;
-        if (inside && v.paused) v.play().catch(() => {});   // its start was reached
-        if (!inside && !v.paused) v.pause();                 // waiting at 0 or holding at the end
-        if (Math.abs(v.currentTime - want) > Groups.DRIFT) v.currentTime = want;
+        if (inside && p.paused) p.play();   // its start was reached
+        if (!inside && !p.paused) p.pause(); // waiting at 0 or holding at the end
+        // YouTube on either side: ~¼ s slack, and none while it is still settling after a seek
+        const slack = p.web || lead.tile.pb.web ? Groups.DRIFT_WEB : Groups.DRIFT;
+        if (!p.settling && Math.abs(p.time - want) > slack) p.time = want;
       }
     } finally { syncing = false; }
   }
@@ -475,24 +515,29 @@ const nextMarkerColor = (c) => MARKER_KEYS[(MARKER_KEYS.indexOf(c) + 1) % MARKER
 const tl = document.getElementById('timeline');
 const tlQ = (s) => tl.querySelector(s);
 
-// What the timeline shows, in order: the active group; else the selected local videos (one, or
-// "N selected"); else every local video ("All videos"). Hidden only when there are no local videos.
+// What the timeline shows, in order: the active group; else the selected videos (one, or
+// "N selected"); else every video ("All videos"). Local and YouTube tiles count (they have a pb);
+// hidden only when there are none.
 function timelineModel() {
-  if (active) return { title: active.name, members: memberModel(active), group: active, fps: [...active.members][0].fps };
-  const asMembers = (list) => list.map((t) => ({ tile: t, start: 0, duration: t.video.duration || 0 }));
-  const sel = [...selection].filter((t) => t.video);
-  if (sel.length === 1) return { title: basename(sel[0].path), members: asMembers(sel), group: null, fps: sel[0].fps };
+  if (active) {
+    const members = memberModel(active);
+    if (!members.length) return null; // e.g. a group of Twitch tiles or images
+    return { title: active.name, members, group: active, fps: members[0].tile.fps };
+  }
+  const asMembers = (list) => list.map((t) => ({ tile: t, start: 0, duration: t.pb.duration }));
+  const sel = [...selection].filter((t) => t.pb);
+  if (sel.length === 1) return { title: tileName(sel[0]), members: asMembers(sel), group: null, fps: sel[0].fps };
   if (sel.length > 1) return { title: `${sel.length} selected`, members: asMembers(sel), group: null, fps: sel[0].fps };
-  const all = tiles.filter((t) => t.video);
+  const all = tiles.filter((t) => t.pb);
   if (all.length) return { title: 'All videos', members: asMembers(all), group: null, fps: all[0].fps };
   return null;
 }
-// each local video's own colour (a palette key), used when the timeline shows several videos
+// each video's own colour (a palette key), used when the timeline shows several videos
 const tileColor = (t) => Groups.PALETTE[t.hue] || Groups.PALETTE.yellow;
-function tlTime(model) { return model.group ? groupTimeOf(model.group) : model.members[0].tile.video.currentTime; }
+function tlTime(model) { return model.group ? groupTimeOf(model.group) : model.members[0].tile.pb.time; }
 function tlSeek(model, gt) {
   if (model.group && model.group.sync) seekGroup(model.group, gt);
-  else for (const m of model.members) m.tile.video.currentTime = Groups.memberTime(gt, m.start, m.duration);
+  else for (const m of model.members) m.tile.pb.time = Groups.memberTime(gt, m.start, m.duration);
 }
 
 function renderTimeline() {
@@ -512,7 +557,7 @@ function renderTimeline() {
     for (const m of model.members) {
       const item = document.createElement('span'); item.className = 'tl-leg';
       const sw = document.createElement('i'); sw.style.background = tileColor(m.tile);
-      item.append(sw, basename(m.tile.path));
+      item.append(sw, tileName(m.tile));
       legend.appendChild(item);
     }
   }
@@ -528,7 +573,7 @@ function renderTimeline() {
       block.style.left = Timeline.xFor(lane.start, end, width) + 'px';
       block.style.width = Math.max(2, Timeline.xFor(lane.end, end, width) - Timeline.xFor(lane.start, end, width)) + 'px';
       block.style.borderColor = tileColor(m.tile); // the lane's video colour; its markers keep per-bookmark colours
-      block.textContent = basename(m.tile.path);
+      block.textContent = tileName(m.tile);
       const tcL = document.createElement('span'); tcL.className = 'tl-tc'; tcL.textContent = Frames.format(lane.start, 0, m.tile.fps, layout.timeDisplay).split(' / ')[0];
       const tcR = document.createElement('span'); tcR.className = 'tl-tc right'; tcR.textContent = Frames.format(lane.end, 0, m.tile.fps, layout.timeDisplay).split(' / ')[0];
       block.append(tcL, tcR); row.appendChild(block);
@@ -547,7 +592,7 @@ function renderTimeline() {
     // several videos: colour by video so you can tell whose marker it is; one video: the bookmark's own colour
     const mk = document.createElement('div'); mk.className = 'tl-mk'; mk.style.background = multi ? tileColor(m.tile) : MARKER_COLORS[b.color];
     mk.style.left = Timeline.xFor(m.start + b.t, end, width) + 'px';
-    mk.title = `${basename(m.tile.path)}: ${b.label || fmtTime(b.t)}  (right-click to delete, Shift-right-click to recolour)`;
+    mk.title = `${tileName(m.tile)}: ${b.label || fmtTime(b.t)}  (right-click to delete, Shift-right-click to recolour)`;
     mk.addEventListener('pointerdown', (e) => e.stopPropagation()); // don't start a bar scrub
     mk.addEventListener('click', (e) => { e.stopPropagation(); tlSeek(model, m.start + b.t); });
     mk.addEventListener('contextmenu', (e) => {
@@ -1283,6 +1328,128 @@ grid.addEventListener('wheel', (e) => {
   }
 }, { passive: false });
 
+// ---------- bookmarks (local and YouTube tiles) ----------
+
+function parseBookmarks(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((b) => b && isFinite(Number(b.t)) && Number(b.t) >= 0)
+    .map((b) => ({ t: Number(b.t), label: typeof b.label === 'string' ? b.label : '', color: MARKER_KEYS.includes(b.color) ? b.color : 'yellow' }))
+    .sort((a, b) => a.t - b.t);
+}
+// Markers on the tile's scrub bar, the 🔖 list panel, and tile.addBookmark / jumpBookmark /
+// refreshBookmarks. pb gives the time and duration; tile.seekTo(t) jumps (and tells a synced group).
+function attachBookmarks(tile, el, pb) {
+  const bmAddBtn = el.querySelector('.bm-add');
+  const bmListBtn = el.querySelector('.bm-list');
+  const bmCount = el.querySelector('.bm-count');
+  const markersEl = el.querySelector('.markers');
+  const bmPanel = el.querySelector('.bm-panel');
+  const seekTo = (t) => tile.seekTo(t);
+  const bmTitle = (b) => (b.label ? `${b.label} · ${fmtTime(b.t)}` : fmtTime(b.t));
+  const renderMarkers = () => {
+    markersEl.textContent = '';
+    bmCount.textContent = String(tile.bookmarks.length);
+    bmListBtn.classList.toggle('has-some', tile.bookmarks.length > 0);
+    if (!pb.duration) return;
+    for (const b of tile.bookmarks) {
+      const m = document.createElement('div');
+      m.className = 'marker';
+      m.style.left = (clamp(b.t / pb.duration, 0, 1) * 100).toFixed(3) + '%';
+      m.style.background = MARKER_COLORS[b.color];
+      m.title = bmTitle(b) + '  (right-click to delete, Shift-right-click to recolour)';
+      m.addEventListener('click', (e) => { e.stopPropagation(); seekTo(b.t); });
+      m.addEventListener('contextmenu', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (e.shiftKey) { b.color = nextMarkerColor(b.color); refreshBookmarks(); } else deleteBookmark(b);
+      });
+      m.addEventListener('pointerdown', (e) => e.stopPropagation()); // don't start a board drag
+      markersEl.appendChild(m);
+    }
+  };
+  const renderPanel = () => {
+    bmPanel.textContent = '';
+    const head = document.createElement('div');
+    head.className = 'bm-head';
+    head.innerHTML = '<span></span>';
+    head.firstChild.textContent = tile.bookmarks.length ? `${tile.bookmarks.length} bookmark${tile.bookmarks.length === 1 ? '' : 's'}` : 'No bookmarks yet';
+    const addBtn = document.createElement('button');
+    addBtn.textContent = '+ Add at ' + fmtTime(pb.time);
+    addBtn.addEventListener('click', () => addBookmark());
+    head.appendChild(addBtn);
+    bmPanel.appendChild(head);
+    for (const b of tile.bookmarks) {
+      const row = document.createElement('div');
+      row.className = 'bm-row';
+      const go = document.createElement('button');
+      go.className = 'bm-time';
+      go.textContent = fmtTime(b.t);
+      go.title = 'Jump here';
+      go.addEventListener('click', () => seekTo(b.t));
+      const label = document.createElement('input');
+      label.className = 'bm-label';
+      label.type = 'text';
+      label.placeholder = 'name this bookmark…';
+      label.value = b.label;
+      label.addEventListener('input', () => { b.label = label.value; renderMarkers(); });
+      label.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === 'Escape') label.blur(); e.stopPropagation(); });
+      const del = document.createElement('button');
+      del.className = 'bm-del';
+      del.textContent = '✕';
+      del.title = 'Delete bookmark';
+      del.addEventListener('click', () => deleteBookmark(b));
+      const sw = document.createElement('button');
+      sw.className = 'bm-color';
+      sw.title = 'Click to change colour';
+      sw.style.background = MARKER_COLORS[b.color];
+      sw.addEventListener('click', () => { b.color = nextMarkerColor(b.color); refreshBookmarks(); });
+      row.append(sw, go, label, del);
+      bmPanel.appendChild(row);
+    }
+  };
+  const refreshBookmarks = () => { renderMarkers(); if (!bmPanel.classList.contains('hidden')) renderPanel(); renderTimeline(); };
+  tile.refreshBookmarks = refreshBookmarks;
+  const addBookmark = (t = pb.time) => {
+    if (!isFinite(t)) return;
+    // don't stack two bookmarks on the same frame
+    if (tile.bookmarks.some((b) => Math.abs(b.t - t) < 0.05)) { setStatus('Bookmark already exists at ' + fmtTime(t)); return; }
+    tile.bookmarks.push({ t, label: '', color: 'yellow' });
+    tile.bookmarks.sort((a, b) => a.t - b.t);
+    refreshBookmarks();
+    setStatus(`Bookmark added at ${fmtTime(t)} – ${tileName(tile)}`);
+  };
+  const deleteBookmark = (b) => {
+    const i = tile.bookmarks.indexOf(b);
+    if (i >= 0) tile.bookmarks.splice(i, 1);
+    refreshBookmarks();
+  };
+  const jumpBookmark = (dir) => {
+    if (!tile.bookmarks.length) { setStatus('No bookmarks on this video'); return; }
+    const cur = pb.time;
+    const target = dir > 0
+      ? tile.bookmarks.find((b) => b.t > cur + 0.5)
+      : [...tile.bookmarks].reverse().find((b) => b.t < cur - 0.5);
+    if (target) seekTo(target.t);
+    else setStatus(dir > 0 ? 'No later bookmark' : 'No earlier bookmark');
+  };
+  const togglePanel = (show = bmPanel.classList.contains('hidden')) => {
+    bmPanel.classList.toggle('hidden', !show);
+    el.classList.toggle('panel-open', show);
+    if (show) renderPanel();
+  };
+  tile.addBookmark = addBookmark;
+  tile.jumpBookmark = jumpBookmark;
+
+  bmAddBtn.addEventListener('click', () => addBookmark());
+  bmListBtn.addEventListener('click', () => togglePanel());
+  for (const b of [bmAddBtn, bmListBtn]) b.addEventListener('dblclick', (e) => e.stopPropagation());
+  bmPanel.addEventListener('pointerdown', (e) => e.stopPropagation());
+  bmPanel.addEventListener('dblclick', (e) => e.stopPropagation());
+  bmPanel.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+  el.addEventListener('pointerleave', () => togglePanel(false));
+  return { renderMarkers };
+}
+
 // ---------- tiles ----------
 
 function addVideo(filePath, state = {}) {
@@ -1302,26 +1469,15 @@ function addVideo(filePath, state = {}) {
   const errorEl = el.querySelector('.error');
   const backBtn = el.querySelector('.back');
   const fwdBtn = el.querySelector('.fwd');
-  const bmAddBtn = el.querySelector('.bm-add');
-  const bmListBtn = el.querySelector('.bm-list');
-  const bmCount = el.querySelector('.bm-count');
-  const markersEl = el.querySelector('.markers');
-  const bmPanel = el.querySelector('.bm-panel');
 
   const tile = {
-    path: filePath, el, video, seek, time: timeEl, scrubbing: false,
+    path: filePath, el, video, pb: videoPlayback(video), seek, time: timeEl, scrubbing: false,
     volume: DEFAULT_VIDEO_VOLUME,
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
     board: null,
     suppressClick: false,
-    bookmarks: [],
+    bookmarks: parseBookmarks(state.bookmarks),
   };
-  if (Array.isArray(state.bookmarks)) {
-    tile.bookmarks = state.bookmarks
-      .filter((b) => b && isFinite(Number(b.t)) && Number(b.t) >= 0)
-      .map((b) => ({ t: Number(b.t), label: typeof b.label === 'string' ? b.label : '', color: MARKER_KEYS.includes(b.color) ? b.color : 'yellow' }))
-      .sort((a, b) => a.t - b.t);
-  }
   const sb = state.board;
   if (sb && isFinite(sb.x) && isFinite(sb.y) && sb.w > 0 && sb.h > 0) {
     tile.board = { x: Number(sb.x), y: Number(sb.y), w: Number(sb.w), h: Number(sb.h) };
@@ -1403,112 +1559,15 @@ function addVideo(filePath, state = {}) {
   });
   tile.refreshTime = updateTimeLabel;
 
-  // ----- bookmarks -----
-  const bmTitle = (b) => (b.label ? `${b.label} · ${fmtTime(b.t)}` : fmtTime(b.t));
-  const renderMarkers = () => {
-    markersEl.textContent = '';
-    bmCount.textContent = String(tile.bookmarks.length);
-    bmListBtn.classList.toggle('has-some', tile.bookmarks.length > 0);
-    if (!video.duration) return;
-    for (const b of tile.bookmarks) {
-      const m = document.createElement('div');
-      m.className = 'marker';
-      m.style.left = (clamp(b.t / video.duration, 0, 1) * 100).toFixed(3) + '%';
-      m.style.background = MARKER_COLORS[b.color];
-      m.title = bmTitle(b) + '  (right-click to delete, Shift-right-click to recolour)';
-      m.addEventListener('click', (e) => { e.stopPropagation(); seekTo(b.t); });
-      m.addEventListener('contextmenu', (e) => {
-        e.preventDefault(); e.stopPropagation();
-        if (e.shiftKey) { b.color = nextMarkerColor(b.color); refreshBookmarks(); } else deleteBookmark(b);
-      });
-      m.addEventListener('pointerdown', (e) => e.stopPropagation()); // don't start a board drag
-      markersEl.appendChild(m);
-    }
-  };
-  const renderPanel = () => {
-    bmPanel.textContent = '';
-    const head = document.createElement('div');
-    head.className = 'bm-head';
-    head.innerHTML = '<span></span>';
-    head.firstChild.textContent = tile.bookmarks.length ? `${tile.bookmarks.length} bookmark${tile.bookmarks.length === 1 ? '' : 's'}` : 'No bookmarks yet';
-    const addBtn = document.createElement('button');
-    addBtn.textContent = '+ Add at ' + fmtTime(video.currentTime);
-    addBtn.addEventListener('click', () => addBookmark());
-    head.appendChild(addBtn);
-    bmPanel.appendChild(head);
-    for (const b of tile.bookmarks) {
-      const row = document.createElement('div');
-      row.className = 'bm-row';
-      const go = document.createElement('button');
-      go.className = 'bm-time';
-      go.textContent = fmtTime(b.t);
-      go.title = 'Jump here';
-      go.addEventListener('click', () => seekTo(b.t));
-      const label = document.createElement('input');
-      label.className = 'bm-label';
-      label.type = 'text';
-      label.placeholder = 'name this bookmark…';
-      label.value = b.label;
-      label.addEventListener('input', () => { b.label = label.value; renderMarkers(); });
-      label.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === 'Escape') label.blur(); e.stopPropagation(); });
-      const del = document.createElement('button');
-      del.className = 'bm-del';
-      del.textContent = '✕';
-      del.title = 'Delete bookmark';
-      del.addEventListener('click', () => deleteBookmark(b));
-      const sw = document.createElement('button');
-      sw.className = 'bm-color';
-      sw.title = 'Click to change colour';
-      sw.style.background = MARKER_COLORS[b.color];
-      sw.addEventListener('click', () => { b.color = nextMarkerColor(b.color); refreshBookmarks(); });
-      row.append(sw, go, label, del);
-      bmPanel.appendChild(row);
-    }
-  };
-  const refreshBookmarks = () => { renderMarkers(); if (!bmPanel.classList.contains('hidden')) renderPanel(); renderTimeline(); };
-  tile.refreshBookmarks = refreshBookmarks;
-  const addBookmark = (t = video.currentTime) => {
-    if (!isFinite(t)) return;
-    // don't stack two bookmarks on the same frame
-    if (tile.bookmarks.some((b) => Math.abs(b.t - t) < 0.05)) { setStatus('Bookmark already exists at ' + fmtTime(t)); return; }
-    tile.bookmarks.push({ t, label: '', color: 'yellow' });
-    tile.bookmarks.sort((a, b) => a.t - b.t);
-    refreshBookmarks();
-    setStatus(`Bookmark added at ${fmtTime(t)} – ${basename(filePath)}`);
-  };
-  const deleteBookmark = (b) => {
-    const i = tile.bookmarks.indexOf(b);
-    if (i >= 0) tile.bookmarks.splice(i, 1);
-    refreshBookmarks();
-  };
-  const jumpBookmark = (dir) => {
-    if (!tile.bookmarks.length) { setStatus('No bookmarks on this video'); return; }
-    const cur = video.currentTime;
-    const target = dir > 0
-      ? tile.bookmarks.find((b) => b.t > cur + 0.5)
-      : [...tile.bookmarks].reverse().find((b) => b.t < cur - 0.5);
-    if (target) seekTo(target.t);
-    else setStatus(dir > 0 ? 'No later bookmark' : 'No earlier bookmark');
-  };
-  const togglePanel = (show = bmPanel.classList.contains('hidden')) => {
-    bmPanel.classList.toggle('hidden', !show);
-    el.classList.toggle('panel-open', show);
-    if (show) renderPanel();
-  };
-  tile.addBookmark = addBookmark;
-  tile.jumpBookmark = jumpBookmark;
-
-  bmAddBtn.addEventListener('click', () => addBookmark());
-  bmListBtn.addEventListener('click', () => togglePanel());
+  // ----- bookmarks (shared with YouTube tiles: attachBookmarks) -----
+  tile.seekTo = seekTo;
+  const { renderMarkers } = attachBookmarks(tile, el, tile.pb);
   backBtn.addEventListener('click', (e) => seekBy(e.shiftKey ? -30 : -5));
   fwdBtn.addEventListener('click', (e) => seekBy(e.shiftKey ? 30 : 5));
-  for (const b of [bmAddBtn, bmListBtn, backBtn, fwdBtn, el.querySelector('.fstep-back'), el.querySelector('.fstep-fwd')]) b.addEventListener('dblclick', (e) => e.stopPropagation());
-  bmPanel.addEventListener('pointerdown', (e) => e.stopPropagation());
-  bmPanel.addEventListener('dblclick', (e) => e.stopPropagation());
-  bmPanel.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+  for (const b of [backBtn, fwdBtn, el.querySelector('.fstep-back'), el.querySelector('.fstep-fwd')]) b.addEventListener('dblclick', (e) => e.stopPropagation());
 
   el.addEventListener('pointerenter', () => { hoveredTile = tile; });
-  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; togglePanel(false); });
+  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; });
 
   const errorText = errorEl.querySelector('.error-text');
   const makeBtn = errorEl.querySelector('.make-proxy');
@@ -1764,6 +1823,11 @@ function ytController(iframe) {
   const st = { ready: false, state: -1, time: 0, duration: 0, muted: false, volume: 100 };
   const listeners = new Set();
   let hello = null;
+  // after our own play / pause, reports that still say the old state are ignored for a moment
+  let intent = null, intentAt = 0;
+  const isPlayState = (s) => s === 1 || s === 3;
+  const setState = (s) => { if (intent && performance.now() - intentAt < 700 && isPlayState(s) !== (intent === 'play')) return; st.state = s; };
+  const assume = (kind) => { intent = kind; intentAt = performance.now(); st.state = kind === 'play' ? 3 : 2; };
   const onMsg = (e) => {
     if (e.source !== iframe.contentWindow) return;
     let d; try { d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data; } catch { return; }
@@ -1771,13 +1835,14 @@ function ytController(iframe) {
     if (d.event === 'onReady') { st.ready = true; clearInterval(hello); post('addEventListener', ['onStateChange']); }
     if (d.event === 'infoDelivery' && d.info) {
       if (!st.ready) { st.ready = true; clearInterval(hello); }
-      if ('currentTime' in d.info) st.time = d.info.currentTime;
+      if ('currentTime' in d.info) { st.time = d.info.currentTime; st.at = performance.now(); } // `at`: when, for extrapolating
       if ('duration' in d.info) st.duration = d.info.duration;
-      if ('playerState' in d.info) st.state = d.info.playerState;
+      if ('playbackRate' in d.info) st.rate = d.info.playbackRate;
+      if ('playerState' in d.info) setState(d.info.playerState);
       if ('muted' in d.info) st.muted = d.info.muted;
       if ('volume' in d.info) st.volume = d.info.volume;
     }
-    if (d.event === 'onStateChange') st.state = d.info;
+    if (d.event === 'onStateChange') setState(d.info);
     for (const l of listeners) l(st, d.event);
   };
   window.addEventListener('message', onMsg);
@@ -1786,7 +1851,10 @@ function ytController(iframe) {
   iframe.addEventListener('load', listen);
   return {
     st, onChange: (l) => listeners.add(l),
-    play: () => post('playVideo'), pause: () => post('pauseVideo'),
+    // the new state is assumed at once (the player confirms a moment later), so Sync never reads a
+    // just-paused tile as still playing and restarts the others
+    play: () => { post('playVideo'); if (st.ready && !isPlayState(st.state)) assume('play'); },
+    pause: () => { post('pauseVideo'); if (st.ready && isPlayState(st.state)) assume('pause'); },
     seek: (t) => post('seekTo', [t, true]), mute: () => post('mute'), unmute: () => post('unMute'),
     volume: (v) => post('setVolume', [Math.round(v * 100)]), rate: (r) => post('setPlaybackRate', [r]),
     get paused() { return st.state !== 1 && st.state !== 3; }, // 1 playing, 3 buffering
@@ -1813,13 +1881,15 @@ function addWebTile(url, parsed, state = {}, at = null) {
     path: url, url, type: parsed.type, kind: parsed.kind, el, video: null, seek, time: timeEl, scrubbing: false,
     volume: clamp(Number(state.volume ?? DEFAULT_VIDEO_VOLUME), 0, 1),
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : (parsed.kind === 'short' ? 9 / 16 : 16 / 9),
-    board: null, suppressClick: false, bookmarks: [], info: null, proxy: null, fps: null,
+    board: null, suppressClick: false, bookmarks: parsed.type === 'youtube' ? parseBookmarks(state.bookmarks) : [], info: null, proxy: null, fps: null,
     group: null, sync: null, ownMuted: !!state.muted,
     title: typeof state.title === 'string' && state.title ? state.title : WebUrl.label(parsed),
   };
   const sb = state.board;
   if (sb && isFinite(sb.x) && isFinite(sb.y) && sb.w > 0 && sb.h > 0) tile.board = { x: Number(sb.x), y: Number(sb.y), w: Number(sb.w), h: Number(sb.h) };
   tiles.push(tile);
+  // YouTube tiles get their own timeline colour like local videos (Twitch never shows on the timeline)
+  if (parsed.type === 'youtube') tile.hue = GROUP_PALETTE.includes(state.color) ? state.color : GROUP_PALETTE[(tiles.length - 1) % GROUP_PALETTE.length];
   nameEl.textContent = tile.title;
   nameEl.title = url + '\nRight-click: copy URL';
   nameEl.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); sourceContext(e, parsed.type, url); });
@@ -1863,27 +1933,38 @@ function addWebTile(url, parsed, state = {}, at = null) {
   tile.refreshMute = refreshMute;
   if (parsed.type === 'youtube') {
     const yt = tile.yt = ytController(iframe);
-    let first = true;
+    const pb = tile.pb = ytPlayback(yt);
+    let first = true, knownDuration = 0;
     yt.onChange((st, ev) => {
       if (st.ready && !errorEl.classList.contains('hidden')) errorEl.classList.add('hidden'); // a late load clears "Could not load"
       if (first && st.ready) {
         first = false;
         clearTimeout(loadTimer);
         setOwnMuted(tile, tile.ownMuted); applyTileVolume(tile);
-        if (wantTime > 0) yt.seek(wantTime);
+        if (tile.group) pb.rate = tile.group.rate;
+        if (wantTime > 0) pb.time = wantTime;
         if (wantPlaying) yt.play();
+      }
+      // markers and the timeline need the duration, which arrives with the first reports
+      if (st.duration > 0 && st.duration !== knownDuration) {
+        knownDuration = st.duration;
+        renderMarkers();
+        if (tl._model && tl._model.members.some((m) => m.tile === tile)) renderTimeline();
       }
       if (ev === 'onStateChange' && tile.group && tile.group === active) renderGroupBar();
     });
-    tile.togglePlay = () => { yt.paused ? yt.play() : yt.pause(); };
-    tile.seekBy = (dt) => yt.seek(clamp(yt.st.time + dt, 0, yt.st.duration || Infinity));
+    // user actions; a synced group follows (like a local video's)
+    tile.seekTo = (t) => { pb.time = clamp(t, 0, pb.duration || Infinity); tile.tick(); broadcast(tile, 'seek'); };
+    tile.togglePlay = () => { const play = yt.paused; play ? yt.play() : yt.pause(); broadcast(tile, play ? 'play' : 'pause'); };
+    tile.seekBy = (dt) => tile.seekTo(pb.time + dt);
+    const { renderMarkers } = attachBookmarks(tile, el, pb);
     tile.tick = () => {
-      const st = yt.st;
+      const st = yt.st, now = pb.time;
       playBtn.textContent = yt.paused ? '▶' : '❚❚';
       if (!tile.scrubbing) {
-        timeEl.textContent = `${fmtTime(st.time)} / ${fmtTime(st.duration)}`;
+        timeEl.textContent = `${fmtTime(now)} / ${fmtTime(st.duration)}`;
         if (st.duration > 0) {
-          const frac = clamp(st.time / st.duration, 0, 1);
+          const frac = clamp(now / st.duration, 0, 1);
           seek.value = String(Math.round(frac * 10000));
           seek.style.setProperty('--progress', (frac * 100).toFixed(2) + '%');
         }
@@ -1897,8 +1978,9 @@ function addWebTile(url, parsed, state = {}, at = null) {
     seek.addEventListener('input', () => {
       if (!yt.st.duration) return;
       const t = Number(seek.value) / 10000 * yt.st.duration;
-      yt.seek(t); yt.st.time = t;
+      pb.time = t;
       timeEl.textContent = `${fmtTime(t)} / ${fmtTime(yt.st.duration)}`;
+      broadcast(tile, 'seek');
     });
     muteBtn.addEventListener('click', () => { setOwnMuted(tile, !tile.ownMuted); refreshMute(); });
   }
@@ -2050,10 +2132,12 @@ function collectSession() {
     } : !t.video ? {
       // web tile (YouTube / Twitch)
       type: t.type, kind: t.kind, url: t.url, title: t.title,
-      currentTime: t.yt ? t.yt.st.time : 0, volume: t.volume, muted: !!t.ownMuted, playbackRate: 1,
+      currentTime: t.pb ? t.pb.time : 0, volume: t.volume, muted: !!t.ownMuted, playbackRate: 1,
       paused: t.yt ? t.yt.paused : true, aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
-      bookmarks: [], sync: null,
+      color: t.hue, // YouTube only
+      bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
+      sync: t.sync && t.pb ? { start: t.sync.start } : null,
     } : {
       type: 'file',
       path: t.path,
@@ -2609,7 +2693,7 @@ window.addEventListener('keydown', (e) => {
   // shortcuts that act on the video under the mouse
   const h = hoveredTile && tiles.includes(hoveredTile) ? hoveredTile : null;
   if (h) {
-    // web tiles have no bookmarks or frame step, and Twitch tiles have no playback API at all
+    // YouTube tiles have no frame step (no stepFrame), and Twitch tiles have no playback API at all
     const big = e.shiftKey ? 30 : 5;
     if (e.key === 'ArrowLeft' && h.seekBy) { e.preventDefault(); h.seekBy(-big); return; }
     if (e.key === 'ArrowRight' && h.seekBy) { e.preventDefault(); h.seekBy(big); return; }

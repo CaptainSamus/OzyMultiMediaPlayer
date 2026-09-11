@@ -110,20 +110,23 @@ itself when you click **Update yt-dlp** in the sidebar.
   current time; they show as pins above the scrub bar. Click a pin to jump,
   right-click to delete, Shift-right-click to change its colour. The `🔖 n`
   list lets you name, recolour (click the dot), jump to, or delete each one.
-  `[` and `]` jump to the previous / next bookmark.
+  `[` and `]` jump to the previous / next bookmark. YouTube tiles have
+  bookmarks too (their pins appear once the video has started playing,
+  since YouTube only reports its length then).
 - **Groups.** Select two or more tiles (lasso or Shift-click) and press
   **Group** (`Ctrl+G`); **Ungroup** is `Ctrl+Shift+G`. A group gets a name,
   a colour dot on each member, and a settings bar at the bottom: play/pause,
   mute, volume and speed for the whole group, plus
   - **⛓ Sync**: members share one timeline, so play, pause, scrub, frame
     step and speed on any member apply to all, keeping their offsets.
+    YouTube members sync too, to within about ¼ s (not frame-exact).
   - **📌 Sticky** (board): dragging one member moves the whole group;
     `Ctrl`-drag moves just one.
   - **Loop**: off, when the shortest ends, when the longest ends, or a
     timeline range.
   Clicking a member selects its group; `Ctrl`-click selects just that tile.
-- **Timeline.** A strip at the bottom is always there while any video is
-  open. It follows the selected group, else the selected videos
+- **Timeline.** A strip at the bottom is always there while any local or
+  YouTube video is open (Twitch tiles and pictures never appear on it). It follows the selected group, else the selected videos
   ("N selected"), else **All videos**, and shows the shared playhead and
   every bookmark. With one video its markers keep their bookmark colours;
   with several, each video has its own colour (shown in the legend and on
@@ -157,9 +160,11 @@ itself when you click **Update yt-dlp** in the sidebar.
   bar, move, resize, groups and sessions, no playback controls.
 - **YouTube / Twitch tiles.** YouTube tiles use the app's own play, scrub,
   mute and volume controls and join Play all / Pause all and group mute /
-  volume. Twitch tiles use Twitch's own player. Drag web tiles by their
-  title bar. They can be grouped (Sticky, mute, volume) but don't take part
-  in Sync, the timeline or A/B.
+  volume. They also get bookmarks, appear on the timeline, and join Sync and
+  group loops (to about ¼ s); they have no frame step and no A/B. Twitch
+  tiles use Twitch's own player and only join groups for Sticky. Drag web tiles by their title bar. To pan the board from on top
+  of an embed, turn on **✋ Pan + zoom** (the embed's own controls work
+  again when it's off).
 - **Two layouts.** Tiles always use each item's real aspect ratio.
   - **Gallery** (attached): tiles flow in rows and share one size. Drag any
     tile's corner, move the zoom slider, or `Ctrl`+wheel and they all resize.
