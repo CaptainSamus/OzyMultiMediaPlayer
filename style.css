@@ -357,7 +357,6 @@ body.resizing .tile.resizing { pointer-events: auto; }
   width: 10px;
   height: 10px;
   margin-left: -5px;
-  background: #ffd166;
   clip-path: polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 55%);
   cursor: pointer;
   filter: drop-shadow(0 1px 1px #000);
@@ -577,6 +576,31 @@ body.resizing .tile.resizing { pointer-events: auto; }
 #groupbar .gb-note { color: var(--muted); font-size: 12px; }
 #groupbar .spacer { flex: 1 1 auto; }
 .overlay .group-swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; box-shadow: 0 0 0 1px #000; }
+
+/* unified timeline */
+#timeline { flex: 0 0 auto; background: var(--panel); border-top: 1px solid #2a2a2e; user-select: none; }
+#timeline[hidden] { display: none; }
+.tl-head { display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-size: 12px; color: var(--muted); }
+.tl-head .tl-title { color: var(--text); font-weight: 600; }
+.tl-head .tl-time { font-variant-numeric: tabular-nums; }
+.tl-head .spacer { flex: 1 1 auto; }
+.tl-head button { background: var(--panel-2); color: var(--text); border: 1px solid #333338; border-radius: 4px; padding: 2px 8px; cursor: pointer; font: inherit; font-size: 11px; }
+.tl-body { position: relative; padding: 0 10px 8px; }
+.tl-lanes { display: none; flex-direction: column; gap: 2px; margin-bottom: 4px; }
+#timeline.expanded .tl-lanes { display: flex; }
+.tl-lane { position: relative; height: 22px; background: #141417; border-radius: 3px; }
+.tl-lane .tl-block { position: absolute; top: 2px; bottom: 2px; border-radius: 3px; background: #2f3a55; border: 1px solid #4f8cff55; overflow: hidden; font-size: 10px; line-height: 16px; padding: 0 4px; white-space: nowrap; }
+.tl-lane .tl-block .tl-tc { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: 6px; }
+.tl-lane .tl-block .tl-tc.right { position: absolute; right: 4px; }
+.tl-lane .tl-mk { position: absolute; top: 0; width: 2px; height: 100%; cursor: pointer; }
+.tl-bar { position: relative; height: 26px; background: #141417; border-radius: 4px; cursor: pointer; }
+.tl-range { position: absolute; top: 0; bottom: 0; background: rgba(79, 140, 255, 0.18); pointer-events: none; }
+.tl-markers { position: absolute; inset: 0; pointer-events: none; }
+.tl-markers .tl-mk { position: absolute; top: 4px; width: 8px; height: 8px; margin-left: -4px; clip-path: polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 55%); pointer-events: auto; cursor: pointer; filter: drop-shadow(0 1px 1px #000); }
+.tl-handle { position: absolute; top: 0; bottom: 0; width: 8px; margin-left: -4px; background: var(--accent); opacity: 0.8; cursor: ew-resize; }
+.tl-handle.tl-in { border-radius: 4px 0 0 4px; } .tl-handle.tl-out { border-radius: 0 4px 4px 0; }
+.tl-playhead { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: #fff; pointer-events: none; box-shadow: 0 0 3px #000; }
+.bm-panel .bm-color { width: 14px; height: 14px; border-radius: 50%; border: none; cursor: pointer; box-shadow: 0 0 0 1px #000; flex: 0 0 auto; padding: 0; }
 .tile .error { pointer-events: auto; flex-direction: column; gap: 10px; }
 .tile .error-actions { display: flex; gap: 8px; }
 .tile .error-actions button { background: var(--accent); border: none; color: #fff; border-radius: 4px; padding: 5px 10px; cursor: pointer; font: inherit; }

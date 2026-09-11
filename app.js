@@ -34,7 +34,7 @@ const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 4;
 const GAP = 8;
 const DEFAULT_ASPECT = 16 / 9;
-const layout = { mode: 'gallery', rowHeight: 240, timeDisplay: 'clock' };
+const layout = { mode: 'gallery', rowHeight: 240, timeDisplay: 'clock', timelineExpanded: false };
 const board = { panX: 0, panY: 0, zoom: 1, initialized: false, linked: true, hand: false };
 let zTop = 1;
 const selection = new Set(); // board mode: tiles picked with the lasso / shift-click
@@ -307,7 +307,7 @@ function applyGroupAudio(g) {
 function setActiveGroup(g) {
   active = g;
   renderGroupBar();
-  if (typeof renderTimeline === 'function') renderTimeline(); // Task 7
+  renderTimeline();
 }
 function syncActiveFromSelection() {
   const t = [...selection].find((x) => x.group);
@@ -341,7 +341,8 @@ gbQ('.gb-vol').addEventListener('input', () => { active.volume = Number(gbQ('.gb
 gbQ('.gb-rate').addEventListener('change', () => { active.rate = Number(gbQ('.gb-rate').value); applyGroupAudio(active); });
 gbQ('.gb-sync').addEventListener('click', () => setGroupSync(active, !active.sync));
 gbQ('.gb-sticky').addEventListener('click', () => { active.sticky = !active.sticky; renderGroupBar(); });
-gbQ('.gb-loop').addEventListener('change', () => { active.loop = gbQ('.gb-loop').value; if (active.loop !== 'off' && !active.sync) setGroupSync(active, true); renderGroupBar(); });
+gbQ('.gb-loop').addEventListener('change', () => { active.loop = gbQ('.gb-loop').value; if (active.loop !== 'off' && !active.sync) setGroupSync(active, true); renderGroupBar(); renderTimeline(); });
+gbQ('.gb-name').addEventListener('change', () => renderTimeline());
 gbQ('.gb-ungroup').addEventListener('click', () => dissolveGroup(active));
 
 function setGroupSync(g, on) {
@@ -349,6 +350,7 @@ function setGroupSync(g, on) {
   if (on) captureStarts(g); else for (const t of g.members) t.sync = null;
   if (!on && g.loop !== 'off') g.loop = 'off';
   renderGroupBar();
+  renderTimeline();
 }
 // Group time from a member that isn't clamped (playing, or paused inside its own
 // extent). If every member is clamped, a member waiting at 0 means g <= its start,
@@ -438,6 +440,132 @@ setInterval(() => {
     } finally { syncing = false; }
   }
 }, 100);
+
+// ---------- marker colours ----------
+const MARKER_COLORS = Groups.PALETTE;
+const MARKER_KEYS = Object.keys(MARKER_COLORS);
+const nextMarkerColor = (c) => MARKER_KEYS[(MARKER_KEYS.indexOf(c) + 1) % MARKER_KEYS.length];
+
+// ---------- unified timeline ----------
+const tl = document.getElementById('timeline');
+const tlQ = (s) => tl.querySelector(s);
+
+// What the timeline shows: the active group, else a single selected tile as a one-member "group".
+function timelineModel() {
+  if (active) return { title: active.name, members: memberModel(active), group: active, fps: [...active.members][0].fps };
+  const sel = [...selection].filter((t) => t.video);
+  if (sel.length === 1) return { title: basename(sel[0].path), members: [{ tile: sel[0], start: 0, duration: sel[0].video.duration || 0 }], group: null, fps: sel[0].fps };
+  return null;
+}
+function tlTime(model) { return model.group ? groupTimeOf(model.group) : model.members[0].tile.video.currentTime; }
+function tlSeek(model, gt) {
+  if (model.group && model.group.sync) seekGroup(model.group, gt);
+  else for (const m of model.members) m.tile.video.currentTime = Groups.memberTime(gt, m.start, m.duration);
+}
+
+function renderTimeline() {
+  const model = timelineModel();
+  tl.hidden = !model;
+  tl._model = model;
+  if (!model) return;
+  tl.classList.toggle('expanded', layout.timelineExpanded);
+  tlQ('.tl-grip').textContent = layout.timelineExpanded ? '▾' : '▴';
+  tlQ('.tl-title').textContent = model.title;
+  for (const s of ['.tl-set-in', '.tl-set-out', '.tl-clear-range']) tlQ(s).hidden = !model.group;
+  const end = Groups.end(model.members);
+  const width = tlQ('.tl-bar').clientWidth;
+  // lanes (expanded)
+  const lanesEl = tlQ('.tl-lanes'); lanesEl.textContent = '';
+  if (layout.timelineExpanded) {
+    Timeline.lanes(model.members).forEach((lane, i) => {
+      const m = model.members[i];
+      const row = document.createElement('div'); row.className = 'tl-lane';
+      const block = document.createElement('div'); block.className = 'tl-block';
+      block.style.left = Timeline.xFor(lane.start, end, width) + 'px';
+      block.style.width = Math.max(2, Timeline.xFor(lane.end, end, width) - Timeline.xFor(lane.start, end, width)) + 'px';
+      block.textContent = basename(m.tile.path);
+      const tcL = document.createElement('span'); tcL.className = 'tl-tc'; tcL.textContent = Frames.format(lane.start, 0, m.tile.fps, layout.timeDisplay).split(' / ')[0];
+      const tcR = document.createElement('span'); tcR.className = 'tl-tc right'; tcR.textContent = Frames.format(lane.end, 0, m.tile.fps, layout.timeDisplay).split(' / ')[0];
+      block.append(tcL, tcR); row.appendChild(block);
+      for (const b of m.tile.bookmarks) {
+        const mk = document.createElement('div'); mk.className = 'tl-mk'; mk.style.background = MARKER_COLORS[b.color];
+        mk.style.left = Timeline.xFor(lane.start + b.t, end, width) + 'px'; mk.title = `${b.label || ''} ${fmtTime(b.t)}`.trim();
+        mk.addEventListener('click', (e) => { e.stopPropagation(); tlSeek(model, lane.start + b.t); });
+        row.appendChild(mk);
+      }
+      lanesEl.appendChild(row);
+    });
+  }
+  // markers on the bar (always drawn; in expanded mode they double as an overview)
+  const mkEl = tlQ('.tl-markers'); mkEl.textContent = '';
+  for (const m of model.members) for (const b of m.tile.bookmarks) {
+    const mk = document.createElement('div'); mk.className = 'tl-mk'; mk.style.background = MARKER_COLORS[b.color];
+    mk.style.left = Timeline.xFor(m.start + b.t, end, width) + 'px';
+    mk.title = `${basename(m.tile.path)}: ${b.label || fmtTime(b.t)}  (right-click to delete, Shift-right-click to recolour)`;
+    mk.addEventListener('pointerdown', (e) => e.stopPropagation()); // don't start a bar scrub
+    mk.addEventListener('click', (e) => { e.stopPropagation(); tlSeek(model, m.start + b.t); });
+    mk.addEventListener('contextmenu', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (e.shiftKey) b.color = nextMarkerColor(b.color);
+      else m.tile.bookmarks.splice(m.tile.bookmarks.indexOf(b), 1);
+      m.tile.refreshBookmarks();
+    });
+    mkEl.appendChild(mk);
+  }
+  // loop range
+  const showRange = !!(model.group && model.group.loop === 'range');
+  const r = Timeline.clampRange(model.group ? model.group.range : null, end);
+  for (const s of ['.tl-range', '.tl-in', '.tl-out']) tlQ(s).style.display = showRange ? '' : 'none';
+  tlQ('.tl-range').style.left = Timeline.xFor(r.in, end, width) + 'px';
+  tlQ('.tl-range').style.width = (Timeline.xFor(r.out, end, width) - Timeline.xFor(r.in, end, width)) + 'px';
+  tlQ('.tl-in').style.left = Timeline.xFor(r.in, end, width) + 'px';
+  tlQ('.tl-out').style.left = Timeline.xFor(r.out, end, width) + 'px';
+  tl._end = end;
+  tickTimeline();
+}
+function tickTimeline() {
+  const model = tl._model; if (!model || tl.hidden) return;
+  const gt = tlTime(model), end = tl._end;
+  tlQ('.tl-playhead').style.left = Timeline.xFor(gt, end, tlQ('.tl-bar').clientWidth) + 'px';
+  tlQ('.tl-time').textContent = Frames.format(gt, end, model.fps, layout.timeDisplay);
+}
+function toggleTimelineExpanded() { layout.timelineExpanded = !layout.timelineExpanded; renderTimeline(); }
+function setRangeAtPlayhead(which) {
+  const g = tl._model && tl._model.group; if (!g) return;
+  g.range = Timeline.clampRange({ ...(g.range || { in: 0, out: tl._end }), [which]: tlTime(tl._model) }, tl._end);
+  if (g.loop !== 'range') { g.loop = 'range'; if (!g.sync) setGroupSync(g, true); }
+  renderTimeline(); renderGroupBar();
+}
+
+tlQ('.tl-grip').addEventListener('click', toggleTimelineExpanded);
+tlQ('.tl-bar').addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || e.target.classList.contains('tl-handle') || !tl._model) return;
+  const bar = tlQ('.tl-bar'); const r = bar.getBoundingClientRect();
+  try { bar.setPointerCapture(e.pointerId); } catch {}
+  const seek = (ev) => tlSeek(tl._model, Timeline.tFor(ev.clientX - r.left, tl._end, r.width));
+  seek(e);
+  const onMove = (ev) => seek(ev);
+  const onUp = () => { bar.removeEventListener('pointermove', onMove); bar.removeEventListener('pointerup', onUp); bar.removeEventListener('pointercancel', onUp); };
+  bar.addEventListener('pointermove', onMove); bar.addEventListener('pointerup', onUp); bar.addEventListener('pointercancel', onUp);
+});
+for (const which of ['in', 'out']) {
+  tlQ('.tl-' + which).addEventListener('pointerdown', (e) => {
+    e.stopPropagation(); const h = e.currentTarget;
+    try { h.setPointerCapture(e.pointerId); } catch {}
+    const r = tlQ('.tl-bar').getBoundingClientRect(); const g = tl._model.group;
+    const onMove = (ev) => { const t = Timeline.tFor(ev.clientX - r.left, tl._end, r.width); g.range = Timeline.clampRange({ ...(g.range || { in: 0, out: tl._end }), [which]: t }, tl._end); renderTimeline(); };
+    const onUp = () => { h.removeEventListener('pointermove', onMove); h.removeEventListener('pointerup', onUp); h.removeEventListener('pointercancel', onUp); };
+    h.addEventListener('pointermove', onMove); h.addEventListener('pointerup', onUp); h.addEventListener('pointercancel', onUp);
+  });
+}
+tlQ('.tl-set-in').addEventListener('click', () => setRangeAtPlayhead('in'));
+tlQ('.tl-set-out').addEventListener('click', () => setRangeAtPlayhead('out'));
+tlQ('.tl-clear-range').addEventListener('click', () => {
+  const g = tl._model && tl._model.group; if (!g) return;
+  g.range = null; if (g.loop === 'range') g.loop = 'off';
+  renderTimeline(); renderGroupBar();
+});
+window.addEventListener('resize', () => renderTimeline());
 
 function setLinked(on) {
   board.linked = !!on;
@@ -942,7 +1070,7 @@ function addVideo(filePath, state = {}) {
   if (Array.isArray(state.bookmarks)) {
     tile.bookmarks = state.bookmarks
       .filter((b) => b && isFinite(Number(b.t)) && Number(b.t) >= 0)
-      .map((b) => ({ t: Number(b.t), label: typeof b.label === 'string' ? b.label : '' }))
+      .map((b) => ({ t: Number(b.t), label: typeof b.label === 'string' ? b.label : '', color: MARKER_KEYS.includes(b.color) ? b.color : 'yellow' }))
       .sort((a, b) => a.t - b.t);
   }
   const sb = state.board;
@@ -1019,6 +1147,7 @@ function addVideo(filePath, state = {}) {
     const modes = ['clock', 'frames', 'timecode'];
     layout.timeDisplay = modes[(modes.indexOf(layout.timeDisplay) + 1) % modes.length];
     for (const t of tiles) t.tick && t.refreshTime && t.refreshTime();
+    renderTimeline(); // lane timecodes follow the display mode
   });
   tile.refreshTime = updateTimeLabel;
 
@@ -1033,9 +1162,13 @@ function addVideo(filePath, state = {}) {
       const m = document.createElement('div');
       m.className = 'marker';
       m.style.left = (clamp(b.t / video.duration, 0, 1) * 100).toFixed(3) + '%';
-      m.title = bmTitle(b) + '  (right-click to delete)';
+      m.style.background = MARKER_COLORS[b.color];
+      m.title = bmTitle(b) + '  (right-click to delete, Shift-right-click to recolour)';
       m.addEventListener('click', (e) => { e.stopPropagation(); seekTo(b.t); });
-      m.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); deleteBookmark(b); });
+      m.addEventListener('contextmenu', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (e.shiftKey) { b.color = nextMarkerColor(b.color); refreshBookmarks(); } else deleteBookmark(b);
+      });
       m.addEventListener('pointerdown', (e) => e.stopPropagation()); // don't start a board drag
       markersEl.appendChild(m);
     }
@@ -1071,16 +1204,22 @@ function addVideo(filePath, state = {}) {
       del.textContent = '✕';
       del.title = 'Delete bookmark';
       del.addEventListener('click', () => deleteBookmark(b));
-      row.append(go, label, del);
+      const sw = document.createElement('button');
+      sw.className = 'bm-color';
+      sw.title = 'Click to change colour';
+      sw.style.background = MARKER_COLORS[b.color];
+      sw.addEventListener('click', () => { b.color = nextMarkerColor(b.color); refreshBookmarks(); });
+      row.append(sw, go, label, del);
       bmPanel.appendChild(row);
     }
   };
-  const refreshBookmarks = () => { renderMarkers(); if (!bmPanel.classList.contains('hidden')) renderPanel(); };
+  const refreshBookmarks = () => { renderMarkers(); if (!bmPanel.classList.contains('hidden')) renderPanel(); renderTimeline(); };
+  tile.refreshBookmarks = refreshBookmarks;
   const addBookmark = (t = video.currentTime) => {
     if (!isFinite(t)) return;
     // don't stack two bookmarks on the same frame
     if (tile.bookmarks.some((b) => Math.abs(b.t - t) < 0.05)) { setStatus('Bookmark already exists at ' + fmtTime(t)); return; }
-    tile.bookmarks.push({ t, label: '' });
+    tile.bookmarks.push({ t, label: '', color: 'yellow' });
     tile.bookmarks.sort((a, b) => a.t - b.t);
     refreshBookmarks();
     setStatus(`Bookmark added at ${fmtTime(t)} – ${basename(filePath)}`);
@@ -1183,7 +1322,10 @@ function addVideo(filePath, state = {}) {
     if (wantPlaying) video.play().catch(() => {});
   });
   video.addEventListener('timeupdate', () => { if (!tile.scrubbing) updateTimeLabel(); });
-  video.addEventListener('durationchange', () => { updateTimeLabel(); renderMarkers(); });
+  video.addEventListener('durationchange', () => {
+    updateTimeLabel(); renderMarkers();
+    if (tl._model && tl._model.members.some((m) => m.tile === tile)) renderTimeline(); // extent grows as durations load
+  });
   // UI only: a synced member paused by the loop engine must not pause its group
   const onPlayState = () => { updatePlayBtn(); if (tile.group && tile.group === active) renderGroupBar(); };
   video.addEventListener('play', onPlayState);
@@ -1345,6 +1487,7 @@ window.api.onProxyProgress((p, frac) => { const t = tiles.find((x) => x.path ===
 // smooth seek-bar updates for every tile (timeupdate alone is too coarse)
 (function loop() {
   for (const t of tiles) t.tick && t.tick();
+  tickTimeline();
   requestAnimationFrame(loop);
 })();
 
@@ -1361,6 +1504,7 @@ function collectSession() {
       board: board.initialized ? { panX: board.panX, panY: board.panY, zoom: board.zoom } : null,
       linked: board.linked,
       timeDisplay: layout.timeDisplay,
+      timelineExpanded: layout.timelineExpanded,
     },
     masterVolume,
     videos: tiles.map((t) => ({
@@ -1372,7 +1516,7 @@ function collectSession() {
       paused: t.video.paused,
       aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
-      bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label })),
+      bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
       sync: t.sync ? { start: t.sync.start } : null,
     })),
     groups: groups.map((g) => ({
@@ -1390,6 +1534,7 @@ async function applySession(data) {
   const wantMode = lay.mode === 'board' ? 'board' : 'gallery';
   if (Number(lay.rowHeight) > 0) layout.rowHeight = clamp(Number(lay.rowHeight), MIN_H, MAX_H);
   layout.timeDisplay = ['clock', 'frames', 'timecode'].includes(lay.timeDisplay) ? lay.timeDisplay : 'clock';
+  layout.timelineExpanded = lay.timelineExpanded === true;
   const bv = lay.board;
   if (bv && isFinite(bv.panX) && isFinite(bv.panY) && bv.zoom > 0) {
     board.panX = Number(bv.panX); board.panY = Number(bv.panY);
@@ -1556,6 +1701,10 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     for (const t of tiles) setSelected(t, true);
     selectionStatus();
+  } else if (key === 't' && !ctrl) {
+    toggleTimelineExpanded();
+  } else if ((key === 'i' || key === 'o') && !ctrl && !tl.hidden) {
+    setRangeAtPlayhead(key === 'i' ? 'in' : 'out');
   } else if (key === 'f') {
     fitAll();
   } else if (e.key === '=' || e.key === '+') {

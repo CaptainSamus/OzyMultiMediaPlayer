@@ -78,6 +78,28 @@
     <button class="gb-ungroup" title="Ungroup (Ctrl+Shift+G)">Ungroup</button>
   </div>
 
+  <div id="timeline" hidden>
+    <div class="tl-head">
+      <button class="tl-grip" title="Expand / collapse (T)">▴</button>
+      <span class="tl-title"></span>
+      <span class="tl-time"></span>
+      <span class="spacer"></span>
+      <button class="tl-set-in" title="Set loop In at the playhead (I)">In</button>
+      <button class="tl-set-out" title="Set loop Out at the playhead (O)">Out</button>
+      <button class="tl-clear-range" title="Clear the loop range">Clear</button>
+    </div>
+    <div class="tl-body">
+      <div class="tl-lanes"></div>
+      <div class="tl-bar">
+        <div class="tl-range"></div>
+        <div class="tl-markers"></div>
+        <div class="tl-handle tl-in" title="Loop In"></div>
+        <div class="tl-handle tl-out" title="Loop Out"></div>
+        <div class="tl-playhead"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="empty">
     <div class="big">Drop video files here</div>
     <div>or click <b>+ Add videos</b>. Drop a <b>.mvp</b> file to restore a saved session.</div>
@@ -146,6 +168,7 @@
   <script src="lib/codecs.js"></script>
   <script src="lib/frames.js"></script>
   <script src="lib/groups.js"></script>
+  <script src="lib/timeline.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
