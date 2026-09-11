@@ -25,6 +25,14 @@ const MIME = {
   '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.flac': 'audio/flac',
 };
 
+// Where ffmpeg.exe / ffprobe.exe live: bundled next to the app when packaged,
+// straight out of node_modules in development.
+function binPath(name) {
+  if (app.isPackaged) return path.join(process.resourcesPath, 'bin', name + '.exe');
+  if (name === 'ffmpeg') return require('ffmpeg-static');
+  return require('ffprobe-static').path;
+}
+
 function urlToFilePath(url) {
   // localvideo://v/<base64url of absolute path>
   const u = new URL(url);
@@ -86,7 +94,8 @@ function createWindow() {
     minHeight: 450,
     backgroundColor: '#0f0f10',
     autoHideMenuBar: true,
-    title: 'Multi Video Player',
+    title: 'Ozy Multi Media Player',
+    icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -107,19 +116,30 @@ function createWindow() {
   win.on('closed', () => { win = null; });
 }
 
-app.whenReady().then(() => {
-  protocol.handle('localvideo', handleVideoRequest);
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', (_e, argv) => {
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.focus();
+    const f = sessionFileFromArgv(argv);
+    if (f) win.webContents.send('open-session', f);
+  });
+  app.whenReady().then(() => {
+    protocol.handle('localvideo', handleVideoRequest);
 
-  // Hard block on any outbound network request from the renderer.
-  session.defaultSession.webRequest.onBeforeRequest(
-    { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*', 'ftp://*/*'] },
-    (_details, callback) => callback({ cancel: true }),
-  );
+    // Hard block on any outbound network request from the renderer.
+    session.defaultSession.webRequest.onBeforeRequest(
+      { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*', 'ftp://*/*'] },
+      (_details, callback) => callback({ cancel: true }),
+    );
 
-  createWindow();
+    createWindow();
 
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
-});
+    app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  });
+}
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
@@ -143,7 +163,7 @@ ipcMain.handle('save-session-as', async (_e, data) => {
   const r = await dialog.showSaveDialog(win, {
     title: 'Save session',
     defaultPath: 'session.mvp',
-    filters: [{ name: 'Multi Video Player session', extensions: ['mvp'] }],
+    filters: [{ name: 'Ozy Multi Media Player session', extensions: ['mvp'] }],
   });
   if (r.canceled || !r.filePath) return null;
   fs.writeFileSync(r.filePath, JSON.stringify(data, null, 2), 'utf8');
@@ -160,7 +180,7 @@ ipcMain.handle('load-session', async (_e, filePath) => {
     const r = await dialog.showOpenDialog(win, {
       title: 'Open session',
       properties: ['openFile'],
-      filters: [{ name: 'Multi Video Player session', extensions: ['mvp'] }, { name: 'All files', extensions: ['*'] }],
+      filters: [{ name: 'Ozy Multi Media Player session', extensions: ['mvp'] }, { name: 'All files', extensions: ['*'] }],
     });
     if (r.canceled || r.filePaths.length === 0) return null;
     filePath = r.filePaths[0];

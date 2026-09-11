@@ -86,7 +86,7 @@ function updateChrome() {
   emptyEl.classList.toggle('hidden', tiles.length > 0);
   countEl.textContent = tiles.length ? `${tiles.length} video${tiles.length === 1 ? '' : 's'}` : '';
   const name = sessionPath ? basename(sessionPath) : 'Unsaved session';
-  document.title = `${name} – Multi Video Player`;
+  document.title = `${name} – Ozy Multi Media Player`;
 }
 
 const isBoard = () => layout.mode === 'board';

@@ -1,4 +1,4 @@
-# Multi Video Player
+# Ozy Multi Media Player
 
 A fully local desktop app that plays many videos at once (20+ if your GPU can
 decode them), with a hover-to-reveal control bar on every video and savable
