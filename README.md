@@ -29,6 +29,8 @@ choose **Open**, then **Open** again, or run
 `xattr -dr com.apple.quarantine "/path/to/Ozy Multi Media Player.app"`.
 After that it opens normally.
 
+The window title shows which version you're running (e.g. `Ozy Multi Media Player 0.2.0.3`; `-dev` when run from source).
+
 With the portable versions, open a saved session by dragging the `.mvp` onto
 the window, with **Open session**, or by passing it on the command line
 (`OzyMultiMediaPlayer-<version>-portable.exe "C:\path\to\session.mvp"`).

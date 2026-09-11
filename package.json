@@ -1,6 +1,7 @@
 {
   "name": "ozy-multi-media-player",
   "version": "0.2.0",
+  "buildVersion": "0.2.0.3",
   "description": "Local multi-video player and comparison board with YouTube/Twitch tiles",
   "main": "main.js",
   "private": true,
@@ -22,7 +23,7 @@
   "build": {
     "appId": "com.ozy.multimediaplayer",
     "productName": "Ozy Multi Media Player",
-    "buildVersion": "0.2.0.1",
+    "buildVersion": "0.2.0.3",
     "directories": { "output": "dist" },
     "files": ["main.js", "preload.js", "index.html", "app.js", "style.css", "lib/**/*", "!lib/**/*.test.js"],
     "afterPack": "scripts/adhoc-sign.js",

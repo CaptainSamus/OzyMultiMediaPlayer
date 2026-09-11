@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('api', {
   cacheInfo: () => ipcRenderer.invoke('cache-info'),
   clearCache: () => ipcRenderer.invoke('clear-cache'),
   parent: () => ipcRenderer.invoke('twitch-parent'),
+  version: () => ipcRenderer.invoke('app-version'),
   webThumb: (id) => ipcRenderer.invoke('web-thumb', id),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (s) => ipcRenderer.invoke('save-settings', s),

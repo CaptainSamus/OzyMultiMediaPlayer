@@ -115,6 +115,12 @@ function startUiServer() {
     uiServer.listen(0, '127.0.0.1', () => { uiPort = uiServer.address().port; resolve(uiPort); });
   });
 }
+// Shown in the window title. Release builds get the tag's 4-part version written into
+// package.json's top-level buildVersion by the release workflow; running from source says -dev.
+ipcMain.handle('app-version', () => {
+  const v = require('./package.json').buildVersion || app.getVersion();
+  return app.isPackaged ? v : v + '-dev';
+});
 const TWITCH_PARENT = '127.0.0.1';
 ipcMain.handle('twitch-parent', () => TWITCH_PARENT);
 app.on('will-quit', () => { if (uiServer) uiServer.close(); });

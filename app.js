@@ -97,11 +97,13 @@ function setStatus(msg, ms = 4000) {
   if (ms > 0) statusTimer = setTimeout(() => { statusEl.textContent = ''; }, ms);
 }
 
+let appVersion = ''; // e.g. 0.2.0.3, or 0.2.0.3-dev from source
+window.api.version().then((v) => { appVersion = v || ''; updateChrome(); });
 function updateChrome() {
   emptyEl.classList.toggle('hidden', tiles.length > 0);
   countEl.textContent = tiles.length ? `${tiles.length} video${tiles.length === 1 ? '' : 's'}` : '';
   const name = sessionPath ? basename(sessionPath) : 'Unsaved session';
-  document.title = `${name} – Ozy Multi Media Player`;
+  document.title = `${name} – Ozy Multi Media Player${appVersion ? ' ' + appVersion : ''}`;
   refreshToolbarToggles();
 }
 
