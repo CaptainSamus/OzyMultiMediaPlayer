@@ -1,0 +1,16 @@
+{
+  "name": "multi-video-player",
+  "version": "0.1.0",
+  "description": "Fully local multi-video player with per-video controls and savable sessions",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
+  }
+}

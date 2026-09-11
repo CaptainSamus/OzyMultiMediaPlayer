@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; media-src localvideo:; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'">
+  <title>Multi Video Player</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="toolbar">
+    <button id="btn-add" title="Add one or more video files (Ctrl+A)">+ Add videos</button>
+    <button id="btn-open" title="Open a saved .mvp session (Ctrl+O)">Open session</button>
+    <button id="btn-save" title="Save session (Ctrl+S)">Save</button>
+    <button id="btn-save-as" title="Save session to a new file (Ctrl+Shift+S)">Save as…</button>
+    <span class="sep"></span>
+    <button id="btn-play-all" title="Play every video (Space)">Play all</button>
+    <button id="btn-pause-all" title="Pause every video (Space)">Pause all</button>
+    <button id="btn-mute-all" title="Mute every video">Mute all</button>
+    <button id="btn-unmute-all" title="Unmute every video">Unmute all</button>
+    <span class="sep"></span>
+    <div class="seg" id="mode">
+      <button data-mode="gallery" class="active" title="Attached: videos flow in rows and share one size. Pull any corner to resize them all.">Gallery</button>
+      <button data-mode="board" title="Detached: an infinite board. Drag videos anywhere, resize each one on its own, pan and zoom the view.">Board</button>
+    </div>
+    <label class="zoom" title="Gallery: video size. Board: view zoom. Ctrl + mouse wheel over the videos does the same.">
+      <span>🔍</span>
+      <input type="range" id="zoom" min="60" max="1200" value="240">
+      <span id="zoom-label"></span>
+    </label>
+    <button id="btn-fit" title="Fit every video on screen (F)">Fit all</button>
+    <button id="btn-tidy" class="board-only" title="Line the videos up in neat rows, keeping their sizes">Tidy</button>
+    <button id="btn-link" class="board-only" title="Linked: when you move or resize a video, its neighbours slide out of the way so nothing overlaps (L). Off: videos can overlap freely.">🔗 Linked</button>
+    <button id="btn-hand" class="board-only" title="Hand tool: left-drag pans the board instead of lassoing (H). Middle-mouse or Alt-drag always pans.">✋ Pan</button>
+    <span id="count"></span>
+    <span class="sep"></span>
+    <label class="master" title="Master volume – scales every video's own volume">
+      <span id="master-icon">🔊</span>
+      <input type="range" id="master-vol" min="0" max="100" value="100">
+      <span id="master-pct">100%</span>
+    </label>
+    <span id="status"></span>
+  </header>
+
+  <main id="grid">
+    <div id="canvas"></div>
+    <div id="marquee" hidden></div>
+    <div id="guide-v" class="guide" hidden></div>
+    <div id="guide-h" class="guide" hidden></div>
+  </main>
+
+  <div id="empty">
+    <div class="big">Drop video files here</div>
+    <div>or click <b>+ Add videos</b>. Drop a <b>.mvp</b> file to restore a saved session.</div>
+    <div class="hint">Gallery keeps videos attached in rows. Board is an infinite canvas: drag videos anywhere, resize each one, lasso several to move them together, pan and zoom.</div>
+  </div>
+
+  <div id="drop-hint">Release to add</div>
+
+  <template id="tile-template">
+    <div class="tile">
+      <video preload="metadata" draggable="false"></video>
+      <div class="overlay">
+        <div class="top">
+          <span class="name"></span>
+          <button class="remove" title="Remove this video">✕</button>
+        </div>
+        <div class="vol-zone" title="Volume: click or drag anywhere on the bar. Mouse wheel and ↑/↓ work too.">
+          <div class="vol-bar">
+            <div class="vol-fill"></div>
+            <span class="vol-pct">10%</span>
+          </div>
+        </div>
+        <div class="bottom">
+          <div class="markers" title=""></div>
+          <input type="range" class="seek" min="0" max="10000" value="0" step="1" title="Scrub">
+          <div class="row">
+            <button class="play" title="Play / pause (K)">▶</button>
+            <button class="back" title="Back 5 s (←). Shift for 30 s">−5s</button>
+            <button class="fwd" title="Forward 5 s (→). Shift for 30 s">+5s</button>
+            <span class="time">0:00 / 0:00</span>
+            <span class="spacer"></span>
+            <button class="bm-add" title="Add a bookmark at the current time (B)">🔖+</button>
+            <button class="bm-list" title="Bookmarks: click to list, rename, or delete. [ and ] jump between them.">🔖<span class="bm-count">0</span></button>
+            <button class="mute" title="Mute / unmute (M)">🔊</button>
+            <select class="rate" title="Playback speed">
+              <option value="0.25">0.25×</option>
+              <option value="0.5">0.5×</option>
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2×</option>
+            </select>
+          </div>
+          <div class="bm-panel hidden"></div>
+        </div>
+      </div>
+      <div class="error hidden"></div>
+      <div class="handle tl" data-corner="tl"></div>
+      <div class="handle tr" data-corner="tr"></div>
+      <div class="handle bl" data-corner="bl"></div>
+      <div class="handle br" data-corner="br"></div>
+    </div>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
