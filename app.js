@@ -2185,6 +2185,23 @@ function tidyGrid() {
   list.forEach((t, i) => { t.board.x = bb.minX + rects[i].x; t.board.y = bb.minY + rects[i].y; layoutTile(t); });
   finishRects(entry); fitBoard(); setStatus('Packed into a grid');
 }
+// Shift+F: the selected tiles fill the current view (one tile at its aspect, several share it),
+// centred in the viewport; undo = resize.
+function maximizeSelectionInView() {
+  if (!isBoard()) { setStatus('Board only'); return; }
+  const list = boardTilesInOrder().filter((t) => selection.has(t));
+  if (!list.length) { setStatus('Select a video first'); return; }
+  const entry = recordResize(tiles.filter((t) => t.board));
+  const r = gridRect(); const W = (r.width - 2 * GAP) / board.zoom, H = (r.height - 2 * GAP) / board.zoom;
+  const origin = toCanvas(r.left + GAP, r.top + GAP);
+  const { rects } = Arrange.fitToView(list.map((t) => ({ aspect: t.aspect })), W, H, GAP);
+  const blockW = Math.max(...rects.map((q) => q.x + q.w)), blockH = Math.max(...rects.map((q) => q.y + q.h));
+  const ox = origin.x + (W - blockW) / 2, oy = origin.y + (H - blockH) / 2;
+  list.forEach((t, i) => { t.board = { x: ox + rects[i].x, y: oy + rects[i].y, w: rects[i].w, h: rects[i].h }; bringToFront(t); layoutTile(t); });
+  finishRects(entry);
+  setStatus(list.length === 1 ? 'Filled the view' : `${list.length} videos fill the view`);
+}
+
 const tidyMenu = document.getElementById('tidy-menu');
 const tidyList = tidyMenu.querySelector('.menu-list');
 document.getElementById('btn-tidy-menu').addEventListener('click', (e) => { e.stopPropagation(); tidyList.hidden = !tidyList.hidden; });
@@ -2567,13 +2584,21 @@ window.addEventListener('keydown', (e) => {
     toggleTimelineExpanded();
   } else if ((key === 'i' || key === 'o') && !ctrl && !tl.hidden) {
     setRangeAtPlayhead(key === 'i' ? 'in' : 'out');
+  /* DISABLED (Mark, 2026-09-11): Shift+F replaced by plain F (fullscreen the selected tile)
   } else if (key === 'f' && e.shiftKey && !ctrl) {
-    // Shift+F: fullscreen the one selected tile, else the tile under the mouse; again (or Esc) to leave
     if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
     const target = selection.size === 1 ? [...selection][0] : h;
     if (target) toggleTileFullscreen(target.el); else setStatus('Select or hover a video first');
-  } else if (key === 'f') {
-    fitAll();
+  */
+  } else if (key === 'f' && e.shiftKey && !ctrl) {
+    maximizeSelectionInView();
+  } else if (key === 'f' && !ctrl) {
+    // F: fullscreen the one selected tile; F again (or Esc) leaves
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else if (selection.size === 1) toggleTileFullscreen([...selection][0].el);
+    else setStatus('Select a video first');
+    // DISABLED (Mark, 2026-09-11): F no longer fits; Fit all is the toolbar button only
+    // fitAll();
   } else if (e.key === '=' || e.key === '+') {
     if (isBoard()) zoomAtCenter(board.zoom * 1.15); else { noteRowHeightChange(); setRowHeight(layout.rowHeight * 1.1); }
   } else if (e.key === '-' || e.key === '_') {
