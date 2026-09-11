@@ -354,3 +354,53 @@ ipcMain.handle('web-thumb', async (_e, id) => {
     return file;
   } catch { return null; }
 });
+
+// ---- global settings (Sources sidebar) ----
+const Settings = require('./lib/settings');
+const Sources = require('./lib/sources');
+const settingsPath = () => path.join(app.getPath('userData'), 'settings.json');
+function readSettings() {
+  try { return Settings.merge(JSON.parse(fs.readFileSync(settingsPath(), 'utf8').replace(/^﻿/, ''))); }
+  catch { return Settings.defaults(); }
+}
+ipcMain.handle('get-settings', () => readSettings());
+ipcMain.handle('save-settings', (_e, s) => { fs.writeFileSync(settingsPath(), JSON.stringify(Settings.merge(s), null, 2), 'utf8'); });
+
+ipcMain.handle('pick-folder', async () => {
+  const r = await dialog.showOpenDialog(win, { title: 'Add folder', properties: ['openDirectory'] });
+  return r.canceled ? null : r.filePaths[0];
+});
+// Non-recursive: media files directly in the folder, sorted by name.
+ipcMain.handle('list-folder', (_e, dir) => {
+  let names;
+  try { names = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => d.name); }
+  catch { return { ok: false, files: [] }; }
+  const files = [];
+  for (const n of Sources.filterMedia(names)) {
+    const p = path.join(dir, n);
+    try { const st = fs.statSync(p); files.push({ path: p, name: n, size: st.size, mtimeMs: st.mtimeMs }); } catch {}
+  }
+  return { ok: true, files };
+});
+
+// Local-file thumbnails: one JPEG per file (same hash as proxies) from 10 % in,
+// made lazily as sidebar rows scroll into view, at most two ffmpeg jobs at once.
+let thumbRunning = 0; const thumbWaiting = [];
+function nextThumb() { if (thumbRunning < 2 && thumbWaiting.length) thumbWaiting.shift()(); }
+ipcMain.handle('thumb', (_e, filePath) => new Promise((resolve) => {
+  const job = () => {
+    thumbRunning++;
+    const done = (v) => { thumbRunning--; resolve(v); nextThumb(); };
+    let stat; try { stat = fs.statSync(filePath); } catch { return done(null); }
+    fs.mkdirSync(thumbDir(), { recursive: true });
+    const out = path.join(thumbDir(), ProxyCache.name(filePath, stat.size, stat.mtimeMs).replace(/\.mp4$/, '.jpg'));
+    if (fs.existsSync(out)) return done(out);
+    if (!checkTools()) return done(null);
+    execFile(binPath('ffprobe'), ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', filePath], { windowsHide: true }, (err, stdout) => {
+      const dur = err ? 0 : Number(stdout) || 0;
+      const ss = (dur * 0.1).toFixed(2);
+      execFile(binPath('ffmpeg'), ['-y', '-ss', ss, '-i', filePath, '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '4', out], { windowsHide: true }, (e2) => done(e2 ? null : out));
+    });
+  };
+  thumbWaiting.push(job); nextThumb();
+}));

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; media-src localvideo:; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'; frame-src https://www.youtube.com https://www.youtube-nocookie.com https://player.twitch.tv https://clips.twitch.tv">
+        content="default-src 'self'; media-src localvideo:; img-src 'self' data: localvideo:; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'; frame-src https://www.youtube.com https://www.youtube-nocookie.com https://player.twitch.tv https://clips.twitch.tv">
   <title>Ozy Multi Media Player</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -16,6 +16,7 @@
         <button id="add-url">YouTube / Twitch URL…</button>
       </div>
     </div>
+    <button id="btn-sidebar" title="Sources sidebar: folders and playlists to drag from (`)">☰ Sources</button>
     <button id="btn-open" title="Open a saved .mvp session (Ctrl+O)">Open session</button>
     <button id="btn-save" title="Save session (Ctrl+S)">Save</button>
     <button id="btn-save-as" title="Save session to a new file (Ctrl+Shift+S)">Save as…</button>
@@ -57,12 +58,49 @@
     </div>
   </header>
 
-  <main id="grid">
-    <div id="canvas"></div>
-    <div id="marquee" hidden></div>
-    <div id="guide-v" class="guide" hidden></div>
-    <div id="guide-h" class="guide" hidden></div>
-  </main>
+  <div id="workspace">
+    <aside id="sidebar" hidden>
+      <div class="sb-head">
+        <span>Sources</span>
+        <button id="sb-add-folder" title="Add a folder">+ Folder</button>
+        <button id="sb-add-playlist" title="Add a YouTube playlist" disabled>+ Playlist</button>
+      </div>
+      <div class="sb-section" data-section="folders"><div class="sb-title">Folders</div><div class="sb-list"></div></div>
+      <div class="sb-section" data-section="playlists"><div class="sb-title">Playlists</div><div class="sb-list"></div><div class="sb-note">Playlists arrive in the next update.</div></div>
+      <div id="sb-resize"></div>
+    </aside>
+    <main id="grid">
+      <div id="canvas"></div>
+      <div id="marquee" hidden></div>
+      <div id="guide-v" class="guide" hidden></div>
+      <div id="guide-h" class="guide" hidden></div>
+    </main>
+  </div>
+  <template id="sb-source-template">
+    <div class="sb-source">
+      <div class="sb-row">
+        <button class="sb-expand">▸</button>
+        <span class="sb-name"></span>
+        <span class="sb-count"></span>
+        <button class="sb-addall" title="Add every item">Add all</button>
+        <button class="sb-menu" title="Refresh / Pin / Remove">⋯</button>
+      </div>
+      <div class="sb-actions" hidden>
+        <button class="sb-refresh">Refresh</button>
+        <button class="sb-pin">Pin</button>
+        <button class="sb-remove">Remove</button>
+      </div>
+      <div class="sb-items" hidden></div>
+    </div>
+  </template>
+  <template id="sb-item-template">
+    <div class="sb-item" draggable="true">
+      <img class="sb-thumb" alt="">
+      <span class="sb-item-name"></span>
+      <span class="sb-dur"></span>
+      <span class="sb-onboard" title="Already on the board">●</span>
+    </div>
+  </template>
 
   <div id="groupbar" hidden>
     <span class="gb-swatch" title="Click to change the group colour"></span>
@@ -227,6 +265,8 @@
   <script src="lib/groups.js"></script>
   <script src="lib/timeline.js"></script>
   <script src="lib/undo.js"></script>
+  <script src="lib/settings.js"></script>
+  <script src="lib/sources.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

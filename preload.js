@@ -17,4 +17,9 @@ contextBridge.exposeInMainWorld('api', {
   clearCache: () => ipcRenderer.invoke('clear-cache'),
   parent: () => ipcRenderer.invoke('twitch-parent'),
   webThumb: (id) => ipcRenderer.invoke('web-thumb', id),
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+  saveSettings: (s) => ipcRenderer.invoke('save-settings', s),
+  pickFolder: () => ipcRenderer.invoke('pick-folder'),
+  listFolder: (dir) => ipcRenderer.invoke('list-folder', dir),
+  thumb: (p) => ipcRenderer.invoke('thumb', p),
 });

@@ -1655,6 +1655,7 @@ function removeTile(tile, { record = true } = {}) {
   if (tile.destroy) tile.destroy();
   tile.el.remove();
   updateChrome();
+  markOnBoard();
 }
 
 // ---------- web tiles (YouTube / Twitch) ----------
@@ -1860,6 +1861,7 @@ function addVideos(paths, at = null) {
   if (isBoard()) placeOnBoard(added.filter((t) => !t.board), at);
   layoutTiles();
   if (wasEmpty && tiles.length) scheduleFit();
+  markOnBoard();
 }
 
 let toolsWarned = false; // one status message if ffmpeg/ffprobe are missing
@@ -2014,7 +2016,12 @@ const urlInput = document.getElementById('url-input');
 const closeUrlBar = () => { urlBar.hidden = true; urlInput.value = ''; };
 document.getElementById('btn-add').addEventListener('click', (e) => { e.stopPropagation(); menuList.hidden = !menuList.hidden; });
 window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !addMenu.contains(e.target)) menuList.hidden = true; });
-document.getElementById('add-local').addEventListener('click', async () => { menuList.hidden = true; addVideos(await window.api.pickVideos()); });
+document.getElementById('add-local').addEventListener('click', async () => {
+  menuList.hidden = true;
+  const paths = await window.api.pickVideos();
+  addVideos(paths);
+  if (paths.length) sidebar.addFolder(Sources.parentDir(paths[0])); // becomes the sidebar's Recent row
+});
 document.getElementById('add-url').addEventListener('click', () => { menuList.hidden = true; urlBar.hidden = false; urlInput.focus(); });
 document.getElementById('url-cancel').addEventListener('click', closeUrlBar);
 function submitUrl() {
@@ -2069,6 +2076,150 @@ masterVol.addEventListener('wheel', (e) => {
 
 // keep gallery tiles clamped to the window width as it changes
 new ResizeObserver(() => { if (!isBoard()) layoutTiles(); }).observe(grid);
+
+// ---------- sources sidebar ----------
+// Folders (and, from Task 13, playlists) to drag onto the grid. Lives in the global
+// settings.json via main, not in the session, so favourites show in every session.
+let settings = Settings.defaults();
+const sbEl = document.getElementById('sidebar');
+const sbLists = { folders: sbEl.querySelector('[data-section="folders"] .sb-list'), playlists: sbEl.querySelector('[data-section="playlists"] .sb-list') };
+const sbSelected = new Set(); // selected .sb-item elements
+let sbSaveTimer = null;
+function saveSettings() { clearTimeout(sbSaveTimer); sbSaveTimer = setTimeout(() => window.api.saveSettings(settings), 300); }
+
+const sidebar = {
+  open() { settings.sidebar.open = true; sbEl.hidden = false; saveSettings(); layoutTiles(); },
+  close() { settings.sidebar.open = false; sbEl.hidden = true; saveSettings(); layoutTiles(); },
+  toggle() { settings.sidebar.open ? sidebar.close() : sidebar.open(); },
+  async addFolder(dir, { pinned = false } = {}) {
+    settings = pinned ? Settings.pinFolder(settings, dir, true) : Settings.upsertRecentFolder(settings, dir);
+    saveSettings(); await renderFolders();
+  },
+  async refresh() { await renderFolders(); },
+};
+
+function onBoardPaths() { return new Set(tiles.map((t) => t.path.toLowerCase())); }
+function markOnBoard() {
+  const on = onBoardPaths();
+  for (const it of sbEl.querySelectorAll('.sb-item')) it.classList.toggle('onboard', on.has(it.dataset.path.toLowerCase()));
+}
+
+// thumbnails are made only when a row scrolls into view
+const thumbObserver = new IntersectionObserver((entries) => {
+  for (const en of entries) {
+    if (!en.isIntersecting) continue;
+    const it = en.target; thumbObserver.unobserve(it);
+    const img = it.querySelector('.sb-thumb');
+    if (it.dataset.thumbUrl) { img.src = it.dataset.thumbUrl; continue; }
+    window.api.thumb(it.dataset.path).then((p) => { if (p) img.src = window.api.videoUrl(p); else img.classList.add('generic'); });
+  }
+}, { root: null, rootMargin: '200px' });
+
+function buildItem(data) {
+  // data: { type:'file', path, name, duration? } | { type:'youtube', url, id, title, duration, thumbUrl }
+  const it = document.getElementById('sb-item-template').content.firstElementChild.cloneNode(true);
+  it.dataset.type = data.type;
+  it.dataset.path = data.type === 'file' ? data.path : data.url;
+  if (data.thumbUrl) it.dataset.thumbUrl = data.thumbUrl;
+  if (data.type === 'file') it.dataset.name = data.name; else it.dataset.title = data.title;
+  it.querySelector('.sb-item-name').textContent = data.type === 'file' ? data.name : data.title;
+  it.querySelector('.sb-item-name').title = it.dataset.path;
+  it.querySelector('.sb-dur').textContent = data.duration ? fmtTime(data.duration) : '';
+  it.addEventListener('click', (e) => {
+    if (e.ctrlKey) { it.classList.toggle('selected'); it.classList.contains('selected') ? sbSelected.add(it) : sbSelected.delete(it); return; }
+    if (e.shiftKey && sbSelected.size) {
+      const all = [...it.parentElement.querySelectorAll('.sb-item')];
+      const last = [...sbSelected].pop(); const a = all.indexOf(last), b = all.indexOf(it);
+      for (const x of all.slice(Math.min(a, b), Math.max(a, b) + 1)) { x.classList.add('selected'); sbSelected.add(x); }
+      return;
+    }
+    for (const x of sbSelected) x.classList.remove('selected'); sbSelected.clear();
+    it.classList.add('selected'); sbSelected.add(it);
+  });
+  it.addEventListener('dblclick', () => addItemsToBoard([itemPayload(it)], null));
+  it.addEventListener('dragstart', (e) => {
+    if (!sbSelected.has(it)) { for (const x of sbSelected) x.classList.remove('selected'); sbSelected.clear(); it.classList.add('selected'); sbSelected.add(it); }
+    e.dataTransfer.setData('application/x-ozy-items', JSON.stringify([...sbSelected].map(itemPayload)));
+    e.dataTransfer.effectAllowed = 'copy';
+  });
+  thumbObserver.observe(it);
+  return it;
+}
+function itemPayload(it) {
+  return it.dataset.type === 'file'
+    ? { type: 'file', path: it.dataset.path }
+    : { type: 'youtube', url: it.dataset.path, title: it.dataset.title };
+}
+// Task 13 extends this for youtube payloads.
+function addItemsToBoard(items, at) {
+  const files = items.filter((i) => i.type === 'file').map((i) => i.path);
+  if (files.length) addVideos(files, at);
+  markOnBoard();
+}
+
+function buildSource({ id, name, count, missing, items, onRefresh, onRemove, onPin, pinLabel }) {
+  const src = document.getElementById('sb-source-template').content.firstElementChild.cloneNode(true);
+  src.dataset.id = id;
+  src.classList.toggle('missing', !!missing);
+  src.querySelector('.sb-name').textContent = name; src.querySelector('.sb-name').title = id;
+  src.querySelector('.sb-count').textContent = missing ? 'Missing' : String(count);
+  const itemsEl = src.querySelector('.sb-items');
+  for (const d of items) itemsEl.appendChild(buildItem(d));
+  const expand = src.querySelector('.sb-expand');
+  expand.addEventListener('click', () => { itemsEl.hidden = !itemsEl.hidden; expand.textContent = itemsEl.hidden ? '▸' : '▾'; });
+  src.querySelector('.sb-addall').addEventListener('click', () => {
+    const payload = [...itemsEl.querySelectorAll('.sb-item')].map(itemPayload);
+    if (payload.length > 30 && !confirm(`Add ${payload.length} videos?`)) return;
+    addItemsToBoard(payload, null);
+  });
+  // ⋯ reveals Refresh / Pin / Remove under the row (Electron has no window.prompt)
+  const actions = src.querySelector('.sb-actions');
+  src.querySelector('.sb-menu').addEventListener('click', () => { actions.hidden = !actions.hidden; });
+  const pinBtn = src.querySelector('.sb-pin');
+  if (pinLabel) pinBtn.textContent = pinLabel; else pinBtn.remove();
+  src.querySelector('.sb-refresh').addEventListener('click', () => onRefresh());
+  pinBtn.addEventListener('click', () => onPin && onPin());
+  src.querySelector('.sb-remove').addEventListener('click', () => onRemove());
+  return src;
+}
+
+async function renderFolders() {
+  const open = new Set([...sbLists.folders.querySelectorAll('.sb-source')].filter((s) => !s.querySelector('.sb-items').hidden).map((s) => s.dataset.id));
+  const rows = [];
+  for (const f of settings.sources.folders) {
+    const r = await window.api.listFolder(f.path);
+    const items = r.files.map((x) => ({ type: 'file', path: x.path, name: x.name }));
+    const row = buildSource({
+      id: f.path, name: (f.recent ? 'Recent: ' : '') + basename(f.path), count: items.length, missing: !r.ok, items,
+      pinLabel: f.pinned ? 'Unpin' : 'Pin',
+      onRefresh: renderFolders,
+      onPin: () => { settings = Settings.pinFolder(settings, f.path, !f.pinned); saveSettings(); renderFolders(); },
+      onRemove: () => { settings = Settings.removeFolder(settings, f.path); saveSettings(); renderFolders(); },
+    });
+    if (open.has(f.path)) { row.querySelector('.sb-items').hidden = false; row.querySelector('.sb-expand').textContent = '▾'; } // keep expanded rows expanded
+    rows.push(row);
+  }
+  sbLists.folders.textContent = '';
+  for (const row of rows) sbLists.folders.appendChild(row);
+  markOnBoard();
+}
+
+document.getElementById('btn-sidebar').addEventListener('click', sidebar.toggle);
+document.getElementById('sb-add-folder').addEventListener('click', async () => { const d = await window.api.pickFolder(); if (d) sidebar.addFolder(d, { pinned: true }); });
+// width drag (220-480 px, remembered)
+document.getElementById('sb-resize').addEventListener('pointerdown', (e) => {
+  e.preventDefault(); document.body.classList.add('sb-resizing');
+  const onMove = (ev) => { settings.sidebar.width = clamp(ev.clientX, 220, 480); sbEl.style.setProperty('--sb-width', settings.sidebar.width + 'px'); layoutTiles(); };
+  const onUp = () => { window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); document.body.classList.remove('sb-resizing'); saveSettings(); };
+  window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp);
+});
+// startup
+window.api.getSettings().then((s) => {
+  settings = s;
+  sbEl.style.setProperty('--sb-width', settings.sidebar.width + 'px');
+  sbEl.hidden = !settings.sidebar.open;
+  renderFolders();
+});
 
 // ---------- keyboard ----------
 
@@ -2132,6 +2283,8 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     for (const t of tiles) setSelected(t, true);
     selectionStatus();
+  } else if (e.key === '`') {
+    sidebar.toggle();
   } else if (key === 't' && !ctrl) {
     toggleTimelineExpanded();
   } else if ((key === 'i' || key === 'o') && !ctrl && !tl.hidden) {
@@ -2148,19 +2301,24 @@ window.addEventListener('keydown', (e) => {
 // ---------- drag & drop ----------
 
 let dragDepth = 0;
-window.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
+// drags that start in the Sources sidebar don't get the big "Release to add" overlay
+const isSidebarDrag = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('application/x-ozy-items');
+window.addEventListener('dragenter', (e) => { e.preventDefault(); if (isSidebarDrag(e)) return; dragDepth++; document.body.classList.add('dragging'); });
 window.addEventListener('dragover', (e) => { e.preventDefault(); });
-window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); } });
+window.addEventListener('dragleave', (e) => { if (isSidebarDrag(e)) return; if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); } });
 window.addEventListener('drop', async (e) => {
   e.preventDefault();
   dragDepth = 0;
   document.body.classList.remove('dragging');
+  const at = isBoard() && tiles.length ? toCanvas(e.clientX, e.clientY) : null; // on the board, drop where the cursor is
+  const raw = e.dataTransfer.getData('application/x-ozy-items');
+  if (raw) { try { addItemsToBoard(JSON.parse(raw), at); } catch {} return; }
   const files = Array.from(e.dataTransfer.files || []);
   const paths = files.map((f) => window.api.getPathForFile(f)).filter(Boolean);
   const sessions = paths.filter((p) => p.toLowerCase().endsWith('.mvp'));
   if (sessions.length) { await openSession(sessions[0]); return; }
-  // on the board, drop the new videos where the cursor is
-  addVideos(paths, isBoard() && tiles.length ? toCanvas(e.clientX, e.clientY) : null);
+  addVideos(paths, at);
+  if (paths.length) sidebar.addFolder(Sources.parentDir(paths[0]));
 });
 
 // ---------- session passed on the command line ----------
