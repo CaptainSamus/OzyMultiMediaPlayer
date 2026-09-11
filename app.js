@@ -94,7 +94,12 @@ const isBoard = () => layout.mode === 'board';
 // ---------- volume ----------
 
 function applyTileVolume(tile) {
-  tile.video.volume = clamp(tile.volume * masterVolume, 0, 1);
+  tile.video.volume = clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1);
+}
+// A tile's own mute is remembered separately so a group mute can be undone.
+function setOwnMuted(tile, m) {
+  tile.ownMuted = !!m;
+  tile.video.muted = tile.ownMuted || !!(tile.group && tile.group.muted);
 }
 
 function setMasterVolume(v, { updateSlider = true } = {}) {
@@ -217,15 +222,222 @@ function bringToFront(tile) {
 function setSelected(tile, on) {
   if (on) selection.add(tile); else selection.delete(tile);
   tile.el.classList.toggle('selected', on);
+  syncActiveFromSelection();
 }
 function clearSelection() {
   for (const t of selection) t.el.classList.remove('selected');
   selection.clear();
+  syncActiveFromSelection();
 }
 function selectOnly(tile) { clearSelection(); setSelected(tile, true); }
+function selectGroupOf(tile) { clearSelection(); for (const m of tile.group.members) setSelected(m, true); }
 function selectionStatus() {
   if (selection.size > 1) setStatus(`${selection.size} videos selected – drag any of them to move the group, Esc to deselect`, 6000);
 }
+
+// ---------- groups ----------
+// A group has shared audio/speed settings; with Sync on, members also share
+// one timeline (see lib/groups.js). tile.group is the group or null,
+// tile.sync = { start } while the group is synced.
+const GROUP_PALETTE = Object.keys(Groups.PALETTE);
+const groups = [];
+let nextGroupId = 1;
+let active = null;       // the group whose bar / timeline is showing
+let syncing = false;     // re-entrancy guard for broadcast
+
+function groupOf(tile) { return tile.group || null; }
+function activeGroup() { return active; }
+function paintGroup(t) {
+  const sw = t.el.querySelector('.group-swatch');
+  sw.hidden = !t.group;
+  if (t.group) sw.style.background = Groups.PALETTE[t.group.color];
+}
+function memberModel(g) {
+  return [...g.members].filter((t) => t.video).map((t) => ({ tile: t, start: t.sync ? t.sync.start : 0, duration: t.video.duration || 0 }));
+}
+function captureStarts(g) {
+  const ms = [...g.members].filter((t) => t.video);
+  const starts = Groups.starts(ms.map((t) => t.video.currentTime || 0));
+  ms.forEach((t, i) => { t.sync = { start: starts[i] }; });
+}
+function createGroup(list, opts = {}) {
+  for (const t of list) if (t.group) removeFromGroup(t.group, t);
+  const g = {
+    id: nextGroupId++, name: opts.name || `Group ${nextGroupId - 1}`,
+    color: GROUP_PALETTE.includes(opts.color) ? opts.color : GROUP_PALETTE[(nextGroupId - 2) % GROUP_PALETTE.length],
+    members: new Set(list), sync: !!opts.sync, sticky: opts.sticky !== false,
+    loop: ['off', 'shortest', 'longest', 'range'].includes(opts.loop) ? opts.loop : 'off',
+    range: opts.range || null, volume: isFinite(opts.volume) ? clamp(Number(opts.volume), 0, 1) : 1,
+    muted: !!opts.muted, rate: Number(opts.rate) > 0 ? Number(opts.rate) : 1,
+  };
+  groups.push(g);
+  for (const t of list) { t.group = g; t.sync = null; paintGroup(t); }
+  if (g.sync) captureStarts(g);
+  applyGroupAudio(g);
+  setActiveGroup(g);
+  return g;
+}
+// back to the tile's own mute and volume once it leaves its group
+function releaseTile(t) {
+  t.group = null; t.sync = null; paintGroup(t);
+  if (t.video) { setOwnMuted(t, t.ownMuted); applyTileVolume(t); }
+}
+function removeFromGroup(g, t) {
+  g.members.delete(t); releaseTile(t);
+  if (g.members.size < 2) dissolveGroup(g);
+  else if (active === g) renderGroupBar();
+}
+function dissolveGroup(g) {
+  for (const t of [...g.members]) releaseTile(t);
+  g.members.clear();
+  const i = groups.indexOf(g); if (i >= 0) groups.splice(i, 1);
+  if (active === g) setActiveGroup(null);
+}
+function applyGroupAudio(g) {
+  for (const t of g.members) {
+    if (t.video) {
+      setOwnMuted(t, t.ownMuted);
+      applyTileVolume(t);
+      t.video.playbackRate = g.rate;
+      t.el.querySelector('.rate').value = String(g.rate);
+    }
+  }
+}
+
+function setActiveGroup(g) {
+  active = g;
+  renderGroupBar();
+  if (typeof renderTimeline === 'function') renderTimeline(); // Task 7
+}
+function syncActiveFromSelection() {
+  const t = [...selection].find((x) => x.group);
+  setActiveGroup(t ? t.group : null);
+}
+
+const gb = document.getElementById('groupbar');
+const gbQ = (s) => gb.querySelector(s);
+function renderGroupBar() {
+  gb.hidden = !active;
+  if (!active) return;
+  const g = active;
+  gbQ('.gb-swatch').style.background = Groups.PALETTE[g.color];
+  if (document.activeElement !== gbQ('.gb-name')) gbQ('.gb-name').value = g.name;
+  const anyPlaying = [...g.members].some((t) => t.video && !t.video.paused);
+  gbQ('.gb-play').textContent = anyPlaying ? '❚❚' : '▶';
+  gbQ('.gb-mute').textContent = g.muted ? '🔇' : '🔊';
+  gbQ('.gb-vol').value = String(Math.round(g.volume * 100));
+  gbQ('.gb-rate').value = String(g.rate);
+  gbQ('.gb-sync').classList.toggle('toggled', g.sync);
+  gbQ('.gb-sticky').classList.toggle('toggled', g.sticky);
+  gbQ('.gb-loop').value = g.loop;
+  gbQ('.gb-note').textContent = g.loop !== 'off' ? 'Loop needs Sync, so Sync is on' : '';
+}
+gbQ('.gb-swatch').addEventListener('click', () => { active.color = GROUP_PALETTE[(GROUP_PALETTE.indexOf(active.color) + 1) % GROUP_PALETTE.length]; for (const t of active.members) paintGroup(t); renderGroupBar(); });
+gbQ('.gb-name').addEventListener('input', () => { active.name = gbQ('.gb-name').value; });
+gbQ('.gb-name').addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter' || e.key === 'Escape') e.target.blur(); });
+gbQ('.gb-play').addEventListener('click', () => playPauseGroup(active));
+gbQ('.gb-mute').addEventListener('click', () => { active.muted = !active.muted; applyGroupAudio(active); renderGroupBar(); });
+gbQ('.gb-vol').addEventListener('input', () => { active.volume = Number(gbQ('.gb-vol').value) / 100; applyGroupAudio(active); });
+gbQ('.gb-rate').addEventListener('change', () => { active.rate = Number(gbQ('.gb-rate').value); applyGroupAudio(active); });
+gbQ('.gb-sync').addEventListener('click', () => setGroupSync(active, !active.sync));
+gbQ('.gb-sticky').addEventListener('click', () => { active.sticky = !active.sticky; renderGroupBar(); });
+gbQ('.gb-loop').addEventListener('change', () => { active.loop = gbQ('.gb-loop').value; if (active.loop !== 'off' && !active.sync) setGroupSync(active, true); renderGroupBar(); });
+gbQ('.gb-ungroup').addEventListener('click', () => dissolveGroup(active));
+
+function setGroupSync(g, on) {
+  g.sync = on;
+  if (on) captureStarts(g); else for (const t of g.members) t.sync = null;
+  if (!on && g.loop !== 'off') g.loop = 'off';
+  renderGroupBar();
+}
+// Group time from a member that isn't clamped (playing, or paused inside its own
+// extent). If every member is clamped, a member waiting at 0 means g <= its start,
+// so the earliest such start is g; if all have ended, g is the group's end.
+function groupTimeOf(g) {
+  const ms = memberModel(g);
+  if (!ms.length) return 0;
+  const inside = (m) => m.tile.video.currentTime > 0 && m.tile.video.currentTime < m.duration;
+  const lead = ms.find((m) => !m.tile.video.paused) || ms.find(inside);
+  if (lead) return Groups.groupTime(lead.tile.video.currentTime, lead.start);
+  const waiting = ms.filter((m) => m.tile.video.currentTime <= 0);
+  return waiting.length ? Math.min(...waiting.map((m) => m.start)) : Groups.end(ms);
+}
+function seekGroup(g, gt) {
+  syncing = true;
+  try { for (const m of memberModel(g)) m.tile.video.currentTime = Groups.memberTime(gt, m.start, m.duration); }
+  finally { syncing = false; }
+}
+function playPauseGroup(g) {
+  const ms = memberModel(g);
+  const anyPlaying = ms.some((m) => !m.tile.video.paused);
+  if (anyPlaying) { for (const m of ms) m.tile.video.pause(); return; }
+  if (g.sync) {
+    const end = Groups.end(ms);
+    if (groupTimeOf(g) >= end - 0.05) seekGroup(g, g.loop === 'range' && g.range ? g.range.in : 0); // Loop Off: play after the end restarts
+    const gt = groupTimeOf(g);
+    for (const m of ms) if (gt >= m.start && gt < m.start + m.duration) m.tile.video.play().catch(() => {});
+  } else for (const m of ms) m.tile.video.play().catch(() => {});
+  renderGroupBar();
+}
+function toggleGroupFromSelection() {
+  const sel = [...selection].filter((t) => t.video);
+  if (sel.length < 2) { setStatus('Select at least two videos to group (Shift-click, or lasso on the board)'); return; }
+  createGroup(sel);
+  setStatus(`${sel.length} videos grouped`);
+}
+document.getElementById('btn-group').addEventListener('click', toggleGroupFromSelection);
+document.getElementById('btn-ungroup').addEventListener('click', () => { if (active) dissolveGroup(active); });
+
+// A user action on one synced member applies to the rest.
+// action: 'play' | 'pause' | 'seek' | 'rate'. Only call from user actions, never
+// from media events (those fire later, outside the `syncing` guard).
+function broadcast(leader, action, value) {
+  const g = leader.group;
+  if (!g) return;
+  if (action === 'rate') { g.rate = value; applyGroupAudio(g); if (active === g) renderGroupBar(); return; } // speed is shared even without Sync
+  if (syncing || !g.sync || !leader.sync) return;
+  syncing = true;
+  try {
+    const gt = Groups.groupTime(leader.video.currentTime, leader.sync.start);
+    for (const m of memberModel(g)) {
+      if (m.tile === leader) continue;
+      const v = m.tile.video;
+      if (action === 'play') { if (gt >= m.start && gt < m.start + m.duration) v.play().catch(() => {}); }
+      else if (action === 'pause') v.pause();
+      else if (action === 'seek') v.currentTime = Groups.memberTime(gt, m.start, m.duration);
+    }
+  } finally { syncing = false; }
+}
+
+// Runs 10x a second: drift correction, waiting members, held members, loops.
+setInterval(() => {
+  for (const g of groups) {
+    if (!g.sync) continue;
+    const ms = memberModel(g);
+    const lead = ms.find((m) => !m.tile.video.paused);
+    if (!lead) continue;
+    const gt = Groups.groupTime(lead.tile.video.currentTime, lead.start);
+    const loopEnd = Groups.loopEnd(g.loop, ms.filter((m) => m.duration > 0), g.range); // ignore members still loading
+    if (loopEnd !== null && gt >= loopEnd - 0.05) {
+      const to = g.loop === 'range' && g.range ? g.range.in : 0;
+      seekGroup(g, to);
+      for (const m of ms) if (Groups.memberTime(to, m.start, m.duration) < m.duration && to >= m.start) m.tile.video.play().catch(() => {});
+      continue;
+    }
+    syncing = true;
+    try {
+      for (const m of ms) {
+        if (m === lead) continue;
+        const v = m.tile.video;
+        const want = Groups.memberTime(gt, m.start, m.duration);
+        const inside = gt >= m.start && gt < m.start + m.duration;
+        if (inside && v.paused) v.play().catch(() => {});   // its start was reached
+        if (!inside && !v.paused) v.pause();                 // waiting at 0 or holding at the end
+        if (Math.abs(v.currentTime - want) > Groups.DRIFT) v.currentTime = want;
+      }
+    } finally { syncing = false; }
+  }
+}, 100);
 
 function setLinked(on) {
   board.linked = !!on;
@@ -543,9 +755,15 @@ function attachTileDrag(tile) {
       setTimeout(() => { tile.suppressClick = false; }, 0);
       return;
     }
+    // Ctrl: just this tile, even inside a sticky group. Otherwise clicking a
+    // member selects its whole group (so its settings bar shows).
+    const single = e.ctrlKey;
+    if (single) selectOnly(tile);
+    else if (tile.group && !selection.has(tile)) selectGroupOf(tile);
     const start = { x: e.clientX, y: e.clientY };
     let moving = false;
     let group = [];
+    let movingSet = new Set();
     const onMove = (ev) => {
       const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
       if (!moving) {
@@ -554,7 +772,14 @@ function attachTileDrag(tile) {
         try { el.setPointerCapture(ev.pointerId); } catch {}
         // dragging something outside the selection makes it the selection
         if (!selection.has(tile)) selectOnly(tile);
-        group = [...selection];
+        if (single) group = [tile];
+        else {
+          // members of non-sticky groups move on their own; sticky groups move whole
+          const set = new Set([...selection].filter((t) => t === tile || !t.group || t.group.sticky));
+          for (const t of [...set]) if (t.group && t.group.sticky) for (const m of t.group.members) if (m.board) set.add(m);
+          group = [...set];
+        }
+        movingSet = new Set(group);
         rememberStart();
         for (const t of group) { bringToFront(t); t.el.classList.add('dragging'); }
         document.body.classList.add('tile-dragging');
@@ -563,7 +788,7 @@ function attachTileDrag(tile) {
       const bb0 = boardBounds(group.map((t) => ({ board: startPos.get(t) })));
       let nx = bb0.minX + dx / board.zoom, ny = bb0.minY + dy / board.zoom;
       if (!ev.altKey) {
-        const s = snapRect({ x: nx, y: ny, w: bb0.w, h: bb0.h }, selection);
+        const s = snapRect({ x: nx, y: ny, w: bb0.w, h: bb0.h }, movingSet);
         nx = s.x; ny = s.y;
       } else hideGuides();
       const shiftX = nx - bb0.minX, shiftY = ny - bb0.minY;
@@ -572,7 +797,7 @@ function attachTileDrag(tile) {
         t.board.x = s.x + shiftX; t.board.y = s.y + shiftY;
         layoutTile(t);
       }
-      if (board.linked && !ev.altKey) resolveOverlaps(selection);
+      if (board.linked && !ev.altKey) resolveOverlaps(movingSet);
     };
     const onUp = () => {
       el.removeEventListener('pointermove', onMove);
@@ -632,12 +857,15 @@ function startLasso(e) {
     // select every tile the rectangle touches
     const a = toCanvas(left + r.left, top + r.top);
     const b = toCanvas(left + w + r.left, top + h + r.top);
+    const hits = new Set();
     for (const t of tiles) {
       if (!t.board) continue;
       const B = t.board;
-      const hit = B.x < b.x && B.x + B.w > a.x && B.y < b.y && B.y + B.h > a.y;
-      setSelected(t, hit || before.has(t));
+      if (B.x < b.x && B.x + B.w > a.x && B.y < b.y && B.y + B.h > a.y) hits.add(t);
     }
+    // a sticky group is lassoed as one
+    for (const t of [...hits]) if (t.group && t.group.sticky) for (const m of t.group.members) hits.add(m);
+    for (const t of tiles) if (t.board) setSelected(t, hits.has(t) || before.has(t));
   };
   const onUp = () => {
     grid.removeEventListener('pointermove', onMove);
@@ -723,6 +951,7 @@ function addVideo(filePath, state = {}) {
   }
   tiles.push(tile);
   tile.info = null; tile.proxy = null; tile.fps = null;
+  tile.group = null; tile.sync = null; tile.ownMuted = !!state.muted;
 
   nameEl.textContent = basename(filePath);
   nameEl.title = filePath;
@@ -770,14 +999,18 @@ function addVideo(filePath, state = {}) {
     video.currentTime = clamp(t, 0, video.duration);
     updateTimeLabel();
     updateSeek();
+    broadcast(tile, 'seek');
   };
   const seekBy = (dt) => seekTo(video.currentTime + dt);
   tile.seekBy = seekBy;
   const stepFrame = (dir) => {
     if (!video.duration) return;
     video.pause();
+    broadcast(tile, 'pause');
     seekTo(Frames.step(video.currentTime, tile.fps || Frames.DEFAULT_FPS, dir));
   };
+  // play/pause from the user (picture click, ▶ button, K); synced members follow
+  tile.togglePlay = () => { togglePlay(video); broadcast(tile, video.paused ? 'pause' : 'play'); };
   tile.stepFrame = stepFrame;
   el.querySelector('.fstep-back').addEventListener('click', () => stepFrame(-1));
   el.querySelector('.fstep-fwd').addEventListener('click', () => stepFrame(1));
@@ -940,6 +1173,7 @@ function addVideo(filePath, state = {}) {
       }
     }
     if (pendingFit) scheduleFit();
+    video.playbackRate = Number(rate.value) || 1; // loading a src resets the rate to 1; the select holds the wanted speed
     if (wantTime > 0) {
       video.currentTime = isFinite(video.duration) ? Math.min(wantTime, video.duration) : wantTime;
     }
@@ -950,9 +1184,11 @@ function addVideo(filePath, state = {}) {
   });
   video.addEventListener('timeupdate', () => { if (!tile.scrubbing) updateTimeLabel(); });
   video.addEventListener('durationchange', () => { updateTimeLabel(); renderMarkers(); });
-  video.addEventListener('play', updatePlayBtn);
-  video.addEventListener('pause', updatePlayBtn);
-  video.addEventListener('ended', updatePlayBtn);
+  // UI only: a synced member paused by the loop engine must not pause its group
+  const onPlayState = () => { updatePlayBtn(); if (tile.group && tile.group === active) renderGroupBar(); };
+  video.addEventListener('play', onPlayState);
+  video.addEventListener('pause', onPlayState);
+  video.addEventListener('ended', onPlayState);
   video.addEventListener('volumechange', updateMuteBtn);
   video.addEventListener('error', () => {
     const code = video.error ? video.error.code : 0;
@@ -961,13 +1197,21 @@ function addVideo(filePath, state = {}) {
   });
 
   // click on picture = play/pause; double-click = fullscreen this tile
-  video.addEventListener('click', () => { if (!tile.suppressClick) togglePlay(video); });
+  video.addEventListener('click', (e) => {
+    if (!isBoard() && e.shiftKey) return; // gallery Shift-click selects (below)
+    if (!tile.suppressClick) tile.togglePlay();
+  });
+  el.addEventListener('click', (e) => {
+    if (isBoard() || !e.shiftKey || e.target.closest('button, input, select, .bm-panel')) return;
+    setSelected(tile, !selection.has(tile));
+    selectionStatus();
+  });
   video.addEventListener('dblclick', () => {
     if (document.fullscreenElement === el) document.exitFullscreen();
     else el.requestFullscreen().catch(() => {});
   });
 
-  playBtn.addEventListener('click', () => togglePlay(video));
+  playBtn.addEventListener('click', () => tile.togglePlay());
 
   // scrubbing
   const beginScrub = () => { tile.scrubbing = true; el.classList.add('scrubbing'); };
@@ -981,27 +1225,28 @@ function addVideo(filePath, state = {}) {
     video.currentTime = frac * video.duration;
     seek.style.setProperty('--progress', (frac * 100).toFixed(2) + '%');
     updateTimeLabel();
+    broadcast(tile, 'seek');
   });
   seek.addEventListener('change', () => { if (!tile.scrubbing) updateSeek(); });
   seek.addEventListener('keydown', (e) => {
     // step 5 s with arrow keys instead of 1/10000 of the video
     if (!video.duration) return;
     const step = e.shiftKey ? 30 : 5;
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - step); }
-    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); video.currentTime = Math.min(video.duration, video.currentTime + step); }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - step); broadcast(tile, 'seek'); }
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); video.currentTime = Math.min(video.duration, video.currentTime + step); broadcast(tile, 'seek'); }
   });
 
   // volume / mute / speed
   const setTileVolume = (pct) => {
     tile.volume = clamp(pct, 0, 100) / 100;
     applyTileVolume(tile);
-    if (tile.volume > 0 && video.muted) video.muted = false;
+    if (tile.volume > 0 && tile.ownMuted) setOwnMuted(tile, false);
     updateMuteBtn();
     updateVolUI();
   };
   tile.setVolume = setTileVolume;
-  muteBtn.addEventListener('click', () => { video.muted = !video.muted; });
-  rate.addEventListener('change', () => { video.playbackRate = Number(rate.value); });
+  muteBtn.addEventListener('click', () => setOwnMuted(tile, !tile.ownMuted));
+  rate.addEventListener('change', () => { video.playbackRate = Number(rate.value); broadcast(tile, 'rate', video.playbackRate); });
 
   // volume bar: click or drag anywhere on it; the level is wherever the mouse is
   const volFromPointer = (clientY) => {
@@ -1070,7 +1315,9 @@ function togglePlay(video) {
 function removeTile(tile) {
   const i = tiles.indexOf(tile);
   if (i >= 0) tiles.splice(i, 1);
+  if (tile.group) removeFromGroup(tile.group, tile);
   selection.delete(tile);
+  syncActiveFromSelection();
   try {
     tile.video.pause();
     tile.video.removeAttribute('src');
@@ -1120,12 +1367,18 @@ function collectSession() {
       path: t.path,
       currentTime: isFinite(t.video.currentTime) ? t.video.currentTime : 0,
       volume: t.volume,
-      muted: t.video.muted,
+      muted: t.group ? !!t.ownMuted : t.video.muted, // own mute, not the group's
       playbackRate: t.video.playbackRate,
       paused: t.video.paused,
       aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label })),
+      sync: t.sync ? { start: t.sync.start } : null,
+    })),
+    groups: groups.map((g) => ({
+      id: g.id, name: g.name, color: g.color,
+      members: [...g.members].map((t) => tiles.indexOf(t)).filter((i) => i >= 0),
+      sync: g.sync, sticky: g.sticky, loop: g.loop, range: g.range, volume: g.volume, muted: g.muted, rate: g.rate,
     })),
   };
 }
@@ -1150,11 +1403,27 @@ async function applySession(data) {
   setMasterVolume(data.masterVolume ?? DEFAULT_MASTER_VOLUME);
 
   let missing = 0;
-  for (const v of data.videos) {
+  const byIndex = new Map(); // index in data.videos -> tile (v3 files and bad entries leave gaps)
+  for (const [i, v] of data.videos.entries()) {
     if (!v || typeof v.path !== 'string') continue;
     if (!(await window.api.fileExists(v.path))) missing++;
-    addVideo(v.path, v);
+    byIndex.set(i, addVideo(v.path, v));
   }
+  // groups (session v4); v3 files have none
+  nextGroupId = 1;
+  for (const sg of Array.isArray(data.groups) ? data.groups : []) {
+    const idx = Array.isArray(sg.members) ? sg.members.filter((i) => byIndex.has(i)) : [];
+    if (idx.length < 2) continue;
+    const g = createGroup(idx.map((i) => byIndex.get(i)), { ...sg, sync: false });
+    if (Number.isInteger(sg.id)) g.id = sg.id;
+    if (sg.sync) {
+      // restore saved starts rather than recapturing them from not-yet-loaded videos
+      g.sync = true;
+      for (const i of idx) { const s = data.videos[i].sync; byIndex.get(i).sync = { start: s && isFinite(s.start) ? Number(s.start) : 0 }; }
+    }
+    nextGroupId = Math.max(nextGroupId, g.id + 1);
+  }
+  clearSelection(); // createGroup made the last group active; start with nothing selected
   if (isBoard()) placeOnBoard(tiles.filter((t) => !t.board));
   layoutTiles();
   // older session files have no zoom / view saved: fit once the videos are in
@@ -1209,8 +1478,12 @@ document.getElementById('btn-cache').addEventListener('click', async () => {
 });
 document.getElementById('btn-play-all').addEventListener('click', () => tiles.forEach((t) => t.video.play().catch(() => {})));
 document.getElementById('btn-pause-all').addEventListener('click', () => tiles.forEach((t) => t.video.pause()));
-document.getElementById('btn-mute-all').addEventListener('click', () => tiles.forEach((t) => { t.video.muted = true; }));
-document.getElementById('btn-unmute-all').addEventListener('click', () => tiles.forEach((t) => { t.video.muted = false; }));
+document.getElementById('btn-mute-all').addEventListener('click', () => tiles.forEach((t) => setOwnMuted(t, true)));
+document.getElementById('btn-unmute-all').addEventListener('click', () => {
+  for (const g of groups) g.muted = false; // "all" includes group mutes
+  tiles.forEach((t) => setOwnMuted(t, false));
+  renderGroupBar();
+});
 document.getElementById('btn-fit').addEventListener('click', fitAll);
 document.getElementById('btn-tidy').addEventListener('click', tidyBoard);
 document.getElementById('btn-link').addEventListener('click', () => setLinked(!board.linked));
@@ -1245,6 +1518,7 @@ window.addEventListener('keydown', (e) => {
 
   if (ctrl && e.key.toLowerCase() === 's') { e.preventDefault(); e.shiftKey ? saveSessionAs() : saveSession(); return; }
   if (ctrl && e.key.toLowerCase() === 'o') { e.preventDefault(); openSession(); return; }
+  if (ctrl && e.key.toLowerCase() === 'g' && !inControl) { e.preventDefault(); e.shiftKey ? (active && dissolveGroup(active)) : toggleGroupFromSelection(); return; }
   if (ctrl && e.key.toLowerCase() === 'a' && !isBoard()) { e.preventDefault(); document.getElementById('btn-add').click(); return; }
 
   if (inControl) return;
@@ -1261,8 +1535,8 @@ window.addEventListener('keydown', (e) => {
     if (key === 'b') { h.addBookmark(); return; }
     if (e.key === '[') { h.jumpBookmark(-1); return; }
     if (e.key === ']') { h.jumpBookmark(1); return; }
-    if (key === 'k') { togglePlay(h.video); return; }
-    if (key === 'm') { h.video.muted = !h.video.muted; return; }
+    if (key === 'k') { h.togglePlay(); return; }
+    if (key === 'm') { setOwnMuted(h, !h.ownMuted); return; }
     if (e.key === ',') { h.stepFrame(-1); return; }
     if (e.key === '.') { h.stepFrame(1); return; }
   }

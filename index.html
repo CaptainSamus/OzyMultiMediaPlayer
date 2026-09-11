@@ -30,6 +30,8 @@
       <span id="zoom-label"></span>
     </label>
     <button id="btn-fit" title="Fit every video on screen (F)">Fit all</button>
+    <button id="btn-group" title="Group the selected videos (Ctrl+G)">Group</button>
+    <button id="btn-ungroup" title="Ungroup (Ctrl+Shift+G)">Ungroup</button>
     <button id="btn-tidy" class="board-only" title="Line the videos up in neat rows, keeping their sizes">Tidy</button>
     <button id="btn-link" class="board-only" title="Linked: when you move or resize a video, its neighbours slide out of the way so nothing overlaps (L). Off: videos can overlap freely.">🔗 Linked</button>
     <button id="btn-hand" class="board-only" title="Hand tool: left-drag pans the board instead of lassoing (H). Middle-mouse or Alt-drag always pans.">✋ Pan</button>
@@ -50,6 +52,32 @@
     <div id="guide-h" class="guide" hidden></div>
   </main>
 
+  <div id="groupbar" hidden>
+    <span class="gb-swatch" title="Click to change the group colour"></span>
+    <input class="gb-name" type="text" spellcheck="false" title="Group name">
+    <button class="gb-play" title="Play / pause the group">▶</button>
+    <button class="gb-mute" title="Mute / unmute the group">🔊</button>
+    <label title="Group volume"><input type="range" class="gb-vol" min="0" max="100" value="100"></label>
+    <select class="gb-rate" title="Group speed">
+      <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+      <option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+    </select>
+    <span class="sep"></span>
+    <button class="gb-sync" title="Sync: members share one timeline and play, pause, scrub and step together">⛓ Sync</button>
+    <button class="gb-sticky board-only" title="Sticky: dragging one member moves the whole group (Ctrl-drag moves one)">📌 Sticky</button>
+    <label class="gb-loop-wrap" title="Loop mode for this group">Loop
+      <select class="gb-loop">
+        <option value="off">Off</option>
+        <option value="shortest">When shortest ends</option>
+        <option value="longest">When longest ends</option>
+        <option value="range">Timeline range</option>
+      </select>
+    </label>
+    <span class="gb-note"></span>
+    <span class="spacer"></span>
+    <button class="gb-ungroup" title="Ungroup (Ctrl+Shift+G)">Ungroup</button>
+  </div>
+
   <div id="empty">
     <div class="big">Drop video files here</div>
     <div>or click <b>+ Add videos</b>. Drop a <b>.mvp</b> file to restore a saved session.</div>
@@ -63,6 +91,7 @@
       <video preload="metadata" draggable="false"></video>
       <div class="overlay">
         <div class="top">
+          <span class="group-swatch" hidden></span>
           <span class="name"></span>
           <button class="remove" title="Remove this video">✕</button>
         </div>
@@ -116,6 +145,7 @@
 
   <script src="lib/codecs.js"></script>
   <script src="lib/frames.js"></script>
+  <script src="lib/groups.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

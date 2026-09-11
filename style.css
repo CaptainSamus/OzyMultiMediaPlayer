@@ -159,8 +159,8 @@ body.mode-board.panning #grid { cursor: grabbing; }
 }
 #guide-v { top: 0; bottom: 0; width: 1px; }
 #guide-h { left: 0; right: 0; height: 1px; }
-body.mode-board .tile.selected { outline: 2px solid var(--accent); }
-body.mode-board .tile.selected::before {
+.tile.selected { outline: 2px solid var(--accent); }   /* groups select in the gallery too */
+.tile.selected::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -564,6 +564,19 @@ body.resizing .tile.resizing { pointer-events: auto; }
   word-break: break-all;
 }
 .tile .error.hidden { display: none; }
+
+/* group settings bar */
+#groupbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--panel); border-top: 1px solid #2a2a2e; flex: 0 0 auto; flex-wrap: wrap; user-select: none; }
+#groupbar[hidden] { display: none; }
+#groupbar button, #groupbar select { background: var(--panel-2); color: var(--text); border: 1px solid #333338; border-radius: 6px; padding: 4px 8px; cursor: pointer; font: inherit; }
+#groupbar button.toggled { background: var(--accent); border-color: var(--accent); color: #fff; }
+#groupbar .gb-swatch { width: 14px; height: 14px; border-radius: 50%; box-shadow: 0 0 0 1px #000; cursor: pointer; }
+#groupbar .gb-name { background: transparent; border: 1px solid transparent; color: var(--text); font: inherit; font-weight: 600; width: 140px; border-radius: 4px; padding: 2px 6px; }
+#groupbar .gb-name:focus { border-color: var(--accent); outline: none; background: var(--bg); }
+#groupbar .gb-vol { width: 100px; }
+#groupbar .gb-note { color: var(--muted); font-size: 12px; }
+#groupbar .spacer { flex: 1 1 auto; }
+.overlay .group-swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; box-shadow: 0 0 0 1px #000; }
 .tile .error { pointer-events: auto; flex-direction: column; gap: 10px; }
 .tile .error-actions { display: flex; gap: 8px; }
 .tile .error-actions button { background: var(--accent); border: none; color: #fff; border-radius: 4px; padding: 5px 10px; cursor: pointer; font: inherit; }
