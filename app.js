@@ -34,7 +34,7 @@ const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 4;
 const GAP = 8;
 const DEFAULT_ASPECT = 16 / 9;
-const layout = { mode: 'gallery', rowHeight: 240, timeDisplay: 'clock', timelineExpanded: false };
+const layout = { mode: 'gallery', rowHeight: 240, timeDisplay: 'clock', timelineExpanded: false, timelineHeight: 140 };
 const board = { panX: 0, panY: 0, zoom: 1, initialized: false, linked: true, hand: false };
 let zTop = 1;
 const selection = new Set(); // board mode: tiles picked with the lasso / shift-click
@@ -475,13 +475,20 @@ const nextMarkerColor = (c) => MARKER_KEYS[(MARKER_KEYS.indexOf(c) + 1) % MARKER
 const tl = document.getElementById('timeline');
 const tlQ = (s) => tl.querySelector(s);
 
-// What the timeline shows: the active group, else a single selected tile as a one-member "group".
+// What the timeline shows, in order: the active group; else the selected local videos (one, or
+// "N selected"); else every local video ("All videos"). Hidden only when there are no local videos.
 function timelineModel() {
   if (active) return { title: active.name, members: memberModel(active), group: active, fps: [...active.members][0].fps };
+  const asMembers = (list) => list.map((t) => ({ tile: t, start: 0, duration: t.video.duration || 0 }));
   const sel = [...selection].filter((t) => t.video);
-  if (sel.length === 1) return { title: basename(sel[0].path), members: [{ tile: sel[0], start: 0, duration: sel[0].video.duration || 0 }], group: null, fps: sel[0].fps };
+  if (sel.length === 1) return { title: basename(sel[0].path), members: asMembers(sel), group: null, fps: sel[0].fps };
+  if (sel.length > 1) return { title: `${sel.length} selected`, members: asMembers(sel), group: null, fps: sel[0].fps };
+  const all = tiles.filter((t) => t.video);
+  if (all.length) return { title: 'All videos', members: asMembers(all), group: null, fps: all[0].fps };
   return null;
 }
+// each local video's own colour (a palette key), used when the timeline shows several videos
+const tileColor = (t) => Groups.PALETTE[t.hue] || Groups.PALETTE.yellow;
 function tlTime(model) { return model.group ? groupTimeOf(model.group) : model.members[0].tile.video.currentTime; }
 function tlSeek(model, gt) {
   if (model.group && model.group.sync) seekGroup(model.group, gt);
@@ -494,9 +501,21 @@ function renderTimeline() {
   tl._model = model;
   if (!model) return;
   tl.classList.toggle('expanded', layout.timelineExpanded);
+  tl.style.setProperty('--tl-lanes-h', layout.timelineHeight + 'px');
   tlQ('.tl-grip').textContent = layout.timelineExpanded ? '▾' : '▴';
   tlQ('.tl-title').textContent = model.title;
   for (const s of ['.tl-set-in', '.tl-set-out', '.tl-clear-range']) tlQ(s).hidden = !model.group;
+  const multi = model.members.length > 1;
+  // collapsed with several videos: a legend says whose colour is whose (lanes carry names when expanded)
+  const legend = tlQ('.tl-legend'); legend.textContent = '';
+  if (multi && !layout.timelineExpanded) {
+    for (const m of model.members) {
+      const item = document.createElement('span'); item.className = 'tl-leg';
+      const sw = document.createElement('i'); sw.style.background = tileColor(m.tile);
+      item.append(sw, basename(m.tile.path));
+      legend.appendChild(item);
+    }
+  }
   const end = Groups.end(model.members);
   const width = tlQ('.tl-bar').clientWidth;
   // lanes (expanded)
@@ -508,6 +527,7 @@ function renderTimeline() {
       const block = document.createElement('div'); block.className = 'tl-block';
       block.style.left = Timeline.xFor(lane.start, end, width) + 'px';
       block.style.width = Math.max(2, Timeline.xFor(lane.end, end, width) - Timeline.xFor(lane.start, end, width)) + 'px';
+      block.style.borderColor = tileColor(m.tile); // the lane's video colour; its markers keep per-bookmark colours
       block.textContent = basename(m.tile.path);
       const tcL = document.createElement('span'); tcL.className = 'tl-tc'; tcL.textContent = Frames.format(lane.start, 0, m.tile.fps, layout.timeDisplay).split(' / ')[0];
       const tcR = document.createElement('span'); tcR.className = 'tl-tc right'; tcR.textContent = Frames.format(lane.end, 0, m.tile.fps, layout.timeDisplay).split(' / ')[0];
@@ -524,7 +544,8 @@ function renderTimeline() {
   // markers on the bar (always drawn; in expanded mode they double as an overview)
   const mkEl = tlQ('.tl-markers'); mkEl.textContent = '';
   for (const m of model.members) for (const b of m.tile.bookmarks) {
-    const mk = document.createElement('div'); mk.className = 'tl-mk'; mk.style.background = MARKER_COLORS[b.color];
+    // several videos: colour by video so you can tell whose marker it is; one video: the bookmark's own colour
+    const mk = document.createElement('div'); mk.className = 'tl-mk'; mk.style.background = multi ? tileColor(m.tile) : MARKER_COLORS[b.color];
     mk.style.left = Timeline.xFor(m.start + b.t, end, width) + 'px';
     mk.title = `${basename(m.tile.path)}: ${b.label || fmtTime(b.t)}  (right-click to delete, Shift-right-click to recolour)`;
     mk.addEventListener('pointerdown', (e) => e.stopPropagation()); // don't start a bar scrub
@@ -562,7 +583,37 @@ function setRangeAtPlayhead(which) {
   renderTimeline(); renderGroupBar();
 }
 
-tlQ('.tl-grip').addEventListener('click', toggleTimelineExpanded);
+// Drag the head: up past 40 px expands; while expanded, dragging sets the lane area's height
+// (60-320 px, saved in the session) and dragging well below the minimum collapses. A click on
+// the grip (no drag) still toggles, as does T.
+const TL_MIN_H = 60, TL_MAX_H = 320, TL_SNAP = 40;
+tlQ('.tl-head').addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || (e.target.closest('button') && !e.target.closest('.tl-grip'))) return;
+  e.preventDefault();
+  const head = tlQ('.tl-head'); try { head.setPointerCapture(e.pointerId); } catch {}
+  const y0 = e.clientY, wasExpanded = layout.timelineExpanded, h0 = layout.timelineHeight;
+  let moved = false;
+  const onMove = (ev) => {
+    const up = y0 - ev.clientY; // positive = dragged up
+    if (!moved && Math.abs(up) < 4) return;
+    moved = true;
+    if (!wasExpanded) {
+      if (up > TL_SNAP) { layout.timelineHeight = Math.round(clamp(up, TL_MIN_H, TL_MAX_H)); if (!layout.timelineExpanded) { layout.timelineExpanded = true; renderTimeline(); } }
+      else if (layout.timelineExpanded) { layout.timelineExpanded = false; renderTimeline(); }
+    } else {
+      const h = h0 + up;
+      // collapsing keeps the height it had before this drag, so expanding again comes back the same size
+      if (h < TL_MIN_H - TL_SNAP) { layout.timelineHeight = h0; if (layout.timelineExpanded) { layout.timelineExpanded = false; renderTimeline(); } }
+      else { layout.timelineHeight = Math.round(clamp(h, TL_MIN_H, TL_MAX_H)); if (!layout.timelineExpanded) { layout.timelineExpanded = true; renderTimeline(); } }
+    }
+    tl.style.setProperty('--tl-lanes-h', layout.timelineHeight + 'px');
+  };
+  const onUp = (ev) => {
+    head.removeEventListener('pointermove', onMove); head.removeEventListener('pointerup', onUp); head.removeEventListener('pointercancel', onUp);
+    if (!moved && ev.type === 'pointerup' && e.target.closest('.tl-grip')) toggleTimelineExpanded();
+  };
+  head.addEventListener('pointermove', onMove); head.addEventListener('pointerup', onUp); head.addEventListener('pointercancel', onUp);
+});
 tlQ('.tl-bar').addEventListener('pointerdown', (e) => {
   if (e.button !== 0 || e.target.classList.contains('tl-handle') || !tl._model) return;
   const bar = tlQ('.tl-bar'); const r = bar.getBoundingClientRect();
@@ -1216,7 +1267,8 @@ grid.addEventListener('mousedown', (e) => { if (isBoard() && e.button === 1) e.p
 grid.addEventListener('wheel', (e) => {
   if (isBoard()) {
     e.preventDefault();
-    if (e.ctrlKey) {
+    // Ctrl+wheel always zooms; with ✋ Pan + zoom on, the plain wheel zooms too (Shift+wheel still pans sideways)
+    if (e.ctrlKey || (board.hand && !e.shiftKey)) {
       zoomAt(board.zoom * Math.exp(-e.deltaY * 0.0015), e.clientX, e.clientY);
     } else {
       const dx = e.shiftKey ? e.deltaY : e.deltaX;
@@ -1277,6 +1329,8 @@ function addVideo(filePath, state = {}) {
   tiles.push(tile);
   tile.info = null; tile.proxy = null; tile.fps = null;
   tile.group = null; tile.sync = null; tile.ownMuted = !!state.muted;
+  // its own colour for multi-video timelines: saved, else round-robin by position at creation
+  tile.hue = GROUP_PALETTE.includes(state.color) ? state.color : GROUP_PALETTE[(tiles.length - 1) % GROUP_PALETTE.length];
 
   nameEl.textContent = basename(filePath);
   nameEl.title = filePath + '\nRight-click: ' + REVEAL_LABEL;
@@ -1538,7 +1592,9 @@ function addVideo(filePath, state = {}) {
 
   // click on picture = play/pause; double-click = fullscreen this tile
   video.addEventListener('click', (e) => {
-    if (!isBoard() && e.shiftKey) return; // gallery Shift-click selects (below)
+    // Shift-click selects (board: attachTileDrag; gallery: the el click below) and never plays or pauses.
+    // (suppressClick is cleared by a setTimeout(0) that fires before this click arrives, so it can't guard this.)
+    if (e.shiftKey) return;
     if (!tile.suppressClick) tile.togglePlay();
   });
   el.addEventListener('click', (e) => {
@@ -1692,6 +1748,7 @@ function removeTile(tile, { record = true } = {}) {
   tile.el.remove();
   updateChrome();
   markOnBoard();
+  renderTimeline();
 }
 
 // ---------- web tiles (YouTube / Twitch) ----------
@@ -1955,6 +2012,7 @@ function addVideos(paths, at = null) {
   layoutTiles();
   if (wasEmpty && tiles.length) scheduleFit();
   markOnBoard();
+  renderTimeline(); // "All videos" follows what's on the board
 }
 
 let toolsWarned = false; // one status message if ffmpeg/ffprobe are missing
@@ -1982,6 +2040,7 @@ function collectSession() {
       linked: board.linked,
       timeDisplay: layout.timeDisplay,
       timelineExpanded: layout.timelineExpanded,
+      timelineHeight: layout.timelineHeight,
     },
     masterVolume,
     videos: tiles.map((t) => (t.type === 'image' ? {
@@ -1998,6 +2057,7 @@ function collectSession() {
     } : {
       type: 'file',
       path: t.path,
+      color: t.hue,
       currentTime: isFinite(t.video.currentTime) ? t.video.currentTime : 0,
       volume: t.volume,
       muted: t.group ? !!t.ownMuted : t.video.muted, // own mute, not the group's
@@ -2024,6 +2084,7 @@ async function applySession(data) {
   if (Number(lay.rowHeight) > 0) layout.rowHeight = clamp(Number(lay.rowHeight), MIN_H, MAX_H);
   layout.timeDisplay = ['clock', 'frames', 'timecode'].includes(lay.timeDisplay) ? lay.timeDisplay : 'clock';
   layout.timelineExpanded = lay.timelineExpanded === true;
+  layout.timelineHeight = Number(lay.timelineHeight) > 0 ? clamp(Number(lay.timelineHeight), 60, 320) : 140;
   const bv = lay.board;
   if (bv && isFinite(bv.panX) && isFinite(bv.panY) && bv.zoom > 0) {
     board.panX = Number(bv.panX); board.panY = Number(bv.panY);

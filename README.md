@@ -122,10 +122,15 @@ itself when you click **Update yt-dlp** in the sidebar.
   - **Loop**: off, when the shortest ends, when the longest ends, or a
     timeline range.
   Clicking a member selects its group; `Ctrl`-click selects just that tile.
-- **Timeline.** With a group (or one tile) selected, a strip at the bottom
-  shows the shared playhead and every member's bookmarks in colour. `T`
-  expands it to one lane per member. Scrub it, click a marker to jump,
-  `I` / `O` set the loop In / Out at the playhead, or drag the blue handles.
+- **Timeline.** A strip at the bottom is always there while any video is
+  open. It follows the selected group, else the selected videos
+  ("N selected"), else **All videos**, and shows the shared playhead and
+  every bookmark. With one video its markers keep their bookmark colours;
+  with several, each video has its own colour (shown in the legend and on
+  its lane). Scrub it, click a marker to jump, `I` / `O` set the loop In /
+  Out at the playhead, or drag the blue handles. Drag the bar's top edge up
+  to expand it to one lane per video (keep dragging to make it taller) and
+  down to collapse it; `T` or the grip toggles it.
 - **A/B compare.** Select exactly two videos and press `C` (or **A/B**).
   Both fill the window, synced: drag the white line to wipe between them, or
   pick **Flip** and press `Tab` to swap. `Space`, `,` `.` work as usual;
@@ -162,15 +167,17 @@ itself when you click **Update yt-dlp** in the sidebar.
   - **Board** (detached): an infinite canvas, Miro-style. Drag a tile by its
     title bar or picture to move it; pull a corner to resize just that one
     (double-click a corner to reset its size). Middle-mouse or `Alt`-drag
-    pans, the wheel scrolls, `Ctrl`+wheel zooms at the cursor, and the
-    **✋ Pan** tool (`H`) makes plain left-drag pan too. **Fit all** frames
+    pans, the wheel scrolls, `Ctrl`+wheel zooms at the cursor. The
+    **✋ Pan + zoom** tool (`H`) makes plain left-drag pan and the plain
+    wheel zoom at the cursor (`Shift`+wheel still scrolls sideways). **Fit all** frames
     everything. **Tidy ▾** has two arrangements: **Fit to view** makes every
     tile the same height, as big as fits in the current view, in reading
     order; **Grid** keeps each tile's size and packs them edge to edge into a
     rough square (Linked spaces them out again on the next drag). `Ctrl+Z`
     undoes either.
   - **Lasso.** Left-drag on empty board to draw a rectangle; everything it
-    touches is selected. `Shift`-click adds or removes one tile, `Ctrl+A`
+    touches is selected. `Shift`-click adds or removes one tile (it never
+    plays or pauses, and a grouped tile toggles on its own), `Ctrl+A`
     selects all, `Esc` clears. Drag any selected tile and they all move.
   - **🔗 Linked** (`L`, on by default): moving or resizing a tile pushes its
     neighbours out of the way so nothing overlaps. Hold `Alt` to bypass it.
@@ -191,11 +198,11 @@ itself when you click **Update yt-dlp** in the sidebar.
 **Shortcuts.** Anywhere: `Ctrl+A` add videos (Gallery) / select all (Board),
 `Ctrl+O` open session, `Ctrl+S` save, `Ctrl+Shift+S` save as, `Ctrl+Z` undo,
 `Ctrl+Shift+Z` / `Ctrl+Y` redo, `Ctrl+G` group, `Ctrl+Shift+G` ungroup,
-`Space` play/pause everything, `C` A/B compare, `T` timeline lanes,
+`Space` play/pause everything, `C` A/B compare, `T` expand / collapse the timeline,
 `I` / `O` loop In / Out, `` ` `` sidebar, `F` fullscreen the selected video
 (again to exit), `Esc` leave fullscreen, `Shift+F` fill the view with the
-selected videos (Board; `Ctrl+Z` undoes), `L` linked, `H` pan
-tool, `+` / `-` zoom, `Esc` deselect. Over a video: `←`/`→` seek 5 s
+selected videos (Board; `Ctrl+Z` undoes), `L` linked, `H` pan +
+zoom tool, `+` / `-` zoom, `Esc` deselect. Over a video: `←`/`→` seek 5 s
 (Shift 30 s), `↑`/`↓` volume, `K` play/pause, `M` mute, `,` `.` frame step,
 `B` bookmark, `[` `]` previous / next bookmark.
 

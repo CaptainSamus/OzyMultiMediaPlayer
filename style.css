@@ -202,7 +202,8 @@ body.mode-board.panning #grid { cursor: grabbing; }
 }
 #guide-v { top: 0; bottom: 0; width: 1px; }
 #guide-h { left: 0; right: 0; height: 1px; }
-.tile.selected { outline: 2px solid var(--accent); }   /* groups select in the gallery too */
+/* groups select in the gallery too; the body.mode-board form must outrank `body.mode-board .tile { outline-color }` below */
+.tile.selected, body.mode-board .tile.selected { outline: 2px solid var(--accent); }
 .tile.selected::before {
   content: "";
   position: absolute;
@@ -511,19 +512,26 @@ body.resizing .tile.resizing { pointer-events: auto; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: clamp(11px, 2cqi, 18px); /* grows with the tile's on-screen width (.overlay is the size container) */
   text-shadow: 0 1px 2px #000;
 }
+/* title-bar buttons scale with the tile too; cqi = 1% of the tile's on-screen width
+   (the board's --ui-scale counter-zoom cancels the canvas zoom inside .overlay) */
 .overlay .remove, .overlay .fullscreen {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
   background: rgba(0,0,0,0.5);
   border: 1px solid #444;
   color: #ddd;
   border-radius: 4px;
-  width: 24px;
-  height: 24px;
+  width: clamp(22px, 5cqi, 44px);
+  height: clamp(22px, 5cqi, 44px);
   cursor: pointer;
-  font-size: 12px;
+  font-size: clamp(12px, 2.6cqi, 22px);
 }
 .overlay .remove:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
 .overlay .fullscreen:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -564,6 +572,13 @@ body.resizing .tile.resizing { pointer-events: auto; }
   font-size: 12px;
   padding: 2px 4px;
 }
+
+/* bottom bar grows with big tiles (unchanged below ~800 px wide) so it matches the scaled title bar */
+.overlay .bm-add, .overlay .bm-list, .overlay .back, .overlay .fwd, .overlay .fstep-back, .overlay .fstep-fwd {
+  min-width: clamp(26px, 3.2cqi, 40px); height: clamp(26px, 3.2cqi, 40px); font-size: clamp(11px, 1.35cqi, 17px);
+}
+.overlay .play, .overlay .mute { min-width: clamp(30px, 3.7cqi, 46px); height: clamp(26px, 3.2cqi, 40px); font-size: clamp(13px, 1.6cqi, 20px); }
+.overlay .time, .overlay .rate { font-size: clamp(12px, 1.5cqi, 18px); }
 
 /* range inputs */
 .overlay input[type="range"] {
@@ -631,10 +646,15 @@ body.resizing .tile.resizing { pointer-events: auto; }
 .tl-head .spacer { flex: 1 1 auto; }
 .tl-head button { background: var(--panel-2); color: var(--text); border: 1px solid #333338; border-radius: 4px; padding: 2px 8px; cursor: pointer; font: inherit; font-size: 11px; }
 .tl-body { position: relative; padding: 0 10px 8px; }
-.tl-lanes { display: none; flex-direction: column; gap: 2px; margin-bottom: 4px; }
+.tl-lanes { display: none; flex-direction: column; gap: 2px; margin-bottom: 4px; height: var(--tl-lanes-h, 140px); overflow-y: auto; }
+.tl-head { cursor: ns-resize; }
+.tl-head button { cursor: pointer; }
+.tl-legend { display: flex; gap: 10px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.tl-leg { display: inline-flex; align-items: center; gap: 4px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.tl-leg i { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 1px #000; }
 #timeline.expanded .tl-lanes { display: flex; }
-.tl-lane { position: relative; height: 22px; background: #141417; border-radius: 3px; }
-.tl-lane .tl-block { position: absolute; top: 2px; bottom: 2px; border-radius: 3px; background: #2f3a55; border: 1px solid #4f8cff55; overflow: hidden; font-size: 10px; line-height: 16px; padding: 0 4px; white-space: nowrap; }
+.tl-lane { position: relative; flex: 0 0 22px; height: 22px; background: #141417; border-radius: 3px; }
+.tl-lane .tl-block { position: absolute; top: 2px; bottom: 2px; border-radius: 3px; background: #2f3a55; border: 1px solid #4f8cff55; border-left-width: 3px; overflow: hidden; font-size: 10px; line-height: 16px; padding: 0 4px; white-space: nowrap; }
 .tl-lane .tl-block .tl-tc { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: 6px; }
 .tl-lane .tl-block .tl-tc.right { position: absolute; right: 4px; }
 .tl-lane .tl-mk { position: absolute; top: 0; width: 2px; height: 100%; cursor: pointer; }
