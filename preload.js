@@ -22,4 +22,7 @@ contextBridge.exposeInMainWorld('api', {
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
   listFolder: (dir) => ipcRenderer.invoke('list-folder', dir),
   thumb: (p) => ipcRenderer.invoke('thumb', p),
+  listPlaylist: (u) => ipcRenderer.invoke('list-playlist', u),
+  updateYtdlp: () => ipcRenderer.invoke('update-ytdlp'),
+  ytdlpAvailable: () => ipcRenderer.invoke('ytdlp-available'),
 });

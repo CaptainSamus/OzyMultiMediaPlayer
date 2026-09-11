@@ -122,6 +122,8 @@ body { display: flex; flex-direction: column; }
 .sb-title { padding: 6px 8px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
 .sb-list { overflow-y: auto; flex: 1 1 auto; }
 .sb-note { padding: 8px; color: var(--muted); font-size: 12px; }
+.sb-note:empty { display: none; }
+.sb-note button { margin-left: 6px; background: var(--accent); border: none; color: #fff; border-radius: 4px; padding: 3px 8px; cursor: pointer; font: inherit; font-size: 12px; }
 .sb-row { display: flex; align-items: center; gap: 4px; padding: 4px 8px; }
 .sb-row .sb-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-row .sb-count { color: var(--muted); font-size: 11px; }

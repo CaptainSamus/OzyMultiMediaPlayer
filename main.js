@@ -27,9 +27,13 @@ const MIME = {
   '.jpg': 'image/jpeg', // cached thumbnails
 };
 
-// Where ffmpeg.exe / ffprobe.exe live: bundled next to the app when packaged,
-// straight out of node_modules in development.
+// Where ffmpeg.exe / ffprobe.exe / yt-dlp.exe live: bundled next to the app when packaged,
+// straight out of node_modules (ffmpeg, ffprobe) or bin/ (yt-dlp) in development.
+// yt-dlp prefers a self-updated copy in userData/bin (the install folder may not be writable).
+const bundledYtdlp = () => (app.isPackaged ? path.join(process.resourcesPath, 'bin', 'yt-dlp.exe') : path.join(__dirname, 'bin', 'yt-dlp.exe'));
+const userYtdlp = () => path.join(app.getPath('userData'), 'bin', 'yt-dlp.exe');
 function binPath(name) {
+  if (name === 'yt-dlp') return fs.existsSync(userYtdlp()) ? userYtdlp() : bundledYtdlp();
   if (app.isPackaged) return path.join(process.resourcesPath, 'bin', name + '.exe');
   if (name === 'ffmpeg') return require('ffmpeg-static');
   return require('ffprobe-static').path;
@@ -403,4 +407,25 @@ ipcMain.handle('thumb', (_e, filePath) => new Promise((resolve) => {
     });
   };
   thumbWaiting.push(job); nextThumb();
+}));
+
+// ---- YouTube playlists via the bundled yt-dlp ----
+// yt-dlp runs as its own process (it talks to YouTube directly, outside the renderer's allowlist).
+const Playlist = require('./lib/playlist');
+ipcMain.handle('ytdlp-available', () => fs.existsSync(binPath('yt-dlp')));
+ipcMain.handle('list-playlist', (_e, url) => new Promise((resolve) => {
+  if (!fs.existsSync(binPath('yt-dlp'))) return resolve({ ok: false, error: 'yt-dlp not found' });
+  execFile(binPath('yt-dlp'), ['--flat-playlist', '-J', '--no-warnings', String(url)], { windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout: 120000 }, (err, stdout, stderr) => {
+    if (err) return resolve({ ok: false, error: String(stderr || err.message).trim().split('\n').slice(-2).join('\n'), outdated: Playlist.isOutdatedError(stderr) });
+    const pl = Playlist.parseFlat(stdout);
+    resolve(pl ? { ok: true, playlist: pl } : { ok: false, error: 'Could not read playlist' });
+  });
+}));
+// Self-update (network, only when the user clicks it). Runs on a copy in userData/bin, which
+// binPath then prefers, because the install folder usually isn't writable.
+ipcMain.handle('update-ytdlp', () => new Promise((resolve) => {
+  try {
+    if (!fs.existsSync(userYtdlp())) { fs.mkdirSync(path.dirname(userYtdlp()), { recursive: true }); fs.copyFileSync(bundledYtdlp(), userYtdlp()); }
+  } catch (e) { return resolve({ ok: false, output: 'Could not copy yt-dlp: ' + e.message }); }
+  execFile(userYtdlp(), ['-U'], { windowsHide: true, timeout: 120000 }, (err, stdout, stderr) => resolve({ ok: !err, output: (String(stdout) + String(stderr)).trim().split('\n').slice(-3).join('\n') }));
 }));

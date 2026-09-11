@@ -2027,7 +2027,7 @@ document.getElementById('url-cancel').addEventListener('click', closeUrlBar);
 function submitUrl() {
   const parsed = WebUrl.parse(urlInput.value);
   if (!parsed) { setStatus('That is not a YouTube or Twitch link I understand'); return; }
-  if (parsed.kind === 'playlist') { setStatus('Playlists open in the Sources sidebar (coming in the next update)'); return; } // Task 13 replaces this line
+  if (parsed.kind === 'playlist') { sidebar.addPlaylist(urlInput.value.trim()); closeUrlBar(); return; }
   const t = addWebTile(urlInput.value.trim(), parsed);
   if (isBoard()) placeOnBoard([t]);
   layoutTiles();
@@ -2096,7 +2096,59 @@ const sidebar = {
     saveSettings(); await renderFolders();
   },
   async refresh() { await renderFolders(); },
+  // Playlists: yt-dlp lists every entry; the list is cached in settings.json and refreshed on demand.
+  async addPlaylist(url) {
+    setStatus('Reading playlist…', 0);
+    const r = await window.api.listPlaylist(url);
+    if (!r.ok) {
+      if (r.outdated) showYtdlpOutdated();
+      setStatus(r.error || 'Could not read playlist', 8000);
+      return;
+    }
+    const p = r.playlist;
+    const entry = { url, id: p.id || url, title: p.title, items: p.items, fetchedAt: Date.now() };
+    const list = settings.sources.playlists.filter((x) => x.id !== entry.id);
+    list.push(entry);
+    settings.sources.playlists = list;
+    saveSettings();
+    renderPlaylists(entry.id);
+    if (!settings.sidebar.open) sidebar.open();
+    setStatus(`${p.title}: ${p.items.length} video${p.items.length === 1 ? '' : 's'}`);
+  },
 };
+
+const sbNote = sbEl.querySelector('[data-section="playlists"] .sb-note');
+function showYtdlpOutdated() {
+  sbNote.textContent = 'yt-dlp needs updating. ';
+  const b = document.createElement('button');
+  b.textContent = 'Update yt-dlp';
+  b.addEventListener('click', async () => {
+    b.disabled = true; setStatus('Updating yt-dlp…', 0);
+    const u = await window.api.updateYtdlp();
+    setStatus(u.output || (u.ok ? 'yt-dlp updated' : 'yt-dlp update failed'), 10000);
+    if (u.ok) sbNote.textContent = '';
+    else { b.disabled = false; sbNote.append(' (or replace yt-dlp.exe in the app\'s bin folder by hand)'); }
+  });
+  sbNote.appendChild(b);
+}
+
+function renderPlaylists(expandId = null) {
+  const open = new Set([...sbLists.playlists.querySelectorAll('.sb-source')].filter((s) => !s.querySelector('.sb-items').hidden).map((s) => s.dataset.id));
+  if (expandId) open.add(expandId);
+  sbLists.playlists.textContent = '';
+  for (const p of settings.sources.playlists) {
+    const row = buildSource({
+      id: p.id, name: p.title, count: p.items.length,
+      items: p.items.map((i) => ({ type: 'youtube', url: i.url, id: i.id, title: i.title, duration: i.duration, thumbUrl: i.thumbUrl })),
+      pinLabel: null, // playlists are always kept; no pin
+      onRefresh: () => sidebar.addPlaylist(p.url),
+      onRemove: () => { settings.sources.playlists = settings.sources.playlists.filter((x) => x.id !== p.id); saveSettings(); renderPlaylists(); },
+    });
+    if (open.has(p.id)) { row.querySelector('.sb-items').hidden = false; row.querySelector('.sb-expand').textContent = '▾'; }
+    sbLists.playlists.appendChild(row);
+  }
+  markOnBoard();
+}
 
 function onBoardPaths() { return new Set(tiles.map((t) => t.path.toLowerCase())); }
 function markOnBoard() {
@@ -2150,10 +2202,22 @@ function itemPayload(it) {
     ? { type: 'file', path: it.dataset.path }
     : { type: 'youtube', url: it.dataset.path, title: it.dataset.title };
 }
-// Task 13 extends this for youtube payloads.
+// file rows become file tiles, playlist rows become YouTube tiles (cascaded 24 px when dropped at a point)
 function addItemsToBoard(items, at) {
   const files = items.filter((i) => i.type === 'file').map((i) => i.path);
   if (files.length) addVideos(files, at);
+  const wasEmpty = tiles.length === 0;
+  const web = [];
+  items.filter((i) => i.type === 'youtube').forEach((i, n) => {
+    const parsed = WebUrl.parse(i.url);
+    if (!parsed) return;
+    web.push(addWebTile(i.url, parsed, { title: i.title }, at ? { x: at.x + n * 24, y: at.y + n * 24 } : null));
+  });
+  if (web.length) {
+    if (isBoard()) placeOnBoard(web.filter((t) => !t.board));
+    layoutTiles();
+    if (wasEmpty) scheduleFit();
+  }
   markOnBoard();
 }
 
@@ -2206,6 +2270,7 @@ async function renderFolders() {
 
 document.getElementById('btn-sidebar').addEventListener('click', sidebar.toggle);
 document.getElementById('sb-add-folder').addEventListener('click', async () => { const d = await window.api.pickFolder(); if (d) sidebar.addFolder(d, { pinned: true }); });
+document.getElementById('sb-add-playlist').addEventListener('click', () => { urlBar.hidden = false; urlInput.focus(); });
 // width drag (220-480 px, remembered)
 document.getElementById('sb-resize').addEventListener('pointerdown', (e) => {
   e.preventDefault(); document.body.classList.add('sb-resizing');
@@ -2219,6 +2284,11 @@ window.api.getSettings().then((s) => {
   sbEl.style.setProperty('--sb-width', settings.sidebar.width + 'px');
   sbEl.hidden = !settings.sidebar.open;
   renderFolders();
+  renderPlaylists(); // from the cache in settings.json, no refetch
+});
+window.api.ytdlpAvailable().then((ok) => {
+  document.getElementById('sb-add-playlist').disabled = !ok;
+  if (!ok) sbNote.textContent = 'yt-dlp not found; playlists unavailable';
 });
 
 // ---------- keyboard ----------
