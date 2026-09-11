@@ -12,7 +12,7 @@ const zoomLabel = document.getElementById('zoom-label');
 const modeEl = document.getElementById('mode');
 
 const SESSION_FORMAT = 'multi-video-player-session';
-const SESSION_VERSION = 3;
+const SESSION_VERSION = 4;
 
 /** @type {Array<{path:string, el:HTMLElement, video:HTMLVideoElement, seek:HTMLInputElement, time:HTMLElement, scrubbing:boolean, volume:number, aspect:number, board?:{x:number,y:number,w:number,h:number}, tick?:Function}>} */
 const tiles = [];
@@ -34,7 +34,7 @@ const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 4;
 const GAP = 8;
 const DEFAULT_ASPECT = 16 / 9;
-const layout = { mode: 'gallery', rowHeight: 240 };
+const layout = { mode: 'gallery', rowHeight: 240, timeDisplay: 'clock' };
 const board = { panX: 0, panY: 0, zoom: 1, initialized: false, linked: true, hand: false };
 let zTop = 1;
 const selection = new Set(); // board mode: tiles picked with the lasso / shift-click
@@ -739,7 +739,7 @@ function addVideo(filePath, state = {}) {
   const wantPlaying = state.paused === false;
 
   const updateTimeLabel = () => {
-    timeEl.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
+    timeEl.textContent = Frames.format(video.currentTime, video.duration, tile.fps, layout.timeDisplay);
   };
   const updateSeek = () => {
     if (tile.scrubbing || !video.duration) return;
@@ -773,6 +773,21 @@ function addVideo(filePath, state = {}) {
   };
   const seekBy = (dt) => seekTo(video.currentTime + dt);
   tile.seekBy = seekBy;
+  const stepFrame = (dir) => {
+    if (!video.duration) return;
+    video.pause();
+    seekTo(Frames.step(video.currentTime, tile.fps || Frames.DEFAULT_FPS, dir));
+  };
+  tile.stepFrame = stepFrame;
+  el.querySelector('.fstep-back').addEventListener('click', () => stepFrame(-1));
+  el.querySelector('.fstep-fwd').addEventListener('click', () => stepFrame(1));
+  timeEl.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const modes = ['clock', 'frames', 'timecode'];
+    layout.timeDisplay = modes[(modes.indexOf(layout.timeDisplay) + 1) % modes.length];
+    for (const t of tiles) t.tick && t.refreshTime && t.refreshTime();
+  });
+  tile.refreshTime = updateTimeLabel;
 
   // ----- bookmarks -----
   const bmTitle = (b) => (b.label ? `${b.label} · ${fmtTime(b.t)}` : fmtTime(b.t));
@@ -863,7 +878,7 @@ function addVideo(filePath, state = {}) {
   bmListBtn.addEventListener('click', () => togglePanel());
   backBtn.addEventListener('click', (e) => seekBy(e.shiftKey ? -30 : -5));
   fwdBtn.addEventListener('click', (e) => seekBy(e.shiftKey ? 30 : 5));
-  for (const b of [bmAddBtn, bmListBtn, backBtn, fwdBtn]) b.addEventListener('dblclick', (e) => e.stopPropagation());
+  for (const b of [bmAddBtn, bmListBtn, backBtn, fwdBtn, el.querySelector('.fstep-back'), el.querySelector('.fstep-fwd')]) b.addEventListener('dblclick', (e) => e.stopPropagation());
   bmPanel.addEventListener('pointerdown', (e) => e.stopPropagation());
   bmPanel.addEventListener('dblclick', (e) => e.stopPropagation());
   bmPanel.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
@@ -1098,6 +1113,7 @@ function collectSession() {
       rowHeight: layout.rowHeight,
       board: board.initialized ? { panX: board.panX, panY: board.panY, zoom: board.zoom } : null,
       linked: board.linked,
+      timeDisplay: layout.timeDisplay,
     },
     masterVolume,
     videos: tiles.map((t) => ({
@@ -1120,6 +1136,7 @@ async function applySession(data) {
   const lay = data.layout || {};
   const wantMode = lay.mode === 'board' ? 'board' : 'gallery';
   if (Number(lay.rowHeight) > 0) layout.rowHeight = clamp(Number(lay.rowHeight), MIN_H, MAX_H);
+  layout.timeDisplay = ['clock', 'frames', 'timecode'].includes(lay.timeDisplay) ? lay.timeDisplay : 'clock';
   const bv = lay.board;
   if (bv && isFinite(bv.panX) && isFinite(bv.panY) && bv.zoom > 0) {
     board.panX = Number(bv.panX); board.panY = Number(bv.panY);
@@ -1246,6 +1263,8 @@ window.addEventListener('keydown', (e) => {
     if (e.key === ']') { h.jumpBookmark(1); return; }
     if (key === 'k') { togglePlay(h.video); return; }
     if (key === 'm') { h.video.muted = !h.video.muted; return; }
+    if (e.key === ',') { h.stepFrame(-1); return; }
+    if (e.key === '.') { h.stepFrame(1); return; }
   }
 
   if (e.code === 'Space') {

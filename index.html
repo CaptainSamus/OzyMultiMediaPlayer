@@ -77,9 +77,11 @@
           <input type="range" class="seek" min="0" max="10000" value="0" step="1" title="Scrub">
           <div class="row">
             <button class="play" title="Play / pause (K)">▶</button>
+            <button class="fstep-back" title="Back one frame (,)">|◀</button>
             <button class="back" title="Back 5 s (←). Shift for 30 s">−5s</button>
             <button class="fwd" title="Forward 5 s (→). Shift for 30 s">+5s</button>
-            <span class="time">0:00 / 0:00</span>
+            <button class="fstep-fwd" title="Forward one frame (.)">▶|</button>
+            <span class="time" title="Click to switch clock / frames / timecode">0:00 / 0:00</span>
             <span class="spacer"></span>
             <button class="bm-add" title="Add a bookmark at the current time (B)">🔖+</button>
             <button class="bm-list" title="Bookmarks: click to list, rename, or delete. [ and ] jump between them.">🔖<span class="bm-count">0</span></button>
@@ -113,6 +115,7 @@
   </template>
 
   <script src="lib/codecs.js"></script>
+  <script src="lib/frames.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

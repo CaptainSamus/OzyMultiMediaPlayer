@@ -364,7 +364,7 @@ body.resizing .tile.resizing { pointer-events: auto; }
 }
 .overlay .marker:hover { background: #fff; transform: scaleY(1.2); }
 .overlay .bm-count { font-size: 10px; margin-left: 2px; }
-.overlay .bm-add, .overlay .bm-list, .overlay .back, .overlay .fwd {
+.overlay .bm-add, .overlay .bm-list, .overlay .back, .overlay .fwd, .overlay .fstep-back, .overlay .fstep-fwd {
   background: rgba(255,255,255,0.12);
   border: none;
   color: #fff;
@@ -376,7 +376,7 @@ body.resizing .tile.resizing { pointer-events: auto; }
   font-size: 11px;
   white-space: nowrap;
 }
-.overlay .bm-add:hover, .overlay .bm-list:hover, .overlay .back:hover, .overlay .fwd:hover { background: rgba(255,255,255,0.25); }
+.overlay .bm-add:hover, .overlay .bm-list:hover, .overlay .back:hover, .overlay .fwd:hover, .overlay .fstep-back:hover, .overlay .fstep-fwd:hover { background: rgba(255,255,255,0.25); }
 .overlay .bm-list.has-some { color: #ffd166; }
 
 /* bookmark list panel */
@@ -454,7 +454,7 @@ body.resizing .tile.resizing { pointer-events: auto; }
 /* keep the control row usable on small tiles (measured in screen pixels) */
 @container (max-width: 420px) { .overlay .rate { display: none; } }
 @container (max-width: 340px) { .overlay .time { display: none; } }
-@container (max-width: 260px) { .overlay .back, .overlay .fwd, .overlay .bm-list { display: none; } }
+@container (max-width: 260px) { .overlay .back, .overlay .fwd, .overlay .fstep-back, .overlay .fstep-fwd, .overlay .bm-list { display: none; } }
 
 .overlay .top {
   display: flex;
@@ -509,7 +509,7 @@ body.resizing .tile.resizing { pointer-events: auto; }
 }
 .overlay .play:hover, .overlay .mute:hover { background: rgba(255,255,255,0.25); }
 
-.overlay .time { font-variant-numeric: tabular-nums; font-size: 12px; text-shadow: 0 1px 2px #000; white-space: nowrap; }
+.overlay .time { font-variant-numeric: tabular-nums; font-size: 12px; text-shadow: 0 1px 2px #000; white-space: nowrap; cursor: pointer; }
 
 .overlay .rate {
   background: rgba(0,0,0,0.5);
