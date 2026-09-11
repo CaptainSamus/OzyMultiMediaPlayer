@@ -648,6 +648,87 @@ cmpQ('.cmp-wipe').addEventListener('pointerdown', (e) => {
   wipeEl.addEventListener('pointermove', onMove); wipeEl.addEventListener('pointerup', onUp); wipeEl.addEventListener('pointercancel', onUp);
 });
 
+// ---------- undo ----------
+// Entry shapes:
+//  { kind: 'move'|'resize', label, rects: [{ tile, before: {x,y,w,h}, after: {x,y,w,h} }] }
+//  { kind: 'rowHeight', label, before, after }
+//  { kind: 'remove', label, record, index, tile, group, groupMembers, starts }
+//     record = collectSession's per-video object; tile = the live tile (updated on undo so redo removes the right one);
+//     group/groupMembers/starts let undo revive a group that dissolved when the tile left it.
+// (Named undoStack, not history, so it can't collide with window.history.)
+const undoStack = Undo.create(10);
+const rectOf = (t) => (t.board ? { ...t.board } : null);
+const sameRect = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+function recordMove(list, label) { return { kind: 'move', label: label || 'move', rects: list.map((t) => ({ tile: t, before: rectOf(t), after: null })) }; }
+function recordResize(list) { return { kind: 'resize', label: 'resize', rects: list.map((t) => ({ tile: t, before: rectOf(t), after: null })) }; }
+function finishRects(entry) { // call at pointerup; keeps only tiles that actually changed, drops no-op drags
+  for (const r of entry.rects) r.after = rectOf(r.tile);
+  entry.rects = entry.rects.filter((r) => !sameRect(r.before, r.after));
+  if (!entry.rects.length) return;
+  if (entry.kind === 'move') entry.label = `move ${entry.rects.length} video${entry.rects.length === 1 ? '' : 's'}`;
+  undoStack.push(entry);
+}
+function recordRowHeight() { return { kind: 'rowHeight', label: 'resize gallery', before: layout.rowHeight, after: null }; }
+function finishRowHeight(entry) { entry.after = layout.rowHeight; if (entry.after !== entry.before) undoStack.push(entry); }
+// Ctrl+wheel, the zoom slider and +/- change the row height in many small steps: one entry per burst.
+let rowEntry = null, rowTimer = null;
+function noteRowHeightChange() {
+  if (!rowEntry) rowEntry = recordRowHeight();
+  clearTimeout(rowTimer);
+  rowTimer = setTimeout(() => { finishRowHeight(rowEntry); rowEntry = null; }, 500);
+}
+function recordRemove(tile) {
+  const g = tile.group;
+  undoStack.push({
+    kind: 'remove', label: `remove ${basename(tile.path)}`, record: collectSession().videos[tiles.indexOf(tile)],
+    index: tiles.indexOf(tile), tile, group: g,
+    groupMembers: g ? [...g.members] : [], starts: g ? new Map([...g.members].map((t) => [t, t.sync ? { ...t.sync } : null])) : null,
+  });
+}
+
+function applyRects(entry, dir) { // dir: 'before' | 'after'
+  for (const r of entry.rects) if (tiles.includes(r.tile) && r[dir]) { r.tile.board = { ...r[dir] }; layoutTile(r.tile); }
+}
+function restoreRemoved(entry) {
+  const v = entry.record;
+  const t = v.type && v.type !== 'file' && typeof addWebTile === 'function' ? addWebTile(v.url, WebUrl.parse(v.url), v) : addVideo(v.path, v);
+  // put it back at its old index so gallery order is preserved
+  tiles.splice(tiles.indexOf(t), 1); tiles.splice(Math.min(entry.index, tiles.length), 0, t);
+  canvas.insertBefore(t.el, canvas.children[entry.index] || null);
+  const g = entry.group;
+  if (g) {
+    if (!groups.includes(g)) {
+      // the group dissolved when this tile left; revive it with the members still free
+      const others = entry.groupMembers.filter((m) => tiles.includes(m) && m !== t && !m.group);
+      if (others.length) {
+        groups.push(g); g.members = new Set(others);
+        for (const m of others) { m.group = g; m.sync = entry.starts.get(m) || null; paintGroup(m); }
+      }
+    }
+    if (groups.includes(g)) {
+      g.members.add(t); t.group = g;
+      t.sync = v.sync ? { start: v.sync.start } : null;
+      paintGroup(t); applyGroupAudio(g);
+    }
+  }
+  entry.tile = t;
+  if (isBoard() && !t.board) placeOnBoard([t]);
+  layoutTiles();
+  if (typeof markOnBoard === 'function') markOnBoard(); // sidebar arrives in Task 12
+  if (active) renderGroupBar();
+}
+function applyEntry(entry, dir) {
+  if (entry.kind === 'move' || entry.kind === 'resize') applyRects(entry, dir);
+  else if (entry.kind === 'rowHeight') setRowHeight(entry[dir]);
+  else if (entry.kind === 'remove') {
+    if (dir === 'before') restoreRemoved(entry);
+    else if (tiles.includes(entry.tile)) removeTile(entry.tile, { record: false });
+  }
+}
+function undo() { const e = undoStack.undo(); if (!e) { setStatus('Nothing to undo'); return; } applyEntry(e, 'before'); setStatus('Undo: ' + e.label); }
+function redo() { const e = undoStack.redo(); if (!e) { setStatus('Nothing to redo'); return; } applyEntry(e, 'after'); setStatus('Redo: ' + e.label); }
+
 function setLinked(on) {
   board.linked = !!on;
   document.getElementById('btn-link').classList.toggle('toggled', board.linked);
@@ -811,6 +892,7 @@ function placeOnBoard(list, at = null) {
 // Re-flow every board tile into neat rows, keeping each one's size.
 function tidyBoard() {
   if (!tiles.length) return;
+  const entry = recordMove(tiles.filter((t) => t.board));
   const r = gridRect();
   const bb = boardBounds() || { minX: 0, minY: 0, w: 0 };
   const x0 = bb.minX, y0 = bb.minY;
@@ -824,6 +906,7 @@ function tidyBoard() {
     rowH = Math.max(rowH, h);
   }
   layoutTiles();
+  finishRects(entry);
   fitAll();
 }
 
@@ -910,6 +993,8 @@ function startResize(tile, corner, e) {
   const onBoard = isBoard();
   const start = onBoard ? { ...tile.board } : { w: tile.el.offsetWidth, h: tile.el.offsetHeight };
   if (onBoard) { bringToFront(tile); rememberStart(); }
+  // Linked mode can push neighbours, so remember every board rect
+  const undoEntry = onBoard ? recordResize(tiles.filter((t) => t.board)) : recordRowHeight();
   const fixed = new Set([tile]);
   tile.el.classList.add('resizing');
   document.body.classList.add('resizing');
@@ -943,6 +1028,7 @@ function startResize(tile, corner, e) {
     tile.el.classList.remove('resizing');
     document.body.classList.remove('resizing');
     document.body.style.cursor = '';
+    if (onBoard) finishRects(undoEntry); else finishRowHeight(undoEntry);
   };
   handle.addEventListener('pointermove', onMove);
   handle.addEventListener('pointerup', onUp);
@@ -973,6 +1059,7 @@ function attachTileDrag(tile) {
     let moving = false;
     let group = [];
     let movingSet = new Set();
+    let undoEntry = null;
     const onMove = (ev) => {
       const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
       if (!moving) {
@@ -990,6 +1077,7 @@ function attachTileDrag(tile) {
         }
         movingSet = new Set(group);
         rememberStart();
+        undoEntry = recordMove(tiles.filter((t) => t.board)); // all board tiles: Linked mode can push neighbours
         for (const t of group) { bringToFront(t); t.el.classList.add('dragging'); }
         document.body.classList.add('tile-dragging');
       }
@@ -1014,6 +1102,7 @@ function attachTileDrag(tile) {
       el.removeEventListener('pointercancel', onUp);
       hideGuides();
       if (moving) {
+        finishRects(undoEntry);
         for (const t of group) t.el.classList.remove('dragging');
         document.body.classList.remove('tile-dragging');
         tile.suppressClick = true;
@@ -1111,6 +1200,7 @@ grid.addEventListener('wheel', (e) => {
     }
   } else if (e.ctrlKey) {
     e.preventDefault();
+    noteRowHeightChange();
     setRowHeight(layout.rowHeight * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
   }
 }, { passive: false });
@@ -1511,8 +1601,10 @@ function addVideo(filePath, state = {}) {
     h.addEventListener('dblclick', (e) => {
       e.stopPropagation();
       if (isBoard() && tile.board) {
+        const entry = recordResize([tile]);
         tile.board.h = layout.rowHeight; tile.board.w = layout.rowHeight * tile.aspect;
         layoutTile(tile);
+        finishRects(entry);
       } else {
         fitAll();
       }
@@ -1536,7 +1628,8 @@ function togglePlay(video) {
   else video.pause();
 }
 
-function removeTile(tile) {
+function removeTile(tile, { record = true } = {}) {
+  if (record && tiles.includes(tile)) recordRemove(tile); // before it leaves `tiles`, so the index is right
   const i = tiles.indexOf(tile);
   if (i >= 0) tiles.splice(i, 1);
   if (tile.group) removeFromGroup(tile.group, tile);
@@ -1552,7 +1645,9 @@ function removeTile(tile) {
 }
 
 function clearAll() {
-  while (tiles.length) removeTile(tiles[tiles.length - 1]);
+  while (tiles.length) removeTile(tiles[tiles.length - 1], { record: false });
+  undoStack.clear();
+  clearTimeout(rowTimer); rowEntry = null;
 }
 
 function addVideos(paths, at = null) {
@@ -1656,6 +1751,7 @@ async function applySession(data) {
   layoutTiles();
   // older session files have no zoom / view saved: fit once the videos are in
   if (!(Number(lay.rowHeight) > 0) || (isBoard() && !board.initialized)) scheduleFit();
+  undoStack.clear(); // a freshly opened session starts with no history
   return { loaded: data.videos.length, missing };
 }
 
@@ -1724,7 +1820,7 @@ modeEl.addEventListener('click', (e) => {
 
 zoomEl.addEventListener('input', () => {
   if (isBoard()) zoomAtCenter(sliderToZoom(Number(zoomEl.value)));
-  else { layout.rowHeight = clamp(Math.round(Number(zoomEl.value)), MIN_H, MAX_H); for (const t of tiles) layoutTile(t); zoomLabel.textContent = layout.rowHeight + 'px'; }
+  else { noteRowHeightChange(); layout.rowHeight = clamp(Math.round(Number(zoomEl.value)), MIN_H, MAX_H); for (const t of tiles) layoutTile(t); zoomLabel.textContent = layout.rowHeight + 'px'; }
 });
 
 masterVol.addEventListener('input', () => setMasterVolume(Number(masterVol.value) / 100, { updateSlider: false }));
@@ -1757,6 +1853,8 @@ window.addEventListener('keydown', (e) => {
 
   if (ctrl && e.key.toLowerCase() === 's') { e.preventDefault(); e.shiftKey ? saveSessionAs() : saveSession(); return; }
   if (ctrl && e.key.toLowerCase() === 'o') { e.preventDefault(); openSession(); return; }
+  if (ctrl && key === 'z' && !inControl) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if (ctrl && key === 'y' && !inControl) { e.preventDefault(); redo(); return; }
   if (ctrl && e.key.toLowerCase() === 'g' && !inControl) { e.preventDefault(); e.shiftKey ? (active && dissolveGroup(active)) : toggleGroupFromSelection(); return; }
   if (ctrl && e.key.toLowerCase() === 'a' && !isBoard()) { e.preventDefault(); document.getElementById('btn-add').click(); return; }
 
@@ -1802,9 +1900,9 @@ window.addEventListener('keydown', (e) => {
   } else if (key === 'f') {
     fitAll();
   } else if (e.key === '=' || e.key === '+') {
-    if (isBoard()) zoomAtCenter(board.zoom * 1.15); else setRowHeight(layout.rowHeight * 1.1);
+    if (isBoard()) zoomAtCenter(board.zoom * 1.15); else { noteRowHeightChange(); setRowHeight(layout.rowHeight * 1.1); }
   } else if (e.key === '-' || e.key === '_') {
-    if (isBoard()) zoomAtCenter(board.zoom / 1.15); else setRowHeight(layout.rowHeight / 1.1);
+    if (isBoard()) zoomAtCenter(board.zoom / 1.15); else { noteRowHeightChange(); setRowHeight(layout.rowHeight / 1.1); }
   }
 });
 
