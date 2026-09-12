@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('api', {
   // image sequences (frame player)
   sequenceFor: (p) => ipcRenderer.invoke('sequence-for', p),
   seqInfo: (dir, seq) => ipcRenderer.invoke('seq-info', dir, seq),
+  exrLayers: (framePath) => ipcRenderer.invoke('exr-layers', framePath),
   framesDir: () => ipcRenderer.invoke('frames-dir'),
   framesOnDisk: (key) => ipcRenderer.invoke('frames-on-disk', key),
   ensureFrames: (req) => ipcRenderer.send('ensure-frames', req),

@@ -184,7 +184,10 @@ itself when you click **Update yt-dlp** in the sidebar.
     for EXR, **Exposure** in stops (applied in linear light) and
     **Colour**: sRGB, Rec.709 (Nuke's curve) or None (the linear values
     as they are). Changing the look re-decodes in the background while the
-    tile keeps showing its frame. Log DPX shows as stored.
+    tile keeps showing its frame. Log DPX shows as stored. A multi-layer or
+    multi-part EXR also gets a **Layer** picker (AOVs); switching layer
+    decodes in the background, and switching back is instant. The sidebar
+    row says how many layers a sequence has.
   - A missing frame shows the one before it with a "frame N missing"
     badge.
 - **YouTube / Twitch tiles.** YouTube tiles use the app's own play, scrub,

@@ -2246,7 +2246,10 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
   const cacheBar = el.querySelector('.cache-bar');
   const errorEl = el.querySelector('.error');
   seq = { name: seq.name, sep: seq.sep || '', pad: Number(seq.pad) || 0, ext: seq.ext, start: Number(seq.start) || 0, end: Number(seq.end) || 0,
-    count: Number(seq.count) || 1, missing: Array.isArray(seq.missing) ? seq.missing.map(Number) : [], single: !!seq.single, fps: seq.fps, exposure: seq.exposure, colour: seq.colour };
+    count: Number(seq.count) || 1, missing: Array.isArray(seq.missing) ? seq.missing.map(Number) : [], single: !!seq.single, fps: seq.fps, exposure: seq.exposure, colour: seq.colour,
+    // which layer / part of a multi-layer EXR to show ('' and 0 = the file's own RGBA)
+    layer: typeof (state.seq || seq).layer === 'string' ? (state.seq || seq).layer : '',
+    part: Number((state.seq || seq).part) > 0 ? Number((state.seq || seq).part) : 0 };
   const total = seq.end - seq.start + 1;
   const decode = Sequence.needsDecode(seq.ext);
   const missing = new Set(seq.missing);
@@ -2351,7 +2354,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     if (!force && requestedAt !== null && Math.abs(n - requestedAt) < 24) return;
     requestedAt = n;
     const ranges = [[n, n + 48], [n - 12, n - 1], [n + 49, seq.end], [seq.start, n - 13]];
-    window.api.ensureFrames({ key: tile.cacheKey, dir, seq: { name: seq.name, sep: seq.sep, pad: seq.pad, ext: seq.ext, start: seq.start, end: seq.end, missing: seq.missing, single: seq.single }, exposure: tile.exposure, colour: tile.colour, ranges });
+    window.api.ensureFrames({ key: tile.cacheKey, dir, seq: { name: seq.name, sep: seq.sep, pad: seq.pad, ext: seq.ext, start: seq.start, end: seq.end, missing: seq.missing, single: seq.single, layer: seq.layer, part: seq.part }, exposure: tile.exposure, colour: tile.colour, ranges });
   };
   tile.onFramesReady = (a, b) => {
     for (let n = a; n <= b; n++) disk.add(n);
@@ -2380,12 +2383,26 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     if (!info || !info.ok) { el.querySelector('.error-text').textContent = `Can't read this sequence:\n${tile.path}`; errorEl.classList.remove('hidden'); return; }
     tile.info = info;
     if (info.width > 0 && info.height > 0) setAspect(info.width / info.height);
+    // the layer list, read once from the first frame's header (for the ⚙ Layer picker)
+    if (Sequence.isExr(seq)) {
+      window.api.exrLayers(joinPath(dir, Sequence.framePath(seq, seq.start)))
+        .then((x) => { if (tiles.includes(tile)) tile.exrInfo = x || { parts: [] }; });
+    }
     await setKey();
   });
   // ⚙: a new exposure / colour is a new cache key; the canvas keeps the old frame until the new one lands
   tile.setLook = (exposure, colour) => {
     tile.exposure = clamp(Number(exposure) || 0, -10, 10);
     tile.colour = Sequence.COLOURS.includes(colour) ? colour : 'srgb';
+    if (tile.cacheKey) window.api.cancelFrames(tile.cacheKey);
+    setKey();
+    refreshSettingsMark(tile);
+  };
+  // ⚙ Layer: another layer / part of the same EXR files is a new cache key, so it decodes in the
+  // background and switching back is instant (those frames are still on disk).
+  tile.setLayer = (layer, part) => {
+    seq.layer = typeof layer === 'string' ? layer : '';
+    seq.part = Number(part) > 0 ? Number(part) : 0;
     if (tile.cacheKey) window.api.cancelFrames(tile.cacheKey);
     setKey();
     refreshSettingsMark(tile);
@@ -2561,7 +2578,9 @@ function wireSettingsButton(tile) {
 // the ⚙ turns yellow when something differs from the default
 function refreshSettingsMark(tile) {
   const b = tile.el.querySelector('.settings'); if (!b) return;
-  const custom = tile.type === 'sequence' ? (tile.fps !== 24 || tile.exposure !== 0 || tile.colour !== 'srgb') : !!tile.fpsOverride;
+  const custom = tile.type === 'sequence'
+    ? (tile.fps !== 24 || tile.exposure !== 0 || tile.colour !== 'srgb' || !!tile.seq.layer || tile.seq.part > 0)
+    : !!tile.fpsOverride;
   b.classList.toggle('custom', custom);
 }
 function openTileSettings(tile, btn) {
@@ -2598,6 +2617,40 @@ function openTileSettings(tile, btn) {
     exp.addEventListener('input', () => { expN.value = exp.value; apply(); });
     expN.addEventListener('change', () => { expN.value = String(clamp(Math.round(Number(expN.value) * 2) / 2, -10, 10)); exp.value = expN.value; apply(); });
     col.addEventListener('change', apply);
+  }
+  // Layer picker, only when the EXR has more than one layer or part
+  if (seq && Sequence.isExr(tile.seq)) {
+    if (tile.exrInfo === undefined) {
+      tile.exrInfo = null; // one attempt; the popover reopens itself once the header is read
+      window.api.exrLayers(joinPath(tile.dir, Sequence.framePath(tile.seq, tile.seq.start))).then((x) => {
+        tile.exrInfo = x || { parts: [] };
+        if (tsEl && tsEl._tile === tile) { closeTileSettings(); openTileSettings(tile, btn); }
+      });
+    }
+    const parts = (tile.exrInfo && tile.exrInfo.parts) || [];
+    const choices = parts.reduce((n, p) => n + p.layers.length, 0);
+    if (choices > 1) {
+      const sel = document.createElement('select');
+      const opt = (parent, pi, layer) => {
+        const o = document.createElement('option');
+        o.value = pi + ' ' + layer; o.textContent = ExrHeader.layerLabel(layer);
+        parent.appendChild(o);
+      };
+      if (parts.length > 1) {
+        parts.forEach((p, pi) => {
+          const g = document.createElement('optgroup');
+          g.label = p.name || `part ${pi}`;
+          for (const l of p.layers) opt(g, pi, l);
+          sel.appendChild(g);
+        });
+      } else for (const l of parts[0].layers) opt(sel, 0, l);
+      sel.value = (tile.seq.part || 0) + ' ' + (tile.seq.layer || '');
+      row('Layer', sel);
+      sel.addEventListener('change', () => {
+        const i = sel.value.indexOf(' ');
+        tile.setLayer(sel.value.slice(i + 1), Number(sel.value.slice(0, i)));
+      });
+    }
   }
   if (seq && String(tile.seq.ext).toLowerCase() === 'dpx') note('Log DPX shows as stored (no log-to-linear conversion yet).');
   if (seq && Sequence.needsDecode(tile.seq.ext)) {
@@ -2706,7 +2759,7 @@ function collectSession() {
     videos: tiles.map((t) => (t.type === 'sequence' ? {
       // image sequence: folder + run description + its look; the decoded-frame cache is found again by key
       type: 'sequence', dir: t.dir, path: t.path, galleryH: Math.round(galleryHOf(t)),
-      seq: { name: t.seq.name, sep: t.seq.sep, pad: t.seq.pad, ext: t.seq.ext, start: t.seq.start, end: t.seq.end, count: t.seq.count, missing: t.seq.missing, single: !!t.seq.single, fps: t.fps, exposure: t.exposure, colour: t.colour },
+      seq: { name: t.seq.name, sep: t.seq.sep, pad: t.seq.pad, ext: t.seq.ext, start: t.seq.start, end: t.seq.end, count: t.seq.count, missing: t.seq.missing, single: !!t.seq.single, fps: t.fps, exposure: t.exposure, colour: t.colour, layer: t.seq.layer || '', part: t.seq.part || 0 },
       color: t.hue, loop: !!t.loop, currentTime: t.pb.time, volume: 0, muted: false, playbackRate: t.pb.rate, paused: t.pb.paused, aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
@@ -3104,6 +3157,13 @@ const thumbObserver = new IntersectionObserver((entries) => {
     const img = it.querySelector('.sb-thumb');
     if (it.dataset.thumbUrl) { img.src = it.dataset.thumbUrl; continue; }
     window.api.thumb(it.dataset.thumbPath || it.dataset.path).then((p) => { if (p) img.src = window.api.videoUrl(p); else img.classList.add('generic'); });
+    // EXR sequences: say how many layers are in there (read from the middle frame's header)
+    if (it.dataset.type === 'sequence' && /\.exr$/i.test(it.dataset.thumbPath || '')) {
+      window.api.exrLayers(it.dataset.thumbPath).then((x) => {
+        const n = x && x.parts ? x.parts.reduce((a, p) => a + p.layers.length, 0) : 0;
+        if (n > 1 && it.isConnected) it.querySelector('.sb-dur').textContent += ` · ${n} layers`;
+      });
+    }
   }
 }, { root: null, rootMargin: '200px' });
 

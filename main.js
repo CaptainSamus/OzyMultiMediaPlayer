@@ -277,6 +277,7 @@ const { execFile, spawn } = require('child_process');
 const Codecs = require('./lib/codecs');
 const ProxyCache = require('./lib/proxy');
 const Sequence = require('./lib/sequence');
+const ExrHeader = require('./lib/exrheader');
 
 const proxyDir = () => path.join(app.getPath('userData'), 'proxies');
 function proxyPathFor(filePath, stat) {
@@ -508,6 +509,17 @@ ipcMain.handle('seq-info', async (_e, dir, seq) => {
     });
   });
   return { ok: true, firstMtime, ...size };
+});
+// The parts / layers of an EXR frame, from the first 64 KB of it (headers live at the front).
+ipcMain.handle('exr-layers', (_e, filePath) => {
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(65536);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    return ExrHeader.parse(new Uint8Array(buf.subarray(0, n)));
+  } catch { return null; }
+  finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
 });
 ipcMain.handle('frames-on-disk', (_e, key) => {
   if (!/^[0-9a-f]{16}$/.test(String(key))) return [];
