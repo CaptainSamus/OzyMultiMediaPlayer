@@ -29,3 +29,15 @@ Deferred decisions to raise once v1 is complete and Mark walks the whole app.
    built. Middle-drag pans from anywhere except the YouTube/Twitch picture
    itself (the iframe swallows the press); Pan + zoom on makes it work there
    too. Revisit only if it keeps annoying.
+
+6. **DPX log-to-linear.** DPX frames display as stored; a log (Cineon) DPX
+   looks flat. Add a Cineon log→lin option in the sequence popover later?
+   Raised 2026-09-11 during Task 23.
+
+7. **EXR layers/parts.** ffmpeg decodes an EXR's default layer only; multi-
+   layer or multi-part renders show the first. Do you need a layer picker
+   (e.g. beauty vs. AOVs)? Raised 2026-09-11 after Task 23.
+
+8. **Live GPU exposure.** Exposure/colour changes re-decode in ~0.5 s per
+   change (frame cache in linear would allow instant slider response via a
+   WebGL shader, at the cost of RAM). Worth it? Raised after Task 23.

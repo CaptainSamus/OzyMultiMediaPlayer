@@ -41,8 +41,7 @@ a generic icon. Nothing else in the app is affected.
 
 ## Out of scope for v1
 
-EXR or image sequences (single still images are in, see feature 8),
-website hosting, board sharing, accounts, home server or network library,
+Website hosting, board sharing, accounts, home server or network library,
 mood board export. macOS support is v1.1, right after the Windows v1.0
 release (plan Task 16): unsigned Mac builds, a dmg installer and a
 self-contained zip portable per chip (all dependencies inside the app
@@ -354,6 +353,62 @@ Version 3 files still load (no groups, default colours).
   only, as before) and **Add all + images** (everything). Both confirm
   above 30 items. Dragging or double-clicking an image row makes an
   image tile.
+
+### 9. Image sequences and EXR: a Nuke-style frame player (v0.2.0.3, Mark 2026-09-11)
+
+- **What counts as a sequence.** Files in one folder matching
+  `<name><sep><frame><.ext>` where `sep` is `.`, `_`, `-` or nothing,
+  `frame` is 2+ digits with consistent padding, and `ext` is one of
+  `exr png tif tiff jpg jpeg webp dpx`, with at least 2 frames. Gaps are
+  allowed: the row says "N missing" and a missing frame shows the last
+  good frame with a "missing" badge.
+- **No re-encode.** A sequence tile (`type: 'sequence'`) is a frame
+  player, not a `<video>`: a `<canvas>` that draws frame N at the tile's
+  fps from an in-memory frame cache, exactly like Nuke's viewer. Frames
+  are never turned into a movie.
+  - PNG, JPEG and WebP frames are decoded by Chromium straight from the
+    original files (`localvideo://`), no intermediate files at all.
+  - EXR, TIFF and DPX can't be decoded by Chromium, so main decodes them
+    with the bundled ffmpeg into a lossless per-frame disk cache
+    (`userData/frames/<key>/<frame>.png`, 8-bit sRGB display frames),
+    in contiguous batches around the playhead first, then outward, with
+    a few ffmpeg processes in parallel. The tile shows a cache bar
+    (decoded ranges) above its scrub bar. Scrubbing and stepping work
+    immediately on decoded frames; playback stalls on an undecoded frame
+    and resumes when it lands, like Nuke.
+  - The in-memory cache is an LRU of decoded bitmaps capped by estimated
+    bytes (default 2 GB across all sequence tiles).
+- **Playback.** A wall-clock driven frame counter honours fps and speed;
+  the frame player exposes the same playback adapter (`tile.pb`) as
+  video and YouTube tiles, so groups, Sync, loops, the unified timeline,
+  bookmarks, undo and sessions work unchanged. Frame step sets the frame
+  directly. A/B and fullscreen work on the canvas.
+- **Per-tile settings popover** (⚙ in the control row):
+  - **fps** (number; sequences default 24; on video tiles this is an
+    override used by frame step and timecode only, playback speed is
+    untouched). Saved as `videos[i].fps` (sequence) / `fpsOverride`
+    (video).
+  - EXR only: **Exposure** in stops (−10…+10, step 0.5, default 0) and
+    **Colour** (sRGB default, Rec.709, None = linear values as-is).
+    Changing them changes the cache key, so frames re-decode in the
+    background; the tile keeps its frame. Old cache folders stay until
+    Cache clear. Live GPU exposure is a later step on top of this.
+- **Colour pipeline** (ffmpeg, EXR only): decode to float RGB, exposure
+  in linear light (`exposure` filter, EV = stops), then the transfer
+  (linear → sRGB via `zscale`, or `-apply_trc` on the EXR decoder as the
+  fallback if zscale is missing), then `rgb24` PNG.
+- **Where sequences come from.** Sidebar folder rows collapse a run of
+  frames into one row tagged SEQ ("name.[0001-0240].exr · 240 frames",
+  thumbnail from the middle frame); drag, double-click, Add all and Add
+  selected make sequence tiles. Picking or dropping a single frame that
+  belongs to a detected sequence asks "Add as a sequence of N frames?"
+  (Yes → sequence tile, No → single image tile; a lone EXR frame is
+  shown as a one-frame sequence).
+- **Thumbnails** for EXR/TIFF/DPX frames use the same decode with the
+  sRGB transfer.
+- Session stays v4 (additive fields). Undo of a removed sequence tile
+  restores it with its settings; its disk cache is reused.
+- The frame cache counts in the Cache button; Cache clear removes it.
 
 ## Session format v4
 
