@@ -195,9 +195,11 @@ itself when you click **Update yt-dlp** in the sidebar.
   of an embed, turn on **✋ Pan + zoom** (the embed's own controls work
   again when it's off).
 - **Two layouts.** Tiles always use each item's real aspect ratio.
-  - **Gallery** (attached): tiles flow in rows and share one size. Drag any
-    tile's corner, move the zoom slider, or `Ctrl`+wheel and they all resize.
-    **Fit all** picks the largest size with no scrolling.
+  - **Gallery** (attached): tiles flow in rows, each with its own size. Drag
+    a tile's corner to resize just that one. The zoom slider (or `Ctrl`+wheel
+    and `+` / `-`) scales every tile together, keeping the relative sizes you
+    set. **Fit all** scales them all to fill the window with no scrolling.
+    Sizes are saved in the session.
   - **Board** (detached): an infinite canvas, Miro-style. Drag a tile by its
     title bar or picture to move it; pull a corner to resize just that one
     (double-click a corner to reset its size). Middle-mouse or `Alt`-drag

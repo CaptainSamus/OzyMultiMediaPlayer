@@ -23,7 +23,8 @@ let hoveredTile = null; // tile under the mouse, for per-video keyboard shortcut
 // ---------- layout model ----------
 // Two modes.
 //  gallery: tiles are attached - they flow left-to-right, wrap, and all share
-//           one height (layout.rowHeight). Width follows each video's aspect.
+//           its own height (tile.galleryH); the slider scales them all together.
+//           Width follows each video's aspect.
 //  board:   tiles are detached on an infinite canvas. Each has its own
 //           x/y/w/h in canvas units; the view pans and zooms.
 const MIN_H = 60;
@@ -34,7 +35,9 @@ const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 4;
 const GAP = 8;
 const DEFAULT_ASPECT = 16 / 9;
-const layout = { mode: 'gallery', rowHeight: 240, timeDisplay: 'clock', timelineExpanded: false, timelineHeight: 140 };
+// rowHeight is now only the size new tiles start at (it follows scale-all) and the fallback for
+// older session files; each tile keeps its own gallery height in tile.galleryH.
+const layout = { mode: 'gallery', rowHeight: 240, galleryScale: 1, timeDisplay: 'clock', timelineExpanded: false, timelineHeight: 140 };
 const board = { panX: 0, panY: 0, zoom: 1, initialized: false, linked: true, hand: false };
 let zTop = 1;
 const selection = new Set(); // board mode: tiles picked with the lasso / shift-click
@@ -239,6 +242,10 @@ function boardBounds(list = tiles.filter((t) => t.board)) {
 // board zoom uses a log scale on the slider: 0..1000 -> 0.05x..4x
 const sliderToZoom = (v) => MIN_ZOOM * Math.pow(MAX_ZOOM / MIN_ZOOM, v / 1000);
 const zoomToSlider = (z) => 1000 * Math.log(z / MIN_ZOOM) / Math.log(MAX_ZOOM / MIN_ZOOM);
+// gallery: the same slider scales every tile together, 0.25x..4x with 1x in the middle
+const MIN_GS = 0.25, MAX_GS = 4;
+const sliderToScale = (v) => MIN_GS * Math.pow(MAX_GS / MIN_GS, v / 1000);
+const scaleToSlider = (s) => 1000 * Math.log(s / MIN_GS) / Math.log(MAX_GS / MIN_GS);
 
 function updateZoomUI() {
   if (isBoard()) {
@@ -246,9 +253,14 @@ function updateZoomUI() {
     zoomEl.value = String(Math.round(zoomToSlider(board.zoom)));
     zoomLabel.textContent = Math.round(board.zoom * 100) + '%';
   } else {
+    /* DISABLED (Mark, 2026-09-12): the slider set one shared row height; it now scales every tile
     zoomEl.min = String(MIN_H); zoomEl.max = String(MAX_H);
     zoomEl.value = String(layout.rowHeight);
     zoomLabel.textContent = layout.rowHeight + 'px';
+    */
+    zoomEl.min = '0'; zoomEl.max = '1000';
+    zoomEl.value = String(Math.round(scaleToSlider(layout.galleryScale)));
+    zoomLabel.textContent = Math.round(layout.galleryScale * 100) + '%';
   }
 }
 
@@ -264,7 +276,7 @@ function layoutTile(t) {
     s.height = t.board.h + 'px';
   } else {
     const maxW = innerWidth();
-    let h = layout.rowHeight;
+    let h = galleryHOf(t); // each tile's own height
     let w = h * t.aspect;
     if (w > maxW) { w = maxW; h = w / t.aspect; }
     s.left = ''; s.top = ''; s.zIndex = '';
@@ -293,9 +305,44 @@ function layoutTiles() {
   }
 }
 
+/* DISABLED (Mark, 2026-09-12): one shared height for every gallery tile; each tile has its own now
 function setRowHeight(h) {
   layout.rowHeight = clamp(Math.round(h), MIN_H, MAX_H);
   layoutTiles();
+}
+*/
+// A tile's gallery height: its own, else the current default (older sessions and new tiles).
+function galleryHOf(t) { return Number(t.galleryH) > 0 ? Number(t.galleryH) : layout.rowHeight; }
+function setTileGalleryH(t, h) {
+  t.galleryH = clamp(Math.round(h), MIN_H, MAX_H);
+  layoutTile(t);
+}
+// Scale-all: every tile (and the default for new ones) grows or shrinks by the same factor, so the
+// sizes set by hand keep their ratios.
+// The factor is trimmed so no tile crosses MIN_H / MAX_H, and then every tile gets that same
+// factor: clamping tile by tile would flatten the ratios of whichever tile hit the limit first.
+function scaleGallery(factor) {
+  if (!(factor > 0)) return 1;
+  let f = factor;
+  for (const t of tiles) f = Math.min(f, MAX_H / galleryHOf(t)); // nothing grows past the max
+  for (const t of tiles) f = Math.max(f, MIN_H / galleryHOf(t)); // nor shrinks under the min
+  if (!(f > 0) || !isFinite(f)) return 1;
+  for (const t of tiles) t.galleryH = clamp(Math.round(galleryHOf(t) * f), MIN_H, MAX_H);
+  layout.rowHeight = clamp(Math.round(layout.rowHeight * f), MIN_H, MAX_H);
+  layout.galleryScale = clamp(layout.galleryScale * f, MIN_GS, MAX_GS);
+  layoutTiles();
+  return f;
+}
+// The slider holds an absolute scale; moving it applies the ratio to what is on screen. If the
+// tiles can't take the whole step, the thumb follows what actually happened.
+function setGalleryScale(scale) {
+  const want = clamp(scale, MIN_GS, MAX_GS);
+  const before = layout.galleryScale;
+  const f = want / before;
+  if (Math.abs(f - 1) < 1e-6) { updateZoomUI(); return; }
+  const applied = scaleGallery(f);
+  layout.galleryScale = clamp(before * applied, MIN_GS, MAX_GS);
+  updateZoomUI();
 }
 
 function zoomAt(newZoom, clientX, clientY) {
@@ -820,7 +867,8 @@ cmpQ('.cmp-wipe').addEventListener('pointerdown', (e) => {
 // ---------- undo ----------
 // Entry shapes:
 //  { kind: 'move'|'resize', label, rects: [{ tile, before: {x,y,w,h}, after: {x,y,w,h} }] }
-//  { kind: 'rowHeight', label, before, after }
+//  { kind: 'gresize', label, tile, before, after }                  one gallery tile's height
+//  { kind: 'gscale', label, heights: [{ tile, before, after }], scale: { before, after } }  scale-all burst
 //  { kind: 'remove', label, record, index, tile, group, groupMembers, starts }
 //     record = collectSession's per-video object; tile = the live tile (updated on undo so redo removes the right one);
 //     group/groupMembers/starts let undo revive a group that dissolved when the tile left it.
@@ -838,14 +886,26 @@ function finishRects(entry) { // call at pointerup; keeps only tiles that actual
   if (entry.kind === 'move') entry.label = `move ${entry.rects.length} video${entry.rects.length === 1 ? '' : 's'}`;
   undoStack.push(entry);
 }
+/* DISABLED (Mark, 2026-09-12): undo of the one shared gallery height; per-tile and scale-all below
 function recordRowHeight() { return { kind: 'rowHeight', label: 'resize gallery', before: layout.rowHeight, after: null }; }
 function finishRowHeight(entry) { entry.after = layout.rowHeight; if (entry.after !== entry.before) undoStack.push(entry); }
-// Ctrl+wheel, the zoom slider and +/- change the row height in many small steps: one entry per burst.
+*/
+// one gallery tile's corner drag
+function recordGResize(tile) { return { kind: 'gresize', label: `resize ${basename(tile.path)}`, tile, before: galleryHOf(tile), after: null }; }
+function finishGResize(entry) { entry.after = galleryHOf(entry.tile); if (entry.after !== entry.before) undoStack.push(entry); }
+// Ctrl+wheel, the zoom slider and +/- scale everything in many small steps: one entry per burst.
 let rowEntry = null, rowTimer = null;
-function noteRowHeightChange() {
-  if (!rowEntry) rowEntry = recordRowHeight();
+function noteGalleryScaleChange() {
+  if (!rowEntry) rowEntry = { kind: 'gscale', label: 'scale gallery', heights: tiles.map((t) => ({ tile: t, before: galleryHOf(t), after: null })), scale: { before: layout.galleryScale, after: null } };
   clearTimeout(rowTimer);
-  rowTimer = setTimeout(() => { finishRowHeight(rowEntry); rowEntry = null; }, 500);
+  rowTimer = setTimeout(() => {
+    const entry = rowEntry; rowEntry = null;
+    if (!entry) return;
+    for (const h of entry.heights) h.after = galleryHOf(h.tile);
+    entry.scale.after = layout.galleryScale;
+    entry.heights = entry.heights.filter((h) => tiles.includes(h.tile) && h.after !== h.before);
+    if (entry.heights.length) undoStack.push(entry);
+  }, 500);
 }
 function recordRemove(tile) {
   const g = tile.group;
@@ -892,7 +952,12 @@ function restoreRemoved(entry) {
 }
 function applyEntry(entry, dir) {
   if (entry.kind === 'move' || entry.kind === 'resize') applyRects(entry, dir);
-  else if (entry.kind === 'rowHeight') setRowHeight(entry[dir]);
+  else if (entry.kind === 'gresize') { if (tiles.includes(entry.tile)) setTileGalleryH(entry.tile, entry[dir]); }
+  else if (entry.kind === 'gscale') {
+    for (const h of entry.heights) if (tiles.includes(h.tile)) h.tile.galleryH = h[dir];
+    if (entry.scale[dir] > 0) layout.galleryScale = entry.scale[dir];
+    layoutTiles();
+  }
   else if (entry.kind === 'remove') {
     if (dir === 'before') restoreRemoved(entry);
     else if (tiles.includes(entry.tile)) removeTile(entry.tile, { record: false });
@@ -1024,7 +1089,7 @@ function placeOnBoard(list, at = null) {
   if (at) {
     let i = 0;
     for (const t of list) {
-      const h = layout.rowHeight;
+      const h = galleryHOf(t);
       t.board = { x: at.x + 24 * i, y: at.y + 24 * i, w: h * t.aspect, h };
       i++;
     }
@@ -1052,7 +1117,7 @@ function placeOnBoard(list, at = null) {
   }
   let x = x0, y = y0, rowH = 0;
   for (const t of list) {
-    const h = layout.rowHeight;
+    const h = galleryHOf(t);
     const w = h * t.aspect;
     if (x > x0 && x + w > x0 + rowW) { x = x0; y += rowH + GAP; rowH = 0; }
     t.board = { x, y, w, h };
@@ -1096,8 +1161,8 @@ function setMode(mode) {
   layoutTiles();
 }
 
-// Simulate the flex-wrap packing for a candidate row height; true if every
-// tile fits in the visible area without scrolling.
+/* DISABLED (Mark, 2026-09-12): these searched for one shared row height; Fit all now scales the
+   tiles' own heights proportionally (Arrange.packs / Arrange.fitScale).
 function packsAt(rowHeight) {
   const W = innerWidth();
   const H = innerHeight();
@@ -1125,6 +1190,14 @@ function fitGallery() {
   }
   setRowHeight(Math.floor(lo));
 }
+*/
+// Fit all (gallery): one factor for every tile, so the sizes set by hand keep their ratios.
+function fitGallery() {
+  if (!tiles.length) return;
+  const items = tiles.map((t) => ({ aspect: t.aspect, h: galleryHOf(t) }));
+  const f = Arrange.fitScale(items, innerWidth(), innerHeight(), GAP);
+  scaleGallery(f);
+}
 
 function fitBoard() {
   const bb = boardBounds();
@@ -1150,7 +1223,7 @@ function scheduleFit() {
 }
 
 // ---------- corner resize ----------
-// Gallery: every tile follows. Board: only this tile, anchored on the
+// Only the tile you drag changes, in both modes. Board: anchored on the
 // opposite corner so the far edge stays put.
 function startResize(tile, corner, e) {
   if (e.button !== 0) return;
@@ -1166,7 +1239,7 @@ function startResize(tile, corner, e) {
   const start = onBoard ? { ...tile.board } : { w: tile.el.offsetWidth, h: tile.el.offsetHeight };
   if (onBoard) { bringToFront(tile); rememberStart(); }
   // Linked mode can push neighbours, so remember every board rect
-  const undoEntry = onBoard ? recordResize(tiles.filter((t) => t.board)) : recordRowHeight();
+  const undoEntry = onBoard ? recordResize(tiles.filter((t) => t.board)) : recordGResize(tile);
   const fixed = new Set([tile]);
   tile.el.classList.add('resizing');
   document.body.classList.add('resizing');
@@ -1190,7 +1263,7 @@ function startResize(tile, corner, e) {
       layoutTile(tile);
       if (board.linked && !ev.altKey) resolveOverlaps(fixed);
     } else {
-      setRowHeight(clamp(h, MIN_H, MAX_H));
+      setTileGalleryH(tile, h); // gallery: just this tile
     }
   };
   const onUp = () => {
@@ -1200,7 +1273,7 @@ function startResize(tile, corner, e) {
     tile.el.classList.remove('resizing');
     document.body.classList.remove('resizing');
     document.body.style.cursor = '';
-    if (onBoard) finishRects(undoEntry); else finishRowHeight(undoEntry);
+    if (onBoard) finishRects(undoEntry); else finishGResize(undoEntry);
   };
   handle.addEventListener('pointermove', onMove);
   handle.addEventListener('pointerup', onUp);
@@ -1373,8 +1446,8 @@ grid.addEventListener('wheel', (e) => {
     }
   } else if (e.ctrlKey) {
     e.preventDefault();
-    noteRowHeightChange();
-    setRowHeight(layout.rowHeight * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
+    noteGalleryScaleChange();
+    scaleGallery(e.deltaY < 0 ? 1.1 : 1 / 1.1);
   }
 }, { passive: false });
 
@@ -1526,6 +1599,7 @@ function addVideo(filePath, state = {}) {
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
     board: null,
     suppressClick: false,
+    galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
     bookmarks: parseBookmarks(state.bookmarks),
   };
   const sb = state.board;
@@ -1938,7 +2012,8 @@ function addWebTile(url, parsed, state = {}, at = null) {
     path: url, url, type: parsed.type, kind: parsed.kind, el, video: null, seek, time: timeEl, scrubbing: false,
     volume: clamp(Number(state.volume ?? DEFAULT_VIDEO_VOLUME), 0, 1),
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : (parsed.kind === 'short' ? 9 / 16 : 16 / 9),
-    board: null, suppressClick: false, bookmarks: parsed.type === 'youtube' ? parseBookmarks(state.bookmarks) : [], info: null, proxy: null, fps: null,
+    board: null, suppressClick: false, galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
+    bookmarks: parsed.type === 'youtube' ? parseBookmarks(state.bookmarks) : [], info: null, proxy: null, fps: null,
     group: null, sync: null, ownMuted: !!state.muted,
     title: typeof state.title === 'string' && state.title ? state.title : WebUrl.label(parsed),
   };
@@ -2094,6 +2169,7 @@ function addImageTile(filePath, state = {}, at = null) {
     type: 'image', path: filePath, el, img, video: null, yt: null,
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
     board: null, bookmarks: [], sync: null, group: null, suppressClick: false, volume: 0, ownMuted: false,
+    galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
   };
   const sb = state.board;
   if (sb && isFinite(sb.x) && isFinite(sb.y) && sb.w > 0 && sb.h > 0) tile.board = { x: +sb.x, y: +sb.y, w: +sb.w, h: +sb.h };
@@ -2181,6 +2257,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     el, video: null, mediaEl: cv, seek, time: timeEl, scrubbing: false,
     volume: 0, ownMuted: false, aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
     board: null, suppressClick: false, bookmarks: parseBookmarks(state.bookmarks), group: null, sync: null,
+    galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
     fps: Number(look.fps) > 0 ? Number(look.fps) : 24,
     exposure: clamp(Number(look.exposure) || 0, -10, 10),
     colour: Sequence.COLOURS.includes(look.colour) ? look.colour : 'srgb',
@@ -2617,7 +2694,8 @@ function collectSession() {
     savedAt: new Date().toISOString(),
     layout: {
       mode: layout.mode,
-      rowHeight: layout.rowHeight,
+      rowHeight: layout.rowHeight, // the size new tiles start at, and the fallback for older files
+      galleryScale: layout.galleryScale,
       board: board.initialized ? { panX: board.panX, panY: board.panY, zoom: board.zoom } : null,
       linked: board.linked,
       timeDisplay: layout.timeDisplay,
@@ -2627,19 +2705,19 @@ function collectSession() {
     masterVolume,
     videos: tiles.map((t) => (t.type === 'sequence' ? {
       // image sequence: folder + run description + its look; the decoded-frame cache is found again by key
-      type: 'sequence', dir: t.dir, path: t.path,
+      type: 'sequence', dir: t.dir, path: t.path, galleryH: Math.round(galleryHOf(t)),
       seq: { name: t.seq.name, sep: t.seq.sep, pad: t.seq.pad, ext: t.seq.ext, start: t.seq.start, end: t.seq.end, count: t.seq.count, missing: t.seq.missing, single: !!t.seq.single, fps: t.fps, exposure: t.exposure, colour: t.colour },
       color: t.hue, loop: !!t.loop, currentTime: t.pb.time, volume: 0, muted: false, playbackRate: t.pb.rate, paused: t.pb.paused, aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
       sync: t.sync ? { start: t.sync.start } : null,
     } : t.type === 'image' ? {
-      type: 'image', path: t.path, aspect: t.aspect,
+      type: 'image', path: t.path, aspect: t.aspect, galleryH: Math.round(galleryHOf(t)),
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: [], sync: null, volume: 0, muted: false, playbackRate: 1, paused: true, currentTime: 0,
     } : !t.video ? {
       // web tile (YouTube / Twitch)
-      type: t.type, kind: t.kind, url: t.url, title: t.title,
+      type: t.type, kind: t.kind, url: t.url, title: t.title, galleryH: Math.round(galleryHOf(t)),
       currentTime: t.pb ? t.pb.time : 0, volume: t.volume, muted: !!t.ownMuted, playbackRate: 1,
       paused: t.yt ? t.yt.paused : true, aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
@@ -2649,6 +2727,7 @@ function collectSession() {
     } : {
       type: 'file',
       path: t.path,
+      galleryH: Math.round(galleryHOf(t)),
       color: t.hue,
       loop: !!t.loop,
       fpsOverride: t.fpsOverride || null,
@@ -2676,6 +2755,7 @@ async function applySession(data) {
   const lay = data.layout || {};
   const wantMode = lay.mode === 'board' ? 'board' : 'gallery';
   if (Number(lay.rowHeight) > 0) layout.rowHeight = clamp(Number(lay.rowHeight), MIN_H, MAX_H);
+  layout.galleryScale = Number(lay.galleryScale) > 0 ? clamp(Number(lay.galleryScale), MIN_GS, MAX_GS) : 1;
   layout.timeDisplay = ['clock', 'frames', 'timecode'].includes(lay.timeDisplay) ? lay.timeDisplay : 'clock';
   layout.timelineExpanded = lay.timelineExpanded === true;
   layout.timelineHeight = Number(lay.timelineHeight) > 0 ? clamp(Number(lay.timelineHeight), 60, 320) : 140;
@@ -2898,7 +2978,7 @@ modeEl.addEventListener('click', (e) => {
 
 zoomEl.addEventListener('input', () => {
   if (isBoard()) zoomAtCenter(sliderToZoom(Number(zoomEl.value)));
-  else { noteRowHeightChange(); layout.rowHeight = clamp(Math.round(Number(zoomEl.value)), MIN_H, MAX_H); for (const t of tiles) layoutTile(t); zoomLabel.textContent = layout.rowHeight + 'px'; }
+  else { noteGalleryScaleChange(); setGalleryScale(sliderToScale(Number(zoomEl.value))); }
 });
 
 masterVol.addEventListener('input', () => setMasterVolume(Number(masterVol.value) / 100, { updateSlider: false }));
@@ -3313,9 +3393,9 @@ window.addEventListener('keydown', (e) => {
     // DISABLED (Mark, 2026-09-11): F no longer fits; Fit all is the toolbar button only
     // fitAll();
   } else if (e.key === '=' || e.key === '+') {
-    if (isBoard()) zoomAtCenter(board.zoom * 1.15); else { noteRowHeightChange(); setRowHeight(layout.rowHeight * 1.1); }
+    if (isBoard()) zoomAtCenter(board.zoom * 1.15); else { noteGalleryScaleChange(); scaleGallery(1.1); }
   } else if (e.key === '-' || e.key === '_') {
-    if (isBoard()) zoomAtCenter(board.zoom / 1.15); else { noteRowHeightChange(); setRowHeight(layout.rowHeight / 1.1); }
+    if (isBoard()) zoomAtCenter(board.zoom / 1.15); else { noteGalleryScaleChange(); scaleGallery(1 / 1.1); }
   }
 });
 
@@ -3348,7 +3428,7 @@ window.api.onOpenSession((p) => openSession(p));
 
 updateChrome();
 setMode('gallery');
-setRowHeight(240);
+layout.rowHeight = 240; // the size new gallery tiles start at
 setLinked(true);
 setHand(false);
 setMasterVolume(DEFAULT_MASTER_VOLUME);

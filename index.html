@@ -38,9 +38,9 @@
       <button data-mode="gallery" class="active" title="Attached: videos flow in rows and share one size. Pull any corner to resize them all.">Gallery</button>
       <button data-mode="board" title="Detached: an infinite board. Drag videos anywhere, resize each one on its own, pan and zoom the view.">Board</button>
     </div>
-    <label class="zoom" title="Gallery: video size. Board: view zoom. Ctrl + mouse wheel over the videos does the same.">
+    <label class="zoom" title="Gallery: scale every video together (keeps their relative sizes). Board: view zoom. Ctrl + mouse wheel over the videos does the same.">
       <span>🔍</span>
-      <input type="range" id="zoom" min="60" max="1200" value="240">
+      <input type="range" id="zoom" min="0" max="1000" value="500">
       <span id="zoom-label"></span>
     </label>
     <button id="btn-fit" title="Fit every video on screen">Fit all</button>
