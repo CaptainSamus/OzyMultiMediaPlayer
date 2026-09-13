@@ -54,5 +54,7 @@ jobs:
             dist/*.exe
             dist/*.dmg
             dist/*.zip
+            dist/latest.yml
+            dist/*.blockmap
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

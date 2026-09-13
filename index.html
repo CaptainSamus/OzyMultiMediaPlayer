@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; media-src localvideo:; img-src 'self' data: localvideo: https://i.ytimg.com; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'; frame-src https://www.youtube.com https://www.youtube-nocookie.com https://player.twitch.tv https://clips.twitch.tv">
+        content="default-src 'self'; media-src localvideo: https://*.googlevideo.com https://*.twitchcdn.net https://*.twitch.tv https://d1ndex63qxojbr.cloudfront.net; img-src 'self' data: localvideo: https://i.ytimg.com; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'; frame-src https://www.youtube.com https://www.youtube-nocookie.com https://player.twitch.tv https://clips.twitch.tv">
   <title>Ozy Multi Media Player</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -23,7 +23,16 @@
     <button id="btn-save-as" title="Save session to a new file (Ctrl+Shift+S)">Save as…</button>
     -->
     <button id="btn-clear" title="Remove every video from the board (asks first)">Clear board</button>
-    <button id="btn-cache" title="Playable copies made by ffmpeg live in a cache folder">Cache</button>
+    <div class="menu" id="app-menu">
+      <button id="btn-app" title="Cache, updates and version">App ▾</button>
+      <div class="menu-list" hidden>
+        <button id="btn-cache" title="Playable copies, thumbnails and decoded sequence frames live in a cache folder">Cache…</button>
+        <button id="btn-check-updates">Check for updates</button>
+        <label class="menu-check"><input type="checkbox" id="upd-auto"> Check automatically on launch</label>
+        <label class="menu-check"><input type="checkbox" id="upd-prerelease"> Include pre-releases</label>
+        <button id="btn-version" disabled>Version …</button>
+      </div>
+    </div>
     <span class="sep"></span>
     <button id="btn-play-all" title="Play every video (Space)">Play all</button>
     <button id="btn-pause-all" title="Pause every video (Space)">Pause all</button>
@@ -200,6 +209,14 @@
     </div>
   </div>
 
+  <!-- update banner: sits above the tiles, never blocks anything -->
+  <div id="update-banner" hidden>
+    <span class="ub-text"></span>
+    <span class="ub-progress" hidden><span class="ub-fill"></span></span>
+    <button class="ub-action"></button>
+    <button class="ub-dismiss" title="Hide until next launch">✕</button>
+  </div>
+
   <template id="tile-template">
     <div class="tile">
       <video preload="metadata" draggable="false"></video>
@@ -323,10 +340,12 @@
 
   <template id="web-tile-template">
     <div class="tile web">
+      <!-- Stream / Download modes play a real <video>; Player mode shows the iframe instead -->
+      <video preload="metadata" draggable="false" hidden></video>
       <iframe allow="autoplay; fullscreen; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin"></iframe>
       <div class="pan-shield"></div>
       <div class="overlay">
-        <div class="top"><button class="remove" title="Remove">✕</button><span class="group-swatch" hidden></span><span class="name"></span><button class="fullscreen" title="Fullscreen (Esc leaves)">⛶</button></div>
+        <div class="top"><button class="remove" title="Remove">✕</button><span class="group-swatch" hidden></span><span class="name"></span><select class="web-mode" title="How this video plays: a direct 720p stream, YouTube's own player (higher quality, needs a click), or a full-quality download kept in the cache"><option value="stream">Stream</option><option value="player">Player</option><option value="download">Local</option></select><button class="fullscreen" title="Fullscreen (Esc leaves)">⛶</button></div>
         <div class="bottom">
           <div class="markers"></div>
           <input type="range" class="seek" min="0" max="10000" value="0" step="1" title="Scrub">
@@ -342,7 +361,16 @@
           <div class="bm-panel hidden"></div>
         </div>
       </div>
-      <div class="error hidden"><div class="error-text"></div><div class="error-actions"><button class="retry">Retry</button></div></div>
+      <div class="error hidden">
+        <div class="error-text"></div>
+        <div class="error-actions">
+          <button class="retry">Retry</button>
+          <button class="make-proxy hidden">Download</button>
+          <button class="use-player hidden">Player</button>
+          <button class="cancel-proxy hidden">Cancel</button>
+        </div>
+        <div class="proxy-bar hidden"><div class="proxy-fill"></div></div>
+      </div>
       <div class="handle tl" data-corner="tl"></div><div class="handle tr" data-corner="tr"></div>
       <div class="handle bl" data-corner="bl"></div><div class="handle br" data-corner="br"></div>
     </div>
@@ -360,6 +388,7 @@
   <script src="lib/sequence.js"></script>
   <script src="lib/framecache.js"></script>
   <script src="lib/exrheader.js"></script>
+  <script src="lib/webstream.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

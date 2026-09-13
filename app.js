@@ -2006,7 +2006,19 @@ function addWebTile(url, parsed, state = {}, at = null) {
   const errorEl = el.querySelector('.error');
   const errorText = el.querySelector('.error-text');
   const retryBtn = el.querySelector('.retry');
+  const makeBtn = el.querySelector('.make-proxy');   // "Download" in Local mode
+  const playerBtn = el.querySelector('.use-player'); // offered when streaming is blocked
+  const cancelBtn = el.querySelector('.cancel-proxy');
+  const bar = el.querySelector('.proxy-bar');
+  const fill = el.querySelector('.proxy-fill');
   el.classList.add(parsed.type, parsed.kind);
+
+  const video = el.querySelector('video');
+  const modeSel = el.querySelector('.web-mode');
+  // Twitch live has no API and no direct file we can play: embed only. Everything else (YouTube
+  // videos / Shorts, Twitch clips) plays a real <video> by default, resolved with yt-dlp.
+  const streamable = parsed.type === 'youtube' || (parsed.type === 'twitch' && parsed.kind === 'clip');
+  const canPlayer = parsed.type === 'youtube'; // the Twitch clip embed exposes nothing worth keeping
 
   const tile = {
     path: url, url, type: parsed.type, kind: parsed.kind, el, video: null, seek, time: timeEl, scrubbing: false,
@@ -2016,7 +2028,11 @@ function addWebTile(url, parsed, state = {}, at = null) {
     bookmarks: parsed.type === 'youtube' ? parseBookmarks(state.bookmarks) : [], info: null, proxy: null, fps: null,
     group: null, sync: null, ownMuted: !!state.muted,
     title: typeof state.title === 'string' && state.title ? state.title : WebUrl.label(parsed),
+    webMode: streamable ? WebStream.mode(state.webMode || WebStream.DEFAULT_MODE) : 'player',
+    webQuality: Number(state.webQuality) > 0 ? Number(state.webQuality) : 0,
   };
+  if (!streamable) tile.webMode = 'player';
+  if (tile.webMode === 'player' && !canPlayer) tile.webMode = 'stream';
   const sb = state.board;
   if (sb && isFinite(sb.x) && isFinite(sb.y) && sb.w > 0 && sb.h > 0) tile.board = { x: Number(sb.x), y: Number(sb.y), w: Number(sb.w), h: Number(sb.h) };
   tiles.push(tile);
@@ -2058,8 +2074,182 @@ function addWebTile(url, parsed, state = {}, at = null) {
     });
   }
 
+  // ----- Stream / Download: a real <video> -----
+  // The tile keeps both elements and shows one; tile.pb and tile.mediaEl point at whichever is
+  // live, so groups, Sync, the timeline, bookmarks, frame step and A/B need no special cases.
+  const wantTime0 = Number(state.currentTime) > 0 ? Number(state.currentTime) : 0;
+  let resolvedAt = 0, reResolved = false, downloading = false;
+  const videoPb = videoPlayback(video);
+  // set by the YouTube block below when there is an embed; the <video> versions take over while it plays
+  let ytSeekTo = () => {}, ytTogglePlay = () => {};
+
+  const showVideo = (on) => {
+    video.hidden = !on;
+    iframe.hidden = on;
+    if (on) { tile.video = video; tile.mediaEl = video; tile.pb = videoPb; }
+    else { tile.video = null; tile.mediaEl = iframe; if (tile.yt) tile.pb = ytPlayback(tile.yt); }
+    el.classList.toggle('as-video', on);
+  };
+  const refreshModeUI = () => {
+    if (!modeSel) return;
+    if (!streamable) { modeSel.hidden = true; return; }
+    modeSel.value = tile.webMode;
+    const opt = [...modeSel.options].find((o) => o.value === 'stream');
+    if (opt) opt.textContent = WebStream.labelFor('stream', tile.webQuality);
+    const playerOpt = [...modeSel.options].find((o) => o.value === 'player');
+    if (playerOpt) playerOpt.hidden = !canPlayer; // Twitch clips: stream / local only
+  };
+  // Streaming didn't work (YouTube refuses the direct URL, or yt-dlp can't resolve one). Rather
+  // than quietly dropping to the embed, show the thumbnail with the two things that do work.
+  const streamBlocked = (why) => {
+    showVideo(false); // hide the dead <video>; the cached thumbnail is the tile's background
+    // yt-dlp's own text can be a long "ERROR: [extractor] ..." line: keep the useful part on its own line
+    const reason = String(why).replace(/^ERROR:\s*/i, '').replace(/^\[[^\]]+\]\s*/, '').trim();
+    errorText.textContent = `${reason.replace(/\.?$/, '.')}\nDownload for full quality (exact frames, offline)${canPlayer ? ' — or use Player' : ''}.`;
+    makeBtn.classList.remove('hidden');
+    playerBtn.classList.toggle('hidden', !canPlayer);
+    retryBtn.classList.remove('hidden');
+    cancelBtn.classList.add('hidden'); bar.classList.add('hidden');
+    errorEl.classList.remove('hidden');
+    setStatus(`${tile.title}: ${why}`, 8000);
+  };
+  // yt-dlp gives us a direct URL; it expires, so we note when and re-resolve on error.
+  const loadStream = async ({ keepTime = true } = {}) => {
+    const at = keepTime ? (tile.pb ? tile.pb.time : 0) || wantTime0 : 0;
+    setStatus(`Resolving ${tile.title}…`, 2000);
+    const r = await window.api.resolveStream(url);
+    if (!tiles.includes(tile) || tile.webMode !== 'stream') return;
+    if (!r || !r.ok) {
+      // offline, private, or yt-dlp out of date: let the user pick instead of silently degrading
+      if (r && r.outdated && typeof showYtdlpOutdated === 'function') showYtdlpOutdated();
+      streamBlocked((r && r.error) || 'Could not resolve this video');
+      return;
+    }
+    tile.webQuality = r.height || 0;
+    resolvedAt = r.resolvedAt || Date.now();
+    refreshModeUI();
+    errorEl.classList.add('hidden');
+    showVideo(true);
+    video.src = r.url;
+    if (at > 0) video.currentTime = at;
+    if (state.paused === false) video.play().catch(() => {});
+  };
+  const playLocalFile = (file, at) => {
+    showVideo(true);
+    errorEl.classList.add('hidden');
+    video.src = window.api.videoUrl(file);
+    if (at > 0) video.currentTime = at;
+  };
+  const startDownload = async () => {
+    const have = await window.api.downloadedFile(parsed.type, parsed.id);
+    const at = tile.pb ? tile.pb.time : 0;
+    if (have) { playLocalFile(have, at); return; }
+    downloading = true;
+    el.classList.add('downloading');
+    errorText.textContent = 'Downloading the full-quality file…';
+    makeBtn.classList.add('hidden'); cancelBtn.classList.remove('hidden'); bar.classList.remove('hidden');
+    errorEl.classList.remove('hidden');
+    try {
+      const { file } = await window.api.downloadVideo(url, parsed.type, parsed.id);
+      if (!tiles.includes(tile)) return;
+      playLocalFile(file, at);
+    } catch (e) {
+      if (!tiles.includes(tile)) return;
+      const msg = String(e.message).replace(/^Error invoking remote method '[^']*': (Error: )?/, '');
+      errorText.textContent = msg;
+      setStatus(`${tile.title}: ${msg}`, 8000);
+      if (/Cancelled/i.test(msg)) setWebMode('stream');
+    } finally {
+      downloading = false;
+      el.classList.remove('downloading');
+      cancelBtn.classList.add('hidden'); bar.classList.add('hidden'); fill.style.width = '0';
+    }
+  };
+  tile.onDownloadProgress = (frac) => { fill.style.width = Math.round(frac * 100) + '%'; };
+  cancelBtn.addEventListener('click', () => window.api.cancelDownload(parsed.type, parsed.id));
+  makeBtn.addEventListener('click', () => setWebMode('download'));
+  playerBtn.addEventListener('click', () => setWebMode('player'));
+  for (const b of [makeBtn, cancelBtn, playerBtn]) b.addEventListener('pointerdown', (e) => e.stopPropagation());
+
+  // While the <video> is the live element the tile drives it directly; these replace the YouTube
+  // versions below whenever a stream or a downloaded file is playing (Twitch clips only ever use these).
+  const videoActive = () => tile.video === video;
+  tile.seekTo = (t) => {
+    if (!videoActive()) return ytSeekTo(t);
+    if (!video.duration) return;
+    video.currentTime = clamp(t, 0, video.duration);
+    tile.tick(); broadcast(tile, 'seek');
+  };
+  tile.seekBy = (dt) => tile.seekTo((tile.pb ? tile.pb.time : 0) + dt);
+  tile.togglePlay = () => {
+    if (!videoActive()) return ytTogglePlay();
+    togglePlay(video);
+    broadcast(tile, video.paused ? 'pause' : 'play');
+  };
+  tile.stepFrame = (dir) => { // stream and local files are frame-steppable; the embed is not
+    if (!videoActive() || !video.duration) return;
+    video.pause(); broadcast(tile, 'pause');
+    tile.seekTo(Frames.step(video.currentTime, effectiveFps(tile) || Frames.DEFAULT_FPS, dir));
+  };
+  const videoTick = () => {
+    playBtn.textContent = video.paused ? '▶' : '❚❚';
+    if (tile.scrubbing) return;
+    timeEl.textContent = Frames.format(video.currentTime, video.duration || 0, effectiveFps(tile), layout.timeDisplay);
+    if (video.duration) {
+      const frac = clamp(video.currentTime / video.duration, 0, 1);
+      seek.value = String(Math.round(frac * 10000));
+      seek.style.setProperty('--progress', (frac * 100).toFixed(2) + '%');
+    }
+  };
+  tile.refreshTime = () => { if (videoActive()) videoTick(); };
+  function setWebMode(mode, { initial = false } = {}) {
+    const next = streamable ? WebStream.mode(mode) : 'player';
+    const was = tile.webMode;
+    tile.webMode = next === 'player' && !canPlayer ? 'stream' : next;
+    refreshModeUI();
+    if (!initial && was === 'download' && downloading) window.api.cancelDownload(parsed.type, parsed.id);
+    const at = !initial && tile.pb ? tile.pb.time : wantTime0;
+    if (tile.webMode === 'player') {
+      video.pause(); video.removeAttribute('src'); video.load();
+      showVideo(false);
+      load(); // the embed
+      if (tile.yt && at > 0) setTimeout(() => { if (tile.webMode === 'player' && tile.yt) tile.pb.time = at; }, 1200);
+      return;
+    }
+    if (tile.webMode === 'download') { startDownload(); return; }
+    loadStream({ keepTime: !initial || wantTime0 > 0 });
+  }
+  tile.setWebMode = setWebMode;
+  if (modeSel) {
+    modeSel.addEventListener('change', () => setWebMode(modeSel.value));
+    for (const ev of ['pointerdown', 'dblclick', 'click']) modeSel.addEventListener(ev, (e) => e.stopPropagation());
+    modeSel.addEventListener('keydown', (e) => e.stopPropagation());
+  }
+
+  // the <video> behaves like a local video tile
+  video.addEventListener('loadedmetadata', () => {
+    if (video.videoWidth > 0 && video.videoHeight > 0) {
+      const ar = video.videoWidth / video.videoHeight;
+      if (Math.abs(ar - tile.aspect) > 0.001) { tile.aspect = ar; if (tile.board) tile.board.w = tile.board.h * ar; layoutTiles(); }
+    }
+    applyTileVolume(tile); video.muted = tile.ownMuted || !!(tile.group && tile.group.muted);
+    if (tile.group) videoPb.rate = tile.group.rate;
+    renderTimeline();
+  });
+  video.addEventListener('durationchange', () => { if (tile.refreshWebMarkers) tile.refreshWebMarkers(); renderTimeline(); });
+  video.addEventListener('error', () => {
+    if (tile.webMode !== 'stream') return;
+    // an expired URL looks like a plain media error: re-resolve once, then give up and use the embed
+    if (!reResolved || WebStream.isExpired(resolvedAt)) { reResolved = true; loadStream({ keepTime: true }); return; }
+    streamBlocked('YouTube blocked direct streaming.');
+  });
+  const onVideoPlayState = () => { if (tile.group && tile.group === active) renderGroupBar(); };
+  for (const ev of ['play', 'pause', 'ended']) video.addEventListener(ev, onVideoPlayState);
+  video.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.suppressClick) tile.togglePlay(); });
+  video.addEventListener('dblclick', () => { if (cmp.el.hidden) toggleTileFullscreen(el); });
+
   // ----- YouTube controls -----
-  const wantTime = Number(state.currentTime) > 0 ? Number(state.currentTime) : 0;
+  const wantTime = wantTime0;
   const wantPlaying = state.paused === false;
   const refreshMute = () => { muteBtn.textContent = tile.ownMuted || (tile.group && tile.group.muted) || tile.volume === 0 ? '🔇' : '🔊'; };
   tile.refreshMute = refreshMute;
@@ -2088,12 +2278,13 @@ function addWebTile(url, parsed, state = {}, at = null) {
       }
       if (ev === 'onStateChange' && tile.group && tile.group === active) renderGroupBar();
     });
-    // user actions; a synced group follows (like a local video's)
-    tile.seekTo = (t) => { pb.time = clamp(t, 0, pb.duration || Infinity); tile.tick(); broadcast(tile, 'seek'); };
-    tile.togglePlay = () => { const play = yt.paused; play ? yt.play() : yt.pause(); broadcast(tile, play ? 'play' : 'pause'); };
-    tile.seekBy = (dt) => tile.seekTo(pb.time + dt);
+    // user actions on the embed; a synced group follows (like a local video's)
+    ytSeekTo = (t) => { pb.time = clamp(t, 0, pb.duration || Infinity); tile.tick(); broadcast(tile, 'seek'); };
+    ytTogglePlay = () => { const play = yt.paused; play ? yt.play() : yt.pause(); broadcast(tile, play ? 'play' : 'pause'); };
     const { renderMarkers } = attachBookmarks(tile, el, pb);
+    tile.refreshWebMarkers = renderMarkers;
     tile.tick = () => {
+      if (videoActive()) return videoTick(); // streaming or playing the downloaded file
       const st = yt.st, now = pb.time;
       playBtn.textContent = yt.paused ? '▶' : '❚❚';
       if (!tile.scrubbing) {
@@ -2105,27 +2296,47 @@ function addWebTile(url, parsed, state = {}, at = null) {
         }
       }
     };
-    playBtn.addEventListener('click', () => tile.togglePlay());
-    seek.addEventListener('pointerdown', () => { tile.scrubbing = true; el.classList.add('scrubbing'); });
-    const endScrub = () => { tile.scrubbing = false; el.classList.remove('scrubbing'); };
-    seek.addEventListener('pointerup', endScrub);
-    seek.addEventListener('pointercancel', endScrub);
+    // play / mute / scrub-drag are wired once for both elements further down
     seek.addEventListener('input', () => {
+      if (videoActive()) return; // the shared handler below drives the <video>
       if (!yt.st.duration) return;
       const t = Number(seek.value) / 10000 * yt.st.duration;
       pb.time = t;
       timeEl.textContent = `${fmtTime(t)} / ${fmtTime(yt.st.duration)}`;
       broadcast(tile, 'seek');
     });
-    muteBtn.addEventListener('click', () => { setOwnMuted(tile, !tile.ownMuted); refreshMute(); });
-    tile.loop = state.loop === true;
+  }
+  // controls shared by both elements (Twitch clips have no YouTube block at all)
+  if (!tile.tick) tile.tick = () => { if (videoActive()) videoTick(); };
+  playBtn.addEventListener('click', () => tile.togglePlay());
+  muteBtn.addEventListener('click', () => { setOwnMuted(tile, !tile.ownMuted); refreshMute(); });
+  seek.addEventListener('pointerdown', () => { tile.scrubbing = true; el.classList.add('scrubbing'); });
+  const endVideoScrub = () => { tile.scrubbing = false; el.classList.remove('scrubbing'); };
+  seek.addEventListener('pointerup', endVideoScrub);
+  seek.addEventListener('pointercancel', endVideoScrub);
+  seek.addEventListener('input', () => {
+    if (!videoActive() || !video.duration) return;
+    const frac = Number(seek.value) / 10000;
+    video.currentTime = frac * video.duration;
+    seek.style.setProperty('--progress', (frac * 100).toFixed(2) + '%');
+    videoTick();
+    broadcast(tile, 'seek');
+  });
+  tile.loop = state.loop === true;
+  {
     const loopBtn = el.querySelector('.loop');
     loopBtn.addEventListener('click', () => setTileLoop(tile, !tile.loop));
     loopBtn.addEventListener('dblclick', (e) => e.stopPropagation());
-    applyTileLoop(tile);
   }
+  if (!tile.addBookmark && streamable) { const { renderMarkers } = attachBookmarks(tile, el, videoPb); tile.refreshWebMarkers = renderMarkers; }
+  applyTileLoop(tile);
   tile.setVolume = (pct) => { tile.volume = clamp(pct, 0, 100) / 100; applyTileVolume(tile); if (tile.volume > 0 && tile.ownMuted) setOwnMuted(tile, false); refreshMute(); };
-  tile.destroy = () => { clearTimeout(loadTimer); if (tile.yt) tile.yt.destroy(); };
+  tile.destroy = () => {
+    clearTimeout(loadTimer);
+    if (tile.yt) tile.yt.destroy();
+    if (downloading) window.api.cancelDownload(parsed.type, parsed.id);
+    try { video.pause(); video.removeAttribute('src'); video.load(); } catch {}
+  };
   for (const b of [playBtn, muteBtn]) b.addEventListener('dblclick', (e) => e.stopPropagation());
 
   // ----- shared tile behaviour: hover, select, remove, resize, drag -----
@@ -2153,8 +2364,10 @@ function addWebTile(url, parsed, state = {}, at = null) {
   attachTileDrag(tile);
 
   refreshMute();
+  refreshModeUI();
   canvas.appendChild(frag);
-  load();
+  // Stream is the default: nothing needs a click, and the tile is a normal video tile.
+  if (tile.webMode === 'player') load(); else setWebMode(tile.webMode, { initial: true });
   if (isBoard() && !tile.board && at) placeOnBoard([tile], at);
   updateChrome();
   return tile;
@@ -2729,6 +2942,8 @@ async function addPaths(paths, at = null) {
 
 let toolsWarned = false; // one status message if ffmpeg/ffprobe are missing
 window.api.onProxyProgress((p, frac) => { const t = tiles.find((x) => x.path === p); if (t && t.onProxyProgress) t.onProxyProgress(frac); });
+// yt-dlp download progress for web tiles in Local mode
+window.api.onDownloadProgress((pageUrl, frac) => { for (const t of tiles) if (t.url === pageUrl && t.onDownloadProgress) t.onDownloadProgress(frac); });
 
 // smooth seek-bar updates for every tile (timeupdate alone is too coarse)
 (function loop() {
@@ -2768,13 +2983,14 @@ function collectSession() {
       type: 'image', path: t.path, aspect: t.aspect, galleryH: Math.round(galleryHOf(t)),
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: [], sync: null, volume: 0, muted: false, playbackRate: 1, paused: true, currentTime: 0,
-    } : !t.video ? {
-      // web tile (YouTube / Twitch)
+    } : (t.type === 'youtube' || t.type === 'twitch') ? {
+      // web tile (YouTube / Twitch). Not "!t.video": in Stream / Local mode a web tile has a <video>.
       type: t.type, kind: t.kind, url: t.url, title: t.title, galleryH: Math.round(galleryHOf(t)),
       currentTime: t.pb ? t.pb.time : 0, volume: t.volume, muted: !!t.ownMuted, playbackRate: 1,
       paused: t.yt ? t.yt.paused : true, aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       color: t.hue, loop: !!t.loop, // YouTube only
+      webMode: t.webMode || 'stream', webQuality: t.webQuality || 0,
       bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
       sync: t.sync && t.pb ? { start: t.sync.start } : null,
     } : {
@@ -2941,7 +3157,80 @@ document.getElementById('btn-clear').addEventListener('click', () => {
   clearAll(); // removes tiles, dissolves groups, clears undo history
   sessionPath = null; updateChrome(); setStatus('Board cleared');
 });
+// ---------- App ▾ menu and the update banner ----------
+// The installed Windows build updates itself; the portable exe, Mac and dev runs are told a newer
+// release exists and get a link. The check is the only network call the app makes on its own.
+const appMenu = document.getElementById('app-menu');
+const appMenuList = appMenu.querySelector('.menu-list');
+const updBanner = document.getElementById('update-banner');
+const updText = updBanner.querySelector('.ub-text');
+const updAction = updBanner.querySelector('.ub-action');
+const updProgress = updBanner.querySelector('.ub-progress');
+const updFill = updBanner.querySelector('.ub-fill');
+let updInfo = null, bannerDismissed = false, noticeUrl = null;
+
+document.getElementById('btn-app').addEventListener('click', (e) => { e.stopPropagation(); appMenuList.hidden = !appMenuList.hidden; });
+window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !appMenu.contains(e.target)) appMenuList.hidden = true; });
+
+const showBanner = (text, actionLabel, onAction, { progress = false } = {}) => {
+  if (bannerDismissed) return;
+  updText.textContent = text;
+  updProgress.hidden = !progress;
+  updAction.hidden = !actionLabel;
+  if (actionLabel) { updAction.textContent = actionLabel; updAction.onclick = onAction; }
+  updBanner.hidden = false;
+};
+updBanner.querySelector('.ub-dismiss').addEventListener('click', () => { bannerDismissed = true; updBanner.hidden = true; });
+
+function refreshUpdateMenu() {
+  if (!updInfo) return;
+  const v = document.getElementById('btn-version');
+  v.textContent = `Version ${updInfo.version}`;
+  document.getElementById('upd-auto').checked = !!(settings.updates && settings.updates.auto);
+  document.getElementById('upd-prerelease').checked = !!(settings.updates && settings.updates.includePrerelease);
+}
+for (const [id, key] of [['upd-auto', 'auto'], ['upd-prerelease', 'includePrerelease']]) {
+  document.getElementById(id).addEventListener('change', (e) => {
+    settings.updates = { ...(settings.updates || { auto: true, includePrerelease: true }), [key]: e.target.checked };
+    saveSettings();
+    setStatus(key === 'auto'
+      ? (e.target.checked ? 'Update check on: once at launch' : 'Update check off: the app makes no network call of its own')
+      : (e.target.checked ? 'Pre-releases included' : 'Only full releases'));
+  });
+}
+document.getElementById('btn-check-updates').addEventListener('click', async () => {
+  appMenuList.hidden = true;
+  bannerDismissed = false;
+  setStatus('Checking for updates…', 3000);
+  if (updInfo && !updInfo.canAutoUpdate) setStatus('Auto-update runs only in the installed Windows app – checking for a newer release', 6000);
+  const r = await window.api.checkUpdates(true);
+  if (r && r.ok === false && r.error) setStatus('Update check failed: ' + r.error, 8000);
+});
+window.api.onUpdateEvent((msg) => {
+  if (!msg) return;
+  if (msg.kind === 'available') {
+    showBanner(`Version ${msg.version} is available`, 'Download', async () => {
+      showBanner(`Downloading version ${msg.version}…`, '', null, { progress: true });
+      await window.api.downloadUpdate();
+    });
+  } else if (msg.kind === 'progress') {
+    updProgress.hidden = false;
+    updFill.style.width = clamp(msg.percent, 0, 100) + '%';
+  } else if (msg.kind === 'ready') {
+    showBanner(`Version ${msg.version} is ready to install`, 'Restart to update', () => window.api.installUpdate());
+  } else if (msg.kind === 'notice') {
+    noticeUrl = msg.url;
+    showBanner(`Version ${msg.version} is available for download`, 'Open download page', () => window.api.openExternal(noticeUrl));
+  } else if (msg.kind === 'none') {
+    setStatus(`You are on the latest version (${msg.version})`, 5000);
+  } else if (msg.kind === 'error') {
+    setStatus('Update check failed: ' + msg.message, 8000);
+  }
+});
+window.api.updateInfo().then((i) => { updInfo = i; refreshUpdateMenu(); });
+
 document.getElementById('btn-cache').addEventListener('click', async () => {
+  appMenuList.hidden = true;
   const { bytes, files } = await window.api.cacheInfo();
   const mb = (bytes / 1048576).toFixed(0);
   if (!files) { setStatus('Cache is empty'); return; }
@@ -3349,6 +3638,7 @@ window.api.getSettings().then((s) => {
   sbEl.style.setProperty('--sb-width', settings.sidebar.width + 'px');
   sbEl.hidden = !settings.sidebar.open;
   sidebar.setTab(settings.sidebar.tab);
+  refreshUpdateMenu(); // the update checkboxes come from the same settings file
   renderFolders();
   renderPlaylists(); // from the cache in settings.json, no refetch
 });

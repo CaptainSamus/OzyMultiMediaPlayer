@@ -24,22 +24,56 @@
     "appId": "com.ozy.multimediaplayer",
     "productName": "Ozy Multi Media Player",
     "buildVersion": "0.2.0.3",
-    "directories": { "output": "dist" },
-    "files": ["main.js", "preload.js", "index.html", "app.js", "style.css", "lib/**/*", "!lib/**/*.test.js"],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "app.js",
+      "style.css",
+      "lib/**/*",
+      "!lib/**/*.test.js"
+    ],
     "afterPack": "scripts/adhoc-sign.js",
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "icon": "build/icon.png",
       "extraResources": [
-        { "from": "node_modules/ffmpeg-static/ffmpeg.exe", "to": "bin/ffmpeg.exe" },
-        { "from": "node_modules/ffprobe-static/bin/win32/${arch}/ffprobe.exe", "to": "bin/ffprobe.exe" },
-        { "from": "bin/yt-dlp.exe", "to": "bin/yt-dlp.exe" }
+        {
+          "from": "node_modules/ffmpeg-static/ffmpeg.exe",
+          "to": "bin/ffmpeg.exe"
+        },
+        {
+          "from": "node_modules/ffprobe-static/bin/win32/${arch}/ffprobe.exe",
+          "to": "bin/ffprobe.exe"
+        },
+        {
+          "from": "bin/yt-dlp.exe",
+          "to": "bin/yt-dlp.exe"
+        }
       ]
     },
     "mac": {
       "target": [
-        { "target": "dmg", "arch": ["arm64", "x64"] },
-        { "target": "zip", "arch": ["arm64", "x64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ],
       "category": "public.app-category.video",
       "icon": "build/icon.png",
@@ -47,14 +81,41 @@
       "identity": null,
       "artifactName": "OzyMultiMediaPlayer-${version}-mac-${arch}.${ext}",
       "extraResources": [
-        { "from": "bin/darwin-${arch}/ffmpeg", "to": "bin/ffmpeg" },
-        { "from": "node_modules/ffprobe-static/bin/darwin/${arch}/ffprobe", "to": "bin/ffprobe" },
-        { "from": "bin/yt-dlp", "to": "bin/yt-dlp" }
+        {
+          "from": "bin/darwin-${arch}/ffmpeg",
+          "to": "bin/ffmpeg"
+        },
+        {
+          "from": "node_modules/ffprobe-static/bin/darwin/${arch}/ffprobe",
+          "to": "bin/ffprobe"
+        },
+        {
+          "from": "bin/yt-dlp",
+          "to": "bin/yt-dlp"
+        }
       ]
     },
-    "publish": null,
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true },
-    "portable": { "artifactName": "OzyMultiMediaPlayer-${version}-portable.exe" },
-    "fileAssociations": [{ "ext": "mvp", "name": "Ozy Multi Media Player session", "role": "Editor" }]
+    "publish": {
+      "provider": "github",
+      "owner": "CaptainSamus",
+      "repo": "OzyMultiMediaPlayer"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "portable": {
+      "artifactName": "OzyMultiMediaPlayer-${version}-portable.exe"
+    },
+    "fileAssociations": [
+      {
+        "ext": "mvp",
+        "name": "Ozy Multi Media Player session",
+        "role": "Editor"
+      }
+    ]
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

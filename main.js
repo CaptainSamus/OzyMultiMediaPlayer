@@ -128,7 +128,8 @@ app.on('will-quit', () => { if (uiServer) uiServer.close(); });
 // Only YouTube / Twitch hosts (and our own loopback page) may be reached.
 const ALLOWED = ['youtube.com', 'youtube-nocookie.com', 'ytimg.com', 'googlevideo.com', 'google.com', 'gstatic.com', 'googleapis.com', 'ggpht.com',
   'twitch.tv', 'jtvnw.net', 'ttvnw.net', 'twitchcdn.net', 'live-video.net',
-  'd1ndex63qxojbr.cloudfront.net']; // Twitch clip video files (exact host, not all of cloudfront.net)
+  'd1ndex63qxojbr.cloudfront.net', // Twitch clip video files (exact host, not all of cloudfront.net)
+  'api.github.com', 'objects.githubusercontent.com']; // the update check, and the file electron-updater downloads
 const allowedHost = (h) => ALLOWED.some((d) => h === d || h.endsWith('.' + d));
 
 function sessionFileFromArgv(argv) {
@@ -161,6 +162,13 @@ function createWindow() {
     const initial = pendingOpen || sessionFileFromArgv(process.argv);
     pendingOpen = null;
     if (initial) win.webContents.send('open-session', initial);
+    // one check, 10 s after the window is up, and only if the user hasn't turned it off
+    setTimeout(() => {
+      if (!readSettings().updates.auto) return;
+      const up = getUpdater();
+      if (up) { up.allowPrerelease = readSettings().updates.includePrerelease; up.checkForUpdates().catch(() => {}); }
+      else noticeCheck(false);
+    }, 10000);
   });
 
   win.on('closed', () => { win = null; });
@@ -474,6 +482,83 @@ ipcMain.handle('thumb', (_e, filePath) => new Promise((resolve) => {
   thumbWaiting.push(job); nextThumb();
 }));
 
+// ---- updates ----
+// The installed Windows build updates itself with electron-updater. The portable exe (electron-updater
+// doesn't support it) and Mac (the build is unsigned, so it would refuse) just get told that a newer
+// release exists, with a link. Dev runs behave like the portable one. This check is the only network
+// call the app makes on its own, it runs once at launch, and App ▾ can turn it off.
+const REPO = { owner: 'CaptainSamus', repo: 'OzyMultiMediaPlayer' };
+const isPortable = () => !!process.env.PORTABLE_EXECUTABLE_DIR;
+const canAutoUpdate = () => process.platform === 'win32' && app.isPackaged && !isPortable();
+const appVersion = () => require('./package.json').buildVersion || app.getVersion();
+let updater = null, updateReady = false;
+const toWin = (msg) => { if (win && !win.webContents.isDestroyed()) win.webContents.send('update-event', msg); };
+
+function getUpdater() {
+  if (!canAutoUpdate()) return null;
+  if (!updater) {
+    try {
+      ({ autoUpdater: updater } = require('electron-updater'));
+      updater.autoDownload = false;
+      updater.autoInstallOnAppQuit = true;
+      updater.allowPrerelease = readSettings().updates.includePrerelease;
+      updater.on('update-available', (info) => toWin({ kind: 'available', version: info.version, notes: typeof info.releaseNotes === 'string' ? info.releaseNotes.slice(0, 500) : '' }));
+      updater.on('update-not-available', () => toWin({ kind: 'none', version: appVersion() }));
+      updater.on('download-progress', (p) => toWin({ kind: 'progress', percent: Math.round(p.percent) }));
+      updater.on('update-downloaded', (info) => { updateReady = true; toWin({ kind: 'ready', version: info.version }); });
+      updater.on('error', (err) => toWin({ kind: 'error', message: String(err && err.message || err).slice(0, 200) }));
+    } catch (e) { updater = null; }
+  }
+  return updater;
+}
+
+const Version = require('./lib/version'); // 4-part version comparison, with its own tests
+// portable / Mac / dev: ask GitHub what the newest release is and pass the link on
+async function noticeCheck(manual) {
+  const s = readSettings();
+  if (!manual && !s.updates.auto) return { ok: false, skipped: true };
+  try {
+    const { net } = require('electron');
+    const res = await net.fetch(`https://api.github.com/repos/${REPO.owner}/${REPO.repo}/releases?per_page=5`, { headers: { Accept: 'application/vnd.github+json' } });
+    if (!res.ok) return { ok: false, error: 'GitHub said ' + res.status };
+    const list = await res.json();
+    const releases = (Array.isArray(list) ? list : []).filter((r) => !r.draft && (s.updates.includePrerelease || !r.prerelease));
+    const mine = appVersion();
+    const newest = releases.find((r) => Version.newer(r.tag_name, mine));
+    if (newest) { toWin({ kind: 'notice', version: String(newest.tag_name).replace(/^v/, ''), url: newest.html_url }); return { ok: true, found: true }; }
+    toWin({ kind: 'none', version: mine });
+    return { ok: true, found: false };
+  } catch (e) { return { ok: false, error: String(e.message).slice(0, 160) }; }
+}
+
+ipcMain.handle('update-info', () => ({
+  version: appVersion(), platform: process.platform, packaged: app.isPackaged,
+  portable: isPortable(), canAutoUpdate: canAutoUpdate(), ready: updateReady,
+  settings: readSettings().updates,
+}));
+ipcMain.handle('update-check', async (_e, manual) => {
+  const s = readSettings();
+  if (!manual && !s.updates.auto) return { ok: false, skipped: true };
+  const up = getUpdater();
+  if (!up) return noticeCheck(manual); // portable, Mac, or dev
+  up.allowPrerelease = s.updates.includePrerelease;
+  try { await up.checkForUpdates(); return { ok: true }; }
+  catch (e) { const msg = String(e.message).slice(0, 160); if (manual) toWin({ kind: 'error', message: msg }); return { ok: false, error: msg }; }
+});
+ipcMain.handle('update-download', async () => {
+  const up = getUpdater();
+  if (!up) return { ok: false, error: 'This build installs updates by hand' };
+  try { await up.downloadUpdate(); return { ok: true }; }
+  catch (e) { const msg = String(e.message).slice(0, 160); toWin({ kind: 'error', message: msg }); return { ok: false, error: msg }; }
+});
+ipcMain.on('update-install', () => { const up = getUpdater(); if (up && updateReady) up.quitAndInstall(); });
+ipcMain.handle('open-external', (_e, url) => {
+  const u = String(url);
+  if (!/^https:\/\/(github\.com|api\.github\.com)\//.test(u)) return false; // only our own release pages
+  require('electron').shell.openExternal(u);
+  return true;
+});
+
 // ---- image sequences: the frame player's decode cache ----
 // PNG / JPEG / WebP frames are read by the renderer straight from the originals. EXR / TIFF / DPX
 // frames are decoded by ffmpeg into userData/frames/<key>/<frame>.png (8-bit display frames; the
@@ -596,6 +681,96 @@ function cancelFrames(key) {
 function cancelAllFrames() { for (const key of [...frameKeys.keys()]) cancelFrames(key); }
 ipcMain.on('cancel-frames', (_e, key) => cancelFrames(key));
 app.on('will-quit', cancelAllFrames);
+
+// ---- YouTube / Twitch clips as real video tiles (yt-dlp) ----
+// resolve-stream hands the renderer a direct URL a <video> can play (combined audio+video, so 720p
+// or less). Those URLs expire, so the answer is cached only until WebStream says it is stale.
+// download-video merges the best video+audio into the proxies cache for full quality and offline.
+const WebStream = require('./lib/webstream');
+const resolved = new Map(); // url -> { url, height, title, resolvedAt }
+ipcMain.handle('resolve-stream', (_e, pageUrl) => new Promise((resolve) => {
+  const key = String(pageUrl);
+  const hit = resolved.get(key);
+  if (hit && !WebStream.isExpired(hit.resolvedAt)) return resolve({ ok: true, ...hit });
+  if (!fs.existsSync(binPath('yt-dlp'))) return resolve({ ok: false, error: 'yt-dlp not found' });
+  // Which YouTube player client yields real formats changes over time, so try them in turn.
+  const clients = String(key).includes('youtube') || String(key).includes('youtu.be') ? WebStream.CLIENTS : [''];
+  let lastErr = '', outdated = false;
+  const attempt = (i) => {
+    if (i >= clients.length) return resolve({ ok: false, error: lastErr || 'Could not resolve this video', outdated });
+    execFile(binPath('yt-dlp'), WebStream.resolveArgs(key, clients[i]), { windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout: 60000 }, (err, stdout, stderr) => {
+      const info = WebStream.parseResolved(stdout);
+      if (!info) {
+        lastErr = String(stderr || (err && err.message) || '').trim().split('\n').slice(-1)[0] || lastErr;
+        outdated = outdated || Playlist.isOutdatedError(stderr);
+        return attempt(i + 1);
+      }
+      const entry = { ...info, client: clients[i], resolvedAt: Date.now() };
+      resolved.set(key, entry);
+      resolve({ ok: true, ...entry });
+    });
+  };
+  attempt(0);
+}));
+
+const downloadJobs = new Map(); // out path -> { child, reject }
+let downloadQueue = Promise.resolve();
+ipcMain.handle('download-video', (e, pageUrl, type, id) => {
+  const send = (...args) => { if (!e.sender.isDestroyed()) e.sender.send('download-progress', ...args); };
+  const run = () => new Promise((resolve, reject) => {
+    if (!fs.existsSync(binPath('yt-dlp'))) return reject(new Error('yt-dlp not found'));
+    fs.mkdirSync(proxyDir(), { recursive: true });
+    const out = path.join(proxyDir(), WebStream.downloadName(type, id));
+    if (fs.existsSync(out)) { send(pageUrl, 1); return resolve({ file: out }); } // already downloaded
+    const tmp = out + '.part.mp4';
+    const binDir = path.dirname(binPath('ffmpeg')); // yt-dlp needs ffmpeg to merge the two streams
+    // the client that resolving found works goes first; otherwise try them in order
+    const hitClient = (resolved.get(String(pageUrl)) || {}).client;
+    const clients = String(pageUrl).includes('youtu') ? [...new Set([hitClient || '', ...WebStream.CLIENTS])] : [''];
+    let ci = 0, started = false, tail = '';
+    const attempt = () => {
+    const child = spawn(binPath('yt-dlp'), WebStream.downloadArgs(pageUrl, tmp, binDir, clients[ci]), { windowsHide: true });
+    downloadJobs.set(out, { child, reject });
+    const onText = (buf) => {
+      const s = buf.toString();
+      tail = (tail + s).slice(-2000);
+      const frac = WebStream.parseProgress(s);
+      if (frac !== null) { started = true; send(pageUrl, frac); }
+    };
+    child.stdout.on('data', onText); // yt-dlp prints progress on stdout
+    child.stderr.on('data', onText);
+    child.on('close', (code) => {
+      downloadJobs.delete(out);
+      // no formats for this client and nothing downloaded yet: try the next one
+      if (code !== 0 && code !== null && !started && ++ci < clients.length) { tail = ''; return attempt(); }
+      if (code === 0) {
+        // yt-dlp may add its own extension when merging; take whatever it actually wrote
+        const made = fs.existsSync(tmp) ? tmp : ['.mp4', '.mkv', '.webm'].map((x) => tmp + x).find((p) => fs.existsSync(p));
+        if (!made) return reject(new Error('yt-dlp finished but wrote no file'));
+        try { fs.renameSync(made, out); } catch (err) { return reject(new Error('Could not save the download: ' + err.message)); }
+        send(pageUrl, 1);
+        resolve({ file: out });
+      } else {
+        for (const p of [tmp, tmp + '.mp4', tmp + '.mkv', tmp + '.webm']) { try { fs.unlinkSync(p); } catch {} }
+        reject(new Error(code === null ? 'Cancelled' : 'yt-dlp failed:\n' + tail.trim().split('\n').slice(-3).join('\n')));
+      }
+    });
+    };
+    attempt();
+  });
+  const p = downloadQueue.then(run, run);
+  downloadQueue = p.catch(() => {});
+  return p;
+});
+ipcMain.on('cancel-download', (_e, type, id) => {
+  const job = downloadJobs.get(path.join(proxyDir(), WebStream.downloadName(type, id)));
+  if (job) job.child.kill();
+});
+// is a download already in the cache? (download mode is then instant)
+ipcMain.handle('downloaded-file', (_e, type, id) => {
+  const out = path.join(proxyDir(), WebStream.downloadName(type, id));
+  return fs.existsSync(out) ? out : null;
+});
 
 // ---- YouTube playlists via the bundled yt-dlp ----
 // yt-dlp runs as its own process (it talks to YouTube directly, outside the renderer's allowlist).

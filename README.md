@@ -190,6 +190,18 @@ itself when you click **Update yt-dlp** in the sidebar.
     row says how many layers a sequence has.
   - A missing frame shows the one before it with a "frame N missing"
     badge.
+- **How web videos play.** YouTube videos and Twitch clips play as real
+  videos: the bundled yt-dlp resolves the actual stream, so they start
+  without a click and behave like local files (timeline, Sync, frame step,
+  A/B, bookmarks). The pulldown on the tile's title bar switches between
+  **720p** (the direct stream), **Player** (YouTube's own embed, for higher
+  quality, and it needs a click) and **Local** (yt-dlp downloads the
+  full-quality file into the cache, with progress and Cancel; after that it
+  plays offline and frame-exact). Stream URLs expire, so a tile that has sat
+  for hours re-resolves itself. If YouTube refuses the direct stream (it
+  sometimes blocks them outright), the tile says so over its thumbnail and
+  offers the two things that do work: **Download** or **Player**, and it
+  remembers which you pick. Twitch live channels stay embed-only.
 - **YouTube / Twitch tiles.** YouTube tiles use the app's own play, scrub,
   mute and volume controls and join Play all / Pause all and group mute /
   volume. They also get bookmarks, appear on the timeline, and join Sync and
@@ -227,8 +239,17 @@ itself when you click **Update yt-dlp** in the sidebar.
   (it lights up), and a second click turns them all off.
 - **Master volume** (toolbar slider) scales every video's own volume. New
   videos start at a quiet 10% so twenty of them don't blast you.
-- **Cache** (toolbar) shows how much space playable copies, thumbnails
-  and decoded sequence frames use, and clears them.
+- **App ▾** (toolbar) holds **Cache…** (how much space playable copies,
+  thumbnails, downloads and decoded sequence frames use, and clears them),
+  **Check for updates**, and the version you're running.
+- **Updates.** The installed Windows app updates itself: a banner says a new
+  version is available, **Download** shows progress, then **Restart to
+  update** installs it. The portable exe and the Mac app can't self-install,
+  so they show the same banner with a link to the download page instead.
+  The check asks GitHub for the newest release once, about ten seconds after
+  launch; **App ▾ → Check automatically on launch** turns it off, and with it
+  off the app makes no network call of its own at all. **Include
+  pre-releases** decides whether test builds count.
 - **Save** writes a `.mvp` session file (plain JSON): every tile with its
   time, volume, mute, speed, position, bookmarks and group, plus the layout.
   It saves in place once the session has a file; **right-click Save** (or

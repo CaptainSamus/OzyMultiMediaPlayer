@@ -17,6 +17,13 @@ contextBridge.exposeInMainWorld('api', {
   clearCache: () => ipcRenderer.invoke('clear-cache'),
   parent: () => ipcRenderer.invoke('twitch-parent'),
   version: () => ipcRenderer.invoke('app-version'),
+  // updates: the installed Windows build updates itself; everything else just gets told
+  updateInfo: () => ipcRenderer.invoke('update-info'),
+  checkUpdates: (manual) => ipcRenderer.invoke('update-check', !!manual),
+  downloadUpdate: () => ipcRenderer.invoke('update-download'),
+  installUpdate: () => ipcRenderer.send('update-install'),
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  onUpdateEvent: (cb) => ipcRenderer.on('update-event', (_e, msg) => cb(msg)),
   webThumb: (id) => ipcRenderer.invoke('web-thumb', id),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (s) => ipcRenderer.invoke('save-settings', s),
@@ -39,4 +46,10 @@ contextBridge.exposeInMainWorld('api', {
   onFramesReady: (cb) => ipcRenderer.on('frames-ready', (_e, key, from, to) => cb(key, from, to)),
   onFramesFailed: (cb) => ipcRenderer.on('frames-failed', (_e, key, from, to, msg) => cb(key, from, to, msg)),
   ffmpegHas: (name) => ipcRenderer.invoke('ffmpeg-has', name),
+  // YouTube / Twitch clips as real video tiles
+  resolveStream: (pageUrl) => ipcRenderer.invoke('resolve-stream', pageUrl),
+  downloadVideo: (pageUrl, type, id) => ipcRenderer.invoke('download-video', pageUrl, type, id),
+  cancelDownload: (type, id) => ipcRenderer.send('cancel-download', type, id),
+  downloadedFile: (type, id) => ipcRenderer.invoke('downloaded-file', type, id),
+  onDownloadProgress: (cb) => ipcRenderer.on('download-progress', (_e, pageUrl, frac) => cb(pageUrl, frac)),
 });
