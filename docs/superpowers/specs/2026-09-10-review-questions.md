@@ -34,10 +34,20 @@ Deferred decisions to raise once v1 is complete and Mark walks the whole app.
    looks flat. Add a Cineon log→lin option in the sequence popover later?
    Raised 2026-09-11 during Task 23.
 
-7. **EXR layers/parts.** ffmpeg decodes an EXR's default layer only; multi-
-   layer or multi-part renders show the first. Do you need a layer picker
-   (e.g. beauty vs. AOVs)? Raised 2026-09-11 after Task 23.
+7. **EXR layers/parts.** Decided 2026-09-12: build it (plan Task 25, a
+   Layer dropdown in the sequence popover fed by an EXR header parser).
 
 8. **Live GPU exposure.** Exposure/colour changes re-decode in ~0.5 s per
    change (frame cache in linear would allow instant slider response via a
    WebGL shader, at the cost of RAM). Worth it? Raised after Task 23.
+
+9. **YouTube direct streaming is blocked (2026-09-12).** YouTube's default
+   web client gives yt-dlp no combined formats, and the URLs an alternate
+   client returns are bound to yt-dlp's own session (HTTP 403 from
+   Chromium/Node with any headers). So Stream mode currently fails on this
+   machine and the tile offers Download (full quality via DASH 401+140,
+   exact frames, offline) or Player (embed). Dual-element HD streaming
+   would hit the same 403. Decision taken: keep Stream as the first
+   attempt so it starts working if yt-dlp regains formats; default is one
+   constant if Mark prefers Download-by-default. Possible future route: a
+   yt-dlp→loopback progressive proxy (play while downloading).

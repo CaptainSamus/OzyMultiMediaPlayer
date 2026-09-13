@@ -33,9 +33,12 @@ thumbnail (fetched once when the tile was added, stored with the other
 thumbnails), so it still looks like the video it is. Twitch tiles show
 a generic icon. Nothing else in the app is affected.
 
-- The app never phones home, checks for updates, or loads any remote
-  asset for its own UI. All scripts, styles, fonts, and icons ship in the
-  package. The installer must not require a connection to run.
+- The app loads no remote asset for its own UI: all scripts, styles, fonts
+  and icons ship in the package, and the installer needs no connection.
+- One exception, added in v0.2.0.4 (feature 10): the update check. It runs
+  once about 10 s after launch, asks GitHub for the newest release, and can
+  be turned off in **App ▾** ("Check automatically on launch"). With it off
+  the app makes no network call of its own at all. Nothing else phones home.
 - ffmpeg, ffprobe, and yt-dlp ship inside the installer, never downloaded
   on first run. yt-dlp's self-update runs only when the user clicks it.
 
