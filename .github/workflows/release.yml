@@ -36,10 +36,26 @@ jobs:
       # yt-dlp for this OS; on macOS also ffmpeg for both arm64 and x64 (ffmpeg-static only installs one)
       - run: npm run prefetch
 
-      # The tag's 4-part version into package.json: top-level buildVersion is what the window title
-      # shows (electron-builder strips "build" from the packaged package.json, top-level fields stay),
-      # build.buildVersion is the Windows file version / CFBundleVersion.
-      - run: node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync('package.json','utf8')),v=process.argv[1];p.buildVersion=v;p.build.buildVersion=v;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')" "${GITHUB_REF_NAME#v}"
+      # The tag drives three fields:
+      #   version        a semver derived from the tag (v0.2.0.5 -> 0.2.5). npm and electron-builder
+      #                  both need semver, and every artifact name plus latest.yml comes from it.
+      #   buildVersion   the tag's own 4-part number, top-level (the window title reads this; the
+      #                  packaged package.json keeps top-level fields but loses "build")
+      #   build.buildVersion  the same, for the Windows file version / CFBundleVersion
+      - run: |
+          node -e "
+            const fs = require('fs');
+            const Version = require('./lib/version');
+            const tag = process.argv[1];
+            const semver = Version.semverFromTag(tag);
+            if (!semver) { console.error('tag is not a version: ' + tag); process.exit(1); }
+            const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            p.version = semver;
+            p.buildVersion = tag;
+            p.build.buildVersion = tag;
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+            console.log('tag ' + tag + ' -> version ' + semver + ', buildVersion ' + tag);
+          " "${GITHUB_REF_NAME#v}"
 
       # buildVersion from the tag so file properties / CFBundleVersion carry all four parts
       - run: npx electron-builder --publish never -c.buildVersion="${GITHUB_REF_NAME#v}"
