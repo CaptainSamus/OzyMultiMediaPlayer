@@ -1,0 +1,51 @@
+{
+  "format": "multi-video-player-session",
+  "version": 4,
+  "savedAt": "2026-09-11T10:00:00.000Z",
+  "layout": {
+    "mode": "gallery",
+    "rowHeight": 260,
+    "board": null,
+    "linked": true,
+    "timeDisplay": "clock",
+    "timelineExpanded": true,
+    "timelineHeight": 200
+  },
+  "masterVolume": 0.9,
+  "videos": [
+    {
+      "type": "file",
+      "path": "C:\\Users\\Mark\\Videos\\ozy-samples\\h264.mp4",
+      "color": "blue",
+      "loop": true,
+      "currentTime": 1,
+      "volume": 0.3,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "aspect": 1.7777777777777777,
+      "board": null,
+      "bookmarks": [
+        {
+          "t": 2,
+          "label": "x",
+          "color": "green"
+        }
+      ],
+      "sync": null
+    },
+    {
+      "type": "image",
+      "path": "C:\\Users\\Mark\\Videos\\ozy-samples\\still-4x3.jpg",
+      "aspect": 1.3333333333333333,
+      "board": null,
+      "bookmarks": [],
+      "sync": null,
+      "volume": 0,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "currentTime": 0
+    }
+  ]
+}

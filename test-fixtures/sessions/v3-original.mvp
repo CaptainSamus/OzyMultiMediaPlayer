@@ -1,0 +1,61 @@
+{
+  "format": "multi-video-player-session",
+  "version": 3,
+  "savedAt": "2026-08-01T10:00:00.000Z",
+  "layout": {
+    "mode": "gallery",
+    "rowHeight": 300,
+    "board": null,
+    "linked": true
+  },
+  "masterVolume": 0.8,
+  "videos": [
+    {
+      "path": "C:\\Users\\Mark\\Videos\\ozy-samples\\h264.mp4",
+      "currentTime": 3.5,
+      "volume": 0.25,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "aspect": 1.7777777777777777,
+      "board": null,
+      "bookmarks": [
+        {
+          "t": 1.5,
+          "label": "start"
+        },
+        {
+          "t": 4,
+          "label": ""
+        }
+      ]
+    },
+    {
+      "path": "C:\\Users\\Mark\\Videos\\ozy-samples\\hevc.mp4",
+      "currentTime": 0,
+      "volume": 0.1,
+      "muted": true,
+      "playbackRate": 1.5,
+      "paused": true,
+      "aspect": 1.7777777777777777,
+      "board": {
+        "x": 40,
+        "y": 40,
+        "w": 480,
+        "h": 270
+      },
+      "bookmarks": []
+    },
+    {
+      "path": "C:\\Users\\Mark\\Videos\\ozy-samples\\does-not-exist.mp4",
+      "currentTime": 0,
+      "volume": 0.1,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "aspect": 1.7777777777777777,
+      "board": null,
+      "bookmarks": []
+    }
+  ]
+}

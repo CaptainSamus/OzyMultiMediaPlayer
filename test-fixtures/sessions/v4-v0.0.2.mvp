@@ -1,0 +1,103 @@
+{
+  "format": "multi-video-player-session",
+  "version": 4,
+  "savedAt": "2026-08-20T10:00:00.000Z",
+  "layout": {
+    "mode": "board",
+    "rowHeight": 240,
+    "board": {
+      "panX": 20,
+      "panY": 20,
+      "zoom": 1
+    },
+    "linked": true,
+    "timeDisplay": "timecode"
+  },
+  "masterVolume": 1,
+  "videos": [
+    {
+      "type": "file",
+      "path": "C:\\Users\\Mark\\Videos\\ozy-samples\\h264.mp4",
+      "currentTime": 2,
+      "volume": 0.2,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "aspect": 1.7777777777777777,
+      "board": {
+        "x": 0,
+        "y": 0,
+        "w": 427,
+        "h": 240
+      },
+      "bookmarks": [
+        {
+          "t": 1,
+          "label": "a",
+          "color": "pink"
+        }
+      ],
+      "sync": {
+        "start": 0
+      }
+    },
+    {
+      "type": "file",
+      "path": "C:\\Users\\Mark\\Videos\\ozy-samples\\hevc.mp4",
+      "currentTime": 5,
+      "volume": 0.2,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "aspect": 1.7777777777777777,
+      "board": {
+        "x": 440,
+        "y": 0,
+        "w": 427,
+        "h": 240
+      },
+      "bookmarks": [],
+      "sync": {
+        "start": 1.25
+      }
+    },
+    {
+      "type": "youtube",
+      "kind": "video",
+      "url": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+      "title": "YouTube · aqz-KE-bpKQ",
+      "currentTime": 0,
+      "volume": 0.1,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "aspect": 1.7777777777777777,
+      "board": {
+        "x": 0,
+        "y": 260,
+        "w": 427,
+        "h": 240
+      },
+      "bookmarks": [],
+      "sync": null
+    }
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "name": "Group 1",
+      "color": "blue",
+      "members": [
+        0,
+        1
+      ],
+      "sync": true,
+      "sticky": true,
+      "loop": "off",
+      "range": null,
+      "volume": 1,
+      "muted": false,
+      "rate": 1
+    }
+  ]
+}

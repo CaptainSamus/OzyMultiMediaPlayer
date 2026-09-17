@@ -1,0 +1,83 @@
+{
+  "format": "multi-video-player-session",
+  "version": 4,
+  "savedAt": "2026-09-12T10:00:00.000Z",
+  "layout": {
+    "mode": "board",
+    "rowHeight": 240,
+    "board": {
+      "panX": 8,
+      "panY": 8,
+      "zoom": 1
+    },
+    "linked": true,
+    "timeDisplay": "frames",
+    "timelineExpanded": false,
+    "timelineHeight": 140
+  },
+  "masterVolume": 1,
+  "videos": [
+    {
+      "type": "file",
+      "path": "C:\\Users\\Mark\\Videos\\ozy-samples\\h264.mp4",
+      "color": "blue",
+      "loop": false,
+      "fpsOverride": 30,
+      "currentTime": 0,
+      "volume": 0.1,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "aspect": 1.7777777777777777,
+      "board": {
+        "x": 0,
+        "y": 0,
+        "w": 427,
+        "h": 240
+      },
+      "bookmarks": [],
+      "sync": null
+    },
+    {
+      "type": "sequence",
+      "dir": "C:\\Users\\Mark\\Videos\\ozy-samples\\seq-png",
+      "path": "C:\\Users\\Mark\\Videos\\ozy-samples\\seq-png\\plate_####.png",
+      "color": "pink",
+      "loop": false,
+      "seq": {
+        "name": "plate_",
+        "sep": "",
+        "pad": 4,
+        "ext": "png",
+        "start": 1,
+        "end": 48,
+        "count": 48,
+        "missing": [],
+        "single": false,
+        "fps": 24,
+        "exposure": 0,
+        "colour": "srgb"
+      },
+      "currentTime": 0.5,
+      "volume": 0,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "aspect": 1.7777777777777777,
+      "board": {
+        "x": 440,
+        "y": 0,
+        "w": 427,
+        "h": 240
+      },
+      "bookmarks": [
+        {
+          "t": 0.25,
+          "label": "f6",
+          "color": "yellow"
+        }
+      ],
+      "sync": null
+    }
+  ]
+}

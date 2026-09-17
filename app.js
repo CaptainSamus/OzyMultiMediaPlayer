@@ -3030,24 +3030,25 @@ function collectSession() {
 async function applySession(data) {
   if (!data || !Array.isArray(data.videos)) throw new Error('Not a Multi Video Player session file.');
   clearAll();
-  const lay = data.layout || {};
-  const wantMode = lay.mode === 'board' ? 'board' : 'gallery';
-  if (Number(lay.rowHeight) > 0) layout.rowHeight = clamp(Number(lay.rowHeight), MIN_H, MAX_H);
-  layout.galleryScale = Number(lay.galleryScale) > 0 ? clamp(Number(lay.galleryScale), MIN_GS, MAX_GS) : 1;
-  layout.timeDisplay = ['clock', 'frames', 'timecode'].includes(lay.timeDisplay) ? lay.timeDisplay : 'clock';
-  layout.timelineExpanded = lay.timelineExpanded === true;
-  layout.timelineHeight = Number(lay.timelineHeight) > 0 ? clamp(Number(lay.timelineHeight), 60, 320) : 140;
-  const bv = lay.board;
-  if (bv && isFinite(bv.panX) && isFinite(bv.panY) && bv.zoom > 0) {
-    board.panX = Number(bv.panX); board.panY = Number(bv.panY);
-    board.zoom = clamp(Number(bv.zoom), MIN_ZOOM, MAX_ZOOM);
+  // every rule for reading an old file lives in lib/session.js, where it is tested against fixtures
+  const L = Session.layout(data.layout, {
+    minH: MIN_H, maxH: MAX_H, minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM,
+    minScale: MIN_GS, maxScale: MAX_GS, minTimelineH: 60, maxTimelineH: 320,
+  });
+  if (L.rowHeight !== null) layout.rowHeight = L.rowHeight;
+  layout.galleryScale = L.galleryScale;
+  layout.timeDisplay = L.timeDisplay;
+  layout.timelineExpanded = L.timelineExpanded;
+  layout.timelineHeight = L.timelineHeight;
+  if (L.board) {
+    board.panX = L.board.panX; board.panY = L.board.panY; board.zoom = L.board.zoom;
     board.initialized = true;
   } else {
     board.initialized = false;
   }
-  setLinked(lay.linked ?? true);
-  setMode(wantMode);
-  setMasterVolume(data.masterVolume ?? DEFAULT_MASTER_VOLUME);
+  setLinked(L.linked);
+  setMode(L.mode);
+  setMasterVolume(Session.masterVolume(data.masterVolume, DEFAULT_MASTER_VOLUME));
 
   let missing = 0;
   const byIndex = new Map(); // index in data.videos -> tile (v3 files and bad entries leave gaps)
@@ -3071,15 +3072,13 @@ async function applySession(data) {
   }
   // groups (session v4); v3 files have none
   nextGroupId = 1;
-  for (const sg of Array.isArray(data.groups) ? data.groups : []) {
-    const idx = Array.isArray(sg.members) ? sg.members.filter((i) => byIndex.has(i)) : [];
-    if (idx.length < 2) continue;
-    const g = createGroup(idx.map((i) => byIndex.get(i)), { ...sg, sync: false });
-    if (Number.isInteger(sg.id)) g.id = sg.id;
+  for (const sg of Session.groups(data.groups, (i) => byIndex.has(i))) {
+    const g = createGroup(sg.members.map((i) => byIndex.get(i)), { ...sg, sync: false });
+    if (sg.id !== null) g.id = sg.id;
     if (sg.sync) {
       // restore saved starts rather than recapturing them from not-yet-loaded videos
       g.sync = true;
-      for (const i of idx) { const s = data.videos[i].sync; byIndex.get(i).sync = { start: s && isFinite(s.start) ? Number(s.start) : 0 }; }
+      for (const i of sg.members) byIndex.get(i).sync = { start: Session.syncStart(data.videos[i]) };
     }
     nextGroupId = Math.max(nextGroupId, g.id + 1);
   }
@@ -3087,7 +3086,7 @@ async function applySession(data) {
   if (isBoard()) placeOnBoard(tiles.filter((t) => !t.board));
   layoutTiles();
   // older session files have no zoom / view saved: fit once the videos are in
-  if (!(Number(lay.rowHeight) > 0) || (isBoard() && !board.initialized)) scheduleFit();
+  if (L.rowHeight === null || (isBoard() && !board.initialized)) scheduleFit();
   undoStack.clear(); // a freshly opened session starts with no history
   return { loaded: data.videos.length, missing };
 }

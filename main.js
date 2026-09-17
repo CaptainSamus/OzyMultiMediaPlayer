@@ -492,6 +492,14 @@ const isPortable = () => !!process.env.PORTABLE_EXECUTABLE_DIR;
 const canAutoUpdate = () => process.platform === 'win32' && app.isPackaged && !isPortable();
 const appVersion = () => require('./package.json').buildVersion || app.getVersion();
 let updater = null, updateReady = false;
+// electron-updater's raw errors are not for reading: app-update.yml is missing in a build that
+// wasn't produced by an installer, and a network failure shouldn't look like a bug in the app.
+function updateErrorText(err) {
+  const raw = String((err && err.message) || err || '');
+  if (/app-update\.yml|ENOENT/i.test(raw)) return 'This build cannot update itself; download the new version instead';
+  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|network|getaddrinfo/i.test(raw)) return 'Could not reach GitHub to check for updates';
+  return raw.split('\n')[0].slice(0, 160);
+}
 const toWin = (msg) => { if (win && !win.webContents.isDestroyed()) win.webContents.send('update-event', msg); };
 
 function getUpdater() {
@@ -543,7 +551,7 @@ ipcMain.handle('update-check', async (_e, manual) => {
   if (!up) return noticeCheck(manual); // portable, Mac, or dev
   up.allowPrerelease = s.updates.includePrerelease;
   try { await up.checkForUpdates(); return { ok: true }; }
-  catch (e) { const msg = String(e.message).slice(0, 160); if (manual) toWin({ kind: 'error', message: msg }); return { ok: false, error: msg }; }
+  catch (e) { const msg = updateErrorText(e); if (manual) toWin({ kind: 'error', message: msg }); return { ok: false, error: msg }; }
 });
 ipcMain.handle('update-download', async () => {
   const up = getUpdater();

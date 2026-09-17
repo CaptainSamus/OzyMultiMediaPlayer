@@ -2,3 +2,4 @@ node_modules/
 *.mvp
 dist/
 bin/
+!test-fixtures/sessions/*.mvp

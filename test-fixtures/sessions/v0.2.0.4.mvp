@@ -1,0 +1,94 @@
+{
+  "format": "multi-video-player-session",
+  "version": 4,
+  "savedAt": "2026-09-14T10:00:00.000Z",
+  "layout": {
+    "mode": "gallery",
+    "rowHeight": 240,
+    "galleryScale": 1.5,
+    "board": null,
+    "linked": true,
+    "timeDisplay": "clock",
+    "timelineExpanded": false,
+    "timelineHeight": 140
+  },
+  "masterVolume": 1,
+  "videos": [
+    {
+      "type": "file",
+      "path": "C:\\Users\\Mark\\Videos\\ozy-samples\\h264.mp4",
+      "galleryH": 180,
+      "color": "blue",
+      "loop": false,
+      "fpsOverride": null,
+      "currentTime": 0,
+      "volume": 0.1,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "aspect": 1.7777777777777777,
+      "board": null,
+      "bookmarks": [],
+      "sync": null
+    },
+    {
+      "type": "youtube",
+      "kind": "video",
+      "url": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+      "title": "Big Buck Bunny",
+      "galleryH": 360,
+      "webMode": "player",
+      "webQuality": 360,
+      "color": "pink",
+      "loop": false,
+      "currentTime": 12,
+      "volume": 0.1,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "aspect": 1.7777777777777777,
+      "board": null,
+      "bookmarks": [
+        {
+          "t": 5,
+          "label": "b",
+          "color": "white"
+        }
+      ],
+      "sync": null
+    },
+    {
+      "type": "sequence",
+      "dir": "C:\\Users\\Mark\\Videos\\ozy-samples\\seq-layers",
+      "path": "C:\\Users\\Mark\\Videos\\ozy-samples\\seq-layers\\layers.####.exr",
+      "galleryH": 240,
+      "color": "yellow",
+      "loop": false,
+      "seq": {
+        "name": "layers",
+        "sep": ".",
+        "pad": 4,
+        "ext": "exr",
+        "start": 1,
+        "end": 4,
+        "count": 4,
+        "missing": [],
+        "single": false,
+        "fps": 24,
+        "exposure": 1,
+        "colour": "rec709",
+        "layer": "diffuse",
+        "part": 0
+      },
+      "currentTime": 0,
+      "volume": 0,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "aspect": 1,
+      "board": null,
+      "bookmarks": [],
+      "sync": null
+    }
+  ]
+}
