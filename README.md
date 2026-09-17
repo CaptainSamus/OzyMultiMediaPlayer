@@ -211,16 +211,19 @@ itself when you click **Update yt-dlp** in the sidebar.
   again when it's off).
 - **Two layouts.** Tiles always use each item's real aspect ratio.
   - **Gallery** (attached): tiles flow in rows, each with its own size. Drag
-    a tile's corner to resize just that one. The zoom slider (or `Ctrl`+wheel
-    and `+` / `-`) scales every tile together, keeping the relative sizes you
-    set. **Fit all** scales them all to fill the window with no scrolling.
+    a tile's corner to resize just that one. The zoom slider (or `Ctrl`+wheel,
+    `+` / `-`, or the plain wheel with **Wheel zoom** ticked) scales every tile
+    together, keeping the relative sizes you set. **Fit all** scales them all to fill the window with no scrolling.
     Sizes are saved in the session.
   - **Board** (detached): an infinite canvas, Miro-style. Drag a tile by its
     title bar or picture to move it; pull a corner to resize just that one
     (double-click a corner to reset its size). Middle-mouse or `Alt`-drag
-    pans, the wheel scrolls, `Ctrl`+wheel zooms at the cursor. The
-    **✋ Pan + zoom** tool (`H`) makes plain left-drag pan and the plain
-    wheel zoom at the cursor (`Shift`+wheel still scrolls sideways). **Fit all** frames
+    pans, the wheel scrolls, `Ctrl`+wheel zooms at the cursor. Tick
+    **Wheel zoom** (next to the zoom slider) and the plain wheel zooms at the
+    cursor instead, while left-drag still lassos and middle-mouse still pans.
+    The **✋ Pan + zoom** tool (`H`) makes plain left-drag pan and the plain
+    wheel zoom at the cursor (`Shift`+wheel still scrolls sideways). Wheel
+    zooming moves in gentle steps, about 8% per notch. **Fit all** frames
     everything. **Tidy ▾** has two arrangements: **Fit to view** makes every
     tile the same height, as big as fits in the current view, in reading
     order; **Grid** keeps each tile's size and packs them edge to edge into a

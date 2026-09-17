@@ -1431,23 +1431,32 @@ grid.addEventListener('pointerdown', (e) => {
 // stop Chromium's middle-click autoscroll from fighting the pan
 grid.addEventListener('mousedown', (e) => { if (isBoard() && e.button === 1) e.preventDefault(); });
 
-// wheel: board pans (Ctrl zooms at the cursor); gallery scrolls (Ctrl resizes)
+// One wheel notch zooms 8 %, and a single event counts at most three notches, so a fast flick
+// can't throw the view across the range. A trackpad sends small deltas and gets proportionally
+// small steps. The same step is used everywhere zooming happens by wheel.
+const ZOOM_PER_NOTCH = 1.08;
+const wheelZoomFactor = (e) => {
+  const notches = clamp(Math.abs(e.deltaY) / 100, 0, 3);
+  return Math.pow(ZOOM_PER_NOTCH, e.deltaY < 0 ? notches : -notches);
+};
+// wheel: board pans, gallery scrolls — unless Ctrl is held, the ✋ Pan + zoom tool is on, or the
+// "Wheel zoom" box is ticked, in which case the wheel zooms (Shift+wheel always stays scrolling)
 grid.addEventListener('wheel', (e) => {
+  const wheelZooms = !!(settings && settings.wheelZoom) && !e.shiftKey;
   if (isBoard()) {
     e.preventDefault();
-    // Ctrl+wheel always zooms; with ✋ Pan + zoom on, the plain wheel zooms too (Shift+wheel still pans sideways)
-    if (e.ctrlKey || (board.hand && !e.shiftKey)) {
-      zoomAt(board.zoom * Math.exp(-e.deltaY * 0.0015), e.clientX, e.clientY);
+    if (e.ctrlKey || wheelZooms || (board.hand && !e.shiftKey)) {
+      zoomAt(board.zoom * wheelZoomFactor(e), e.clientX, e.clientY);
     } else {
       const dx = e.shiftKey ? e.deltaY : e.deltaX;
       const dy = e.shiftKey ? 0 : e.deltaY;
       board.panX -= dx; board.panY -= dy;
       applyBoardView();
     }
-  } else if (e.ctrlKey) {
+  } else if (e.ctrlKey || wheelZooms) {
     e.preventDefault();
     noteGalleryScaleChange();
-    scaleGallery(e.deltaY < 0 ? 1.1 : 1 / 1.1);
+    scaleGallery(wheelZoomFactor(e)); // keeps the tiles' relative sizes
   }
 }, { passive: false });
 
@@ -3318,6 +3327,15 @@ modeEl.addEventListener('click', (e) => {
   if (b) setMode(b.dataset.mode);
 });
 
+const wheelZoomEl = document.getElementById('wheel-zoom');
+wheelZoomEl.addEventListener('change', () => {
+  settings.wheelZoom = wheelZoomEl.checked;
+  saveSettings();
+  setStatus(settings.wheelZoom
+    ? 'Wheel zoom on: the wheel zooms (Shift+wheel scrolls, middle-mouse pans)'
+    : 'Wheel zoom off: the wheel scrolls and pans again (Ctrl+wheel still zooms)');
+});
+
 zoomEl.addEventListener('input', () => {
   if (isBoard()) zoomAtCenter(sliderToZoom(Number(zoomEl.value)));
   else { noteGalleryScaleChange(); setGalleryScale(sliderToScale(Number(zoomEl.value))); }
@@ -3639,6 +3657,7 @@ window.api.getSettings().then((s) => {
   sbEl.hidden = !settings.sidebar.open;
   sidebar.setTab(settings.sidebar.tab);
   refreshUpdateMenu(); // the update checkboxes come from the same settings file
+  wheelZoomEl.checked = !!settings.wheelZoom;
   renderFolders();
   renderPlaylists(); // from the cache in settings.json, no refetch
 });
