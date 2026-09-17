@@ -48,12 +48,15 @@ function urlToFilePath(url) {
   return Buffer.from(seg, 'base64url').toString('utf8');
 }
 
-function handleVideoRequest(request) {
+// Serves localvideo:// — every video, picture and cached frame. It runs on the main process, so a
+// tile whose file sits on a share that no longer answers must not be able to block it: the stat is
+// guarded like every other user-supplied path, and an unreachable file simply 404s.
+async function handleVideoRequest(request) {
   let filePath;
   try { filePath = urlToFilePath(request.url); } catch { return new Response('Bad URL', { status: 400 }); }
 
-  let stat;
-  try { stat = fs.statSync(filePath); } catch { return new Response('Not found', { status: 404 }); }
+  const stat = await guardedStat(filePath);
+  if (!stat) return new Response('Not found', { status: 404 });
   if (!stat.isFile()) return new Response('Not a file', { status: 404 });
 
   const size = stat.size;
@@ -270,8 +273,10 @@ ipcMain.handle('load-session', async (_e, filePath) => {
     filePath = r.filePaths[0];
   }
   // Strip a UTF-8 BOM in case the file was edited in Notepad or written by PowerShell.
-  const text = fs.readFileSync(filePath, 'utf8').replace(/^﻿/, '');
-  const data = JSON.parse(text);
+  // The .mvp itself can be on a share that no longer answers, so this is guarded too.
+  const raw = await guardedReadFile(filePath, 'utf8');
+  if (raw === null) throw new Error(`Could not read ${filePath}`);
+  const data = JSON.parse(String(raw).replace(/^﻿/, ''));
   return { filePath, data };
 });
 
@@ -289,21 +294,37 @@ const pathRoot = (p) => {
   const drive = /^[A-Za-z]:/.exec(s);
   return drive ? drive[0].toLowerCase() : null;
 };
-async function fileExists(p) {
-  if (typeof p !== 'string' || !p) return false;
+const TIMED_OUT = Symbol('timed out');
+// Run one filesystem call against a path the user gave us, and never wait on it forever. If the
+// path's root has already timed out this session, don't even try. Everything that reads a file
+// named by a session or a folder source goes through this, so one dead share costs 3 s once
+// instead of ~26 s per file.
+async function guardedFs(p, work, fallback) {
+  if (typeof p !== 'string' || !p) return fallback;
   const root = pathRoot(p);
-  if (root && deadRoots.has(root)) return false; // this share already failed to answer
+  if (root && deadRoots.has(root)) return fallback;
   let timer = null;
-  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), FILE_CHECK_MS); });
-  const check = fs.promises.access(p, fs.constants.F_OK).then(() => true, () => false);
-  const result = await Promise.race([check, timeout]);
+  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), FILE_CHECK_MS); });
+  let result;
+  try { result = await Promise.race([work(), timeout]); }
+  catch { clearTimeout(timer); return fallback; } // a normal error (missing file, no permission)
   clearTimeout(timer);
-  if (result === 'timeout') {
-    if (root) deadRoots.set(root, Date.now());
-    return false; // treated as missing: the session still opens, the tile shows as missing
+  if (result === TIMED_OUT) {
+    if (root) deadRoots.set(root, Date.now()); // the rest of this share answers at once now
+    return fallback;
   }
   return result;
 }
+const fileExists = (p) => guardedFs(p, () => fs.promises.access(p, fs.constants.F_OK).then(() => true), false);
+const guardedStat = (p) => guardedFs(p, () => fs.promises.stat(p), null);
+const guardedReaddir = (p, opts) => guardedFs(p, () => fs.promises.readdir(p, opts), null);
+const guardedReadFile = (p, enc) => guardedFs(p, () => fs.promises.readFile(p, enc), null);
+// the first bytes of a file, for the EXR header
+const guardedReadHead = (p, bytes) => guardedFs(p, async () => {
+  const fh = await fs.promises.open(p, 'r');
+  try { const buf = Buffer.alloc(bytes); const { bytesRead } = await fh.read(buf, 0, bytes, 0); return buf.subarray(0, bytesRead); }
+  finally { await fh.close().catch(() => {}); }
+}, null);
 ipcMain.handle('file-exists', (_e, p) => fileExists(p));
 // a new session load gets a fresh chance at a share that may be back
 ipcMain.on('forget-dead-paths', () => deadRoots.clear());
@@ -331,10 +352,10 @@ function checkTools() {
 
 ipcMain.handle('probe', async (_e, filePath) => {
   const base = { codec: null, width: null, height: null, fps: null, duration: null, mime: null, proxy: null, available: checkTools() };
-  let stat;
-  try { stat = fs.statSync(filePath); } catch { return base; }
+  const stat = await guardedStat(filePath); // may be on a share that no longer answers
+  if (!stat) return base;
   const proxy = proxyPathFor(filePath, stat);
-  if (fs.existsSync(proxy)) base.proxy = proxy;
+  if (fs.existsSync(proxy)) base.proxy = proxy; // the proxy cache is ours, always local
   if (!base.available) return base;
   const json = await new Promise((resolve) => {
     execFile(binPath('ffprobe'), [
@@ -356,36 +377,40 @@ let proxyQueue = Promise.resolve();
 
 ipcMain.handle('make-proxy', (e, filePath) => {
   const send = (...args) => { if (!e.sender.isDestroyed()) e.sender.send('proxy-progress', ...args); };
-  const run = () => new Promise((resolve, reject) => {
-    if (!checkTools()) return reject(new Error('ffmpeg not found'));
-    let stat;
-    try { stat = fs.statSync(filePath); } catch { return reject(new Error('File not found')); }
+  // The checks run before the promise is made: an async executor would swallow a throw (mkdirSync
+  // can fail) and the job would never settle, wedging the queue behind it.
+  const run = async () => {
+    if (!checkTools()) throw new Error('ffmpeg not found');
+    const stat = await guardedStat(filePath);
+    if (!stat) throw new Error('File not found');
     fs.mkdirSync(proxyDir(), { recursive: true });
     const out = proxyPathFor(filePath, stat);
-    if (fs.existsSync(out)) return resolve({ proxy: out });
+    if (fs.existsSync(out)) return { proxy: out };
     const tmp = out + '.part.mp4';
-    const child = spawn(binPath('ffmpeg'), ProxyCache.args(filePath, tmp), { windowsHide: true });
-    proxyJobs.set(filePath, { child, reject });
-    let duration = 0, tail = '';
-    child.stderr.on('data', (buf) => {
-      const s = buf.toString();
-      tail = (tail + s).slice(-2000);
-      if (!duration) { const m = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(s); if (m) duration = +m[1] * 3600 + +m[2] * 60 + +m[3]; }
-      const t = ProxyCache.parseTime(s);
-      if (t !== null && duration) send(filePath, Math.min(0.99, t / duration));
+    return new Promise((resolve, reject) => {
+      const child = spawn(binPath('ffmpeg'), ProxyCache.args(filePath, tmp), { windowsHide: true });
+      proxyJobs.set(filePath, { child, reject });
+      let duration = 0, tail = '';
+      child.stderr.on('data', (buf) => {
+        const s = buf.toString();
+        tail = (tail + s).slice(-2000);
+        if (!duration) { const m = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(s); if (m) duration = +m[1] * 3600 + +m[2] * 60 + +m[3]; }
+        const t = ProxyCache.parseTime(s);
+        if (t !== null && duration) send(filePath, Math.min(0.99, t / duration));
+      });
+      child.on('close', (code) => {
+        proxyJobs.delete(filePath);
+        if (code === 0) {
+          try { fs.renameSync(tmp, out); } catch (err) { return reject(new Error('Could not save playable copy: ' + err.message)); }
+          send(filePath, 1);
+          resolve({ proxy: out });
+        } else {
+          try { fs.unlinkSync(tmp); } catch {}
+          reject(new Error(code === null ? 'Cancelled' : 'ffmpeg failed:\n' + tail.split('\n').slice(-4).join('\n')));
+        }
+      });
     });
-    child.on('close', (code) => {
-      proxyJobs.delete(filePath);
-      if (code === 0) {
-        try { fs.renameSync(tmp, out); } catch (err) { return reject(new Error('Could not save playable copy: ' + err.message)); }
-        send(filePath, 1);
-        resolve({ proxy: out });
-      } else {
-        try { fs.unlinkSync(tmp); } catch {}
-        reject(new Error(code === null ? 'Cancelled' : 'ffmpeg failed:\n' + tail.split('\n').slice(-4).join('\n')));
-      }
-    });
-  });
+  };
   const p = proxyQueue.then(run, run);
   proxyQueue = p.catch(() => {});
   return p;
@@ -468,16 +493,18 @@ function readSequences(dir, names) {
   const members = new Set(sequences.flatMap((s) => s.frames));
   return { sequences: sequences.map(({ frames: _f, ...s }) => ({ ...s, dir })), members }; // the frame list stays here (missing[] says the rest)
 }
-ipcMain.handle('list-folder', (_e, dir) => {
-  let names;
-  try { names = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => d.name); }
-  catch { return { ok: false, files: [], sequences: [] }; }
+ipcMain.handle('list-folder', async (_e, dir) => {
+  // a folder source can live on a share that has gone away since it was added
+  const entries = await guardedReaddir(dir, { withFileTypes: true });
+  if (!entries) return { ok: false, files: [], sequences: [] };
+  const names = entries.filter((d) => d.isFile()).map((d) => d.name);
   const { sequences, members } = readSequences(dir, names);
   const files = [];
   for (const n of Sources.filterMedia(names, { images: true })) {
     if (members.has(n)) continue;
     const p = path.join(dir, n);
-    try { const st = fs.statSync(p); files.push({ path: p, name: n, size: st.size, mtimeMs: st.mtimeMs, kind: Sources.kindOf(n) }); } catch {}
+    const st = await guardedStat(p); // the folder answered, so these are quick; the guard is for a share dying mid-listing
+    if (st) files.push({ path: p, name: n, size: st.size, mtimeMs: st.mtimeMs, kind: Sources.kindOf(n) });
   }
   return { ok: true, files, sequences };
 });
@@ -487,10 +514,11 @@ ipcMain.handle('list-folder', (_e, dir) => {
 let thumbRunning = 0; const thumbWaiting = [];
 function nextThumb() { if (thumbRunning < 2 && thumbWaiting.length) thumbWaiting.shift()(); }
 ipcMain.handle('thumb', (_e, filePath) => new Promise((resolve) => {
-  const job = () => {
+  const job = async () => {
     thumbRunning++;
     const done = (v) => { thumbRunning--; resolve(v); nextThumb(); };
-    let stat; try { stat = fs.statSync(filePath); } catch { return done(null); }
+    const stat = await guardedStat(filePath);
+    if (!stat) return done(null);
     fs.mkdirSync(thumbDir(), { recursive: true });
     const out = path.join(thumbDir(), ProxyCache.name(filePath, stat.size, stat.mtimeMs).replace(/\.mp4$/, '.jpg'));
     if (fs.existsSync(out)) return done(out);
@@ -615,16 +643,18 @@ ipcMain.handle('frames-dir', () => framesDir());
 
 // The run a picked or dropped frame belongs to (null if it's alone; the renderer then makes a
 // one-frame sequence for exr / tif / dpx).
-ipcMain.handle('sequence-for', (_e, filePath) => {
+ipcMain.handle('sequence-for', async (_e, filePath) => {
   const dir = path.dirname(filePath), name = path.basename(filePath);
-  let names; try { names = fs.readdirSync(dir); } catch { return null; }
+  const names = await guardedReaddir(dir);
+  if (!names) return null;
   return readSequences(dir, names).sequences.find((s) => Sequence.sameRun(s, name)) || null;
 });
 // First frame's mtime (part of the cache key) and picture size.
 ipcMain.handle('seq-info', async (_e, dir, seq) => {
   const first = path.join(dir, Sequence.framePath(seq, seq.start));
-  let firstMtime = 0;
-  try { firstMtime = fs.statSync(first).mtimeMs; } catch { return { ok: false }; }
+  const firstStat = await guardedStat(first);
+  if (!firstStat) return { ok: false };
+  const firstMtime = firstStat.mtimeMs;
   const size = !checkTools() ? {} : await new Promise((resolve) => {
     execFile(binPath('ffprobe'), ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', first], { windowsHide: true }, (err, out) => {
       try { const s = JSON.parse(out).streams[0]; resolve({ width: s.width, height: s.height }); } catch { resolve({}); }
@@ -633,15 +663,9 @@ ipcMain.handle('seq-info', async (_e, dir, seq) => {
   return { ok: true, firstMtime, ...size };
 });
 // The parts / layers of an EXR frame, from the first 64 KB of it (headers live at the front).
-ipcMain.handle('exr-layers', (_e, filePath) => {
-  let fd = null;
-  try {
-    fd = fs.openSync(filePath, 'r');
-    const buf = Buffer.alloc(65536);
-    const n = fs.readSync(fd, buf, 0, buf.length, 0);
-    return ExrHeader.parse(new Uint8Array(buf.subarray(0, n)));
-  } catch { return null; }
-  finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
+ipcMain.handle('exr-layers', async (_e, filePath) => {
+  const head = await guardedReadHead(filePath, 65536);
+  return head ? ExrHeader.parse(new Uint8Array(head)) : null;
 });
 ipcMain.handle('frames-on-disk', (_e, key) => {
   if (!/^[0-9a-f]{16}$/.test(String(key))) return [];
