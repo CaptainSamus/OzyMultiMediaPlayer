@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   saveSessionTo: (filePath, data) => ipcRenderer.invoke('save-session-to', filePath, data),
   loadSession: (filePath) => ipcRenderer.invoke('load-session', filePath || null),
   fileExists: (p) => ipcRenderer.invoke('file-exists', p),
+  forgetDeadPaths: () => ipcRenderer.send('forget-dead-paths'),
   getPathForFile: (file) => webUtils.getPathForFile(file),
   videoUrl: (p) => 'localvideo://v/' + Buffer.from(p, 'utf8').toString('base64url'),
   onOpenSession: (cb) => ipcRenderer.on('open-session', (_e, p) => cb(p)),

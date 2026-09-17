@@ -3030,6 +3030,7 @@ function collectSession() {
 async function applySession(data) {
   if (!data || !Array.isArray(data.videos)) throw new Error('Not a Multi Video Player session file.');
   clearAll();
+  window.api.forgetDeadPaths(); // a share that was unreachable last time may be back now
   // every rule for reading an old file lives in lib/session.js, where it is tested against fixtures
   const L = Session.layout(data.layout, {
     minH: MIN_H, maxH: MAX_H, minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM,

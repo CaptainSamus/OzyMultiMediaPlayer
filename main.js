@@ -275,9 +275,38 @@ ipcMain.handle('load-session', async (_e, filePath) => {
   return { filePath, data };
 });
 
-ipcMain.handle('file-exists', (_e, p) => {
-  try { return fs.existsSync(p); } catch { return false; }
-});
+// Does this file exist? A session can name files on a share or drive that no longer answers, and
+// a plain existsSync on an unreachable UNC path blocks for as long as Windows takes to give up —
+// once per video, which would stall opening the session. So: ask asynchronously, give up after a
+// few seconds and call it missing, and remember a root that timed out so the rest of that
+// session's files on the same dead share answer at once.
+const FILE_CHECK_MS = 3000;
+const deadRoots = new Map(); // "\\\\server\\share" or "X:" -> when it timed out
+const pathRoot = (p) => {
+  const s = String(p);
+  const unc = /^\\\\[^\\/]+[\\/][^\\/]+/.exec(s);
+  if (unc) return unc[0].toLowerCase();
+  const drive = /^[A-Za-z]:/.exec(s);
+  return drive ? drive[0].toLowerCase() : null;
+};
+async function fileExists(p) {
+  if (typeof p !== 'string' || !p) return false;
+  const root = pathRoot(p);
+  if (root && deadRoots.has(root)) return false; // this share already failed to answer
+  let timer = null;
+  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), FILE_CHECK_MS); });
+  const check = fs.promises.access(p, fs.constants.F_OK).then(() => true, () => false);
+  const result = await Promise.race([check, timeout]);
+  clearTimeout(timer);
+  if (result === 'timeout') {
+    if (root) deadRoots.set(root, Date.now());
+    return false; // treated as missing: the session still opens, the tile shows as missing
+  }
+  return result;
+}
+ipcMain.handle('file-exists', (_e, p) => fileExists(p));
+// a new session load gets a fresh chance at a share that may be back
+ipcMain.on('forget-dead-paths', () => deadRoots.clear());
 
 // ---- ffprobe / ffmpeg proxies ----
 
