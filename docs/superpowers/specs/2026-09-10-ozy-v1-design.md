@@ -439,6 +439,31 @@ Loading v3 sets `type: 'file'`, `sync: null`, `groups: []`,
   (`userData/thumbs/yt-<id>.jpg`, fetched via Electron `net` when the
   tile is first added). Twitch: the embed's own error.
 
+### Log files
+
+Nothing above is diagnosable after the fact in a packaged build, so every
+run also writes a log file. `electron-log` to `app.getPath('logs')`
+(`userData\logs` on Windows, the portable exe included), 2 MB per file and
+five kept; it is also `electron-updater`'s logger. Line formatting, the
+start-up header, the settings and session summaries and the log tail are
+pure functions in `lib/logfmt.js`, tested without Electron.
+
+- Main logs: a start-up header (4-part version, installed / portable / dev,
+  platform, arch, Electron and Chromium versions, userData and logs paths,
+  bundled tool availability, a settings summary), `uncaughtException`,
+  `unhandledRejection`, `render-process-gone`, `child-process-gone`, every
+  `ipcMain.handle` failure (one wrapper around `ipcMain.handle` logs and
+  rethrows), ffmpeg / ffprobe / yt-dlp non-zero exits with the command and
+  the last stderr lines, dead-path timeouts (which root), session reads, and
+  update outcomes.
+- The renderer forwards `window.onerror`, `unhandledrejection` and
+  `console.error` through `window.api.log`, plus a few info-level user
+  actions. A re-entry guard stops a failing forward from looping.
+- Paths and URLs are logged; file contents never are. Nothing leaves the
+  machine: there is no remote transport.
+- **App ▾ → Open logs folder** (`shell.openPath`) and **Copy diagnostics**
+  (start-up header + session summary + last 300 lines to the clipboard).
+
 ## Testing
 
 No test framework exists and the renderer is DOM-bound. Per feature:

@@ -244,7 +244,18 @@ itself when you click **Update yt-dlp** in the sidebar.
   videos start at a quiet 10% so twenty of them don't blast you.
 - **App ▾** (toolbar) holds **Cache…** (how much space playable copies,
   thumbnails, downloads and decoded sequence frames use, and clears them),
-  **Check for updates**, and the version you're running.
+  **Check for updates**, **Open logs folder**, **Copy diagnostics**, and the
+  version you're running.
+- **Logs.** Every run writes a log file (2 MB each, the last five kept) next
+  to the cache, in `%APPDATA%\ozy-multi-media-player\logs` on Windows — the
+  portable exe included. Each run starts with what you were running (version,
+  installed / portable / dev, platform, whether the bundled ffmpeg, ffprobe
+  and yt-dlp were found) and then records errors: crashes, failed transcodes
+  with ffmpeg's own message, unreachable files and shares, session loads, and
+  update checks. **App ▾ → Open logs folder** opens it; **Copy diagnostics**
+  puts that start-up block, what's on the board, and the last 300 log lines on
+  the clipboard, ready to paste into a message when something goes wrong.
+  Logs stay on your machine — nothing is sent anywhere.
 - **Updates.** The installed Windows app updates itself: a banner says a new
   version is available, **Download** shows progress, then **Restart to
   update** installs it. The portable exe and the Mac app can't self-install,

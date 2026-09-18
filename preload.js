@@ -7,6 +7,10 @@ contextBridge.exposeInMainWorld('api', {
   loadSession: (filePath) => ipcRenderer.invoke('load-session', filePath || null),
   fileExists: (p) => ipcRenderer.invoke('file-exists', p),
   forgetDeadPaths: () => ipcRenderer.send('forget-dead-paths'),
+  // logging: errors and a few user actions go to the same file main writes (userData\logs)
+  log: (level, msg, data) => ipcRenderer.send('log', level, msg, data),
+  openLogs: () => ipcRenderer.invoke('open-logs'),
+  copyDiagnostics: (session) => ipcRenderer.invoke('copy-diagnostics', session),
   getPathForFile: (file) => webUtils.getPathForFile(file),
   videoUrl: (p) => 'localvideo://v/' + Buffer.from(p, 'utf8').toString('base64url'),
   onOpenSession: (cb) => ipcRenderer.on('open-session', (_e, p) => cb(p)),

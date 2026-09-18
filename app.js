@@ -94,6 +94,35 @@ if (IS_MAC) {
 
 function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, isFinite(v) ? v : lo)); }
 
+// ---------- logging ----------
+// Errors here are the ones that used to vanish: the renderer's console is not open in a packaged
+// build. They go to the same file main writes (userData\logs), via window.api.log.
+// `sending` guards against a loop: if forwarding itself fails, console.error must not re-enter.
+let sending = false;
+function logUi(level, msg, data) {
+  if (sending) return;
+  sending = true;
+  try { window.api.log(level, msg, data); } catch {} finally { sending = false; }
+}
+window.addEventListener('error', (e) => {
+  logUi('error', 'window error: ' + (e.message || 'unknown'), {
+    src: e.filename ? `${e.filename}:${e.lineno}:${e.colno}` : undefined,
+    stack: e.error && e.error.stack ? String(e.error.stack).split('\n').slice(0, 6).join(' ⏎ ') : undefined,
+  });
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason;
+  logUi('error', 'unhandled rejection: ' + String((r && r.message) || r || 'unknown'), {
+    stack: r && r.stack ? String(r.stack).split('\n').slice(0, 6).join(' ⏎ ') : undefined,
+  });
+});
+// console.error still prints in dev; it just also reaches the file now.
+const consoleError = console.error.bind(console);
+console.error = (...args) => {
+  consoleError(...args);
+  logUi('error', args.map((a) => (a && a.stack) ? String(a.stack).split('\n')[0] : String(a && a.message ? a.message : a)).join(' ').slice(0, 500));
+};
+
 function setStatus(msg, ms = 4000) {
   statusEl.textContent = msg;
   clearTimeout(statusTimer);
@@ -436,6 +465,7 @@ function removeFromGroup(g, t) {
   else if (active === g) renderGroupBar();
 }
 function dissolveGroup(g) {
+  logUi('info', 'group dissolved', { id: g.id, members: g.members.size });
   for (const t of [...g.members]) releaseTile(t);
   g.members.clear();
   const i = groups.indexOf(g); if (i >= 0) groups.splice(i, 1);
@@ -963,8 +993,8 @@ function applyEntry(entry, dir) {
     else if (tiles.includes(entry.tile)) removeTile(entry.tile, { record: false });
   }
 }
-function undo() { const e = undoStack.undo(); if (!e) { setStatus('Nothing to undo'); return; } applyEntry(e, 'before'); setStatus('Undo: ' + e.label); }
-function redo() { const e = undoStack.redo(); if (!e) { setStatus('Nothing to redo'); return; } applyEntry(e, 'after'); setStatus('Redo: ' + e.label); }
+function undo() { const e = undoStack.undo(); if (!e) { setStatus('Nothing to undo'); return; } applyEntry(e, 'before'); logUi('info', 'undo', { what: e.label }); setStatus('Undo: ' + e.label); }
+function redo() { const e = undoStack.redo(); if (!e) { setStatus('Nothing to redo'); return; } applyEntry(e, 'after'); logUi('info', 'redo', { what: e.label }); setStatus('Redo: ' + e.label); }
 
 function setLinked(on) {
   board.linked = !!on;
@@ -1149,6 +1179,7 @@ function tidyBoard() {
 
 function setMode(mode) {
   mode = mode === 'board' ? 'board' : 'gallery';
+  if (mode !== layout.mode) logUi('info', 'mode', { to: mode, tiles: tiles.length });
   if (mode === 'board' && !isBoard()) {
     // seed positions before the CSS switch so gallery offsets are still valid
     placeOnBoard(tiles.filter((t) => !t.board));
@@ -3029,6 +3060,7 @@ function collectSession() {
 
 async function applySession(data) {
   if (!data || !Array.isArray(data.videos)) throw new Error('Not a Multi Video Player session file.');
+  const startedAt = Date.now();
   clearAll();
   window.api.forgetDeadPaths(); // a share that was unreachable last time may be back now
   // every rule for reading an old file lives in lib/session.js, where it is tested against fixtures
@@ -3089,18 +3121,23 @@ async function applySession(data) {
   // older session files have no zoom / view saved: fit once the videos are in
   if (L.rowHeight === null || (isBoard() && !board.initialized)) scheduleFit();
   undoStack.clear(); // a freshly opened session starts with no history
+  logUi('info', 'session applied', {
+    version: data.version, tiles: tiles.length, loaded: data.videos.length,
+    missing: missing.length !== undefined ? missing.length : missing, mode: layout.mode, ms: Date.now() - startedAt,
+  });
   return { loaded: data.videos.length, missing };
 }
 
 async function saveSessionAs() {
   if (!tiles.length) { setStatus('Nothing to save – add some videos first.'); return; }
   const p = await window.api.saveSessionAs(collectSession());
-  if (p) { sessionPath = p; updateChrome(); setStatus(`Saved ${p}`); }
+  if (p) { sessionPath = p; updateChrome(); logUi('info', 'session saved as', { path: p, tiles: tiles.length }); setStatus(`Saved ${p}`); }
 }
 
 async function saveSession() {
   if (!sessionPath) return saveSessionAs();
   await window.api.saveSessionTo(sessionPath, collectSession());
+  logUi('info', 'session saved', { path: sessionPath, tiles: tiles.length });
   setStatus(`Saved ${sessionPath}`);
 }
 
@@ -3237,6 +3274,21 @@ window.api.onUpdateEvent((msg) => {
   }
 });
 window.api.updateInfo().then((i) => { updInfo = i; refreshUpdateMenu(); });
+
+document.getElementById('btn-open-logs').addEventListener('click', async () => {
+  appMenuList.hidden = true;
+  const r = await window.api.openLogs();
+  setStatus(r && r.ok ? 'Logs folder opened' : `Could not open the logs folder${r && r.error ? ': ' + r.error : ''}`, r && r.ok ? 4000 : 8000);
+});
+document.getElementById('btn-diagnostics').addEventListener('click', async () => {
+  appMenuList.hidden = true;
+  const r = await window.api.copyDiagnostics({
+    path: sessionPath, mode: layout.mode,
+    tiles: tiles.map((t) => ({ type: t.type || 'file' })),
+    groups: groups.map(() => ({})),
+  });
+  setStatus(r && r.ok ? 'Diagnostics copied, paste them into a message' : 'Could not copy diagnostics', 6000);
+});
 
 document.getElementById('btn-cache').addEventListener('click', async () => {
   appMenuList.hidden = true;

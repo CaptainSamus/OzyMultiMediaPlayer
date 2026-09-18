@@ -10,6 +10,66 @@ const { Readable } = require('stream');
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
+// ---- logging ----
+// There was no way to find out why a packaged build misbehaved on Mark's machine, so every run now
+// writes a real log file: app.getPath('logs') (on Windows userData\logs, which the portable exe has
+// too), 2 MB per file, 5 kept. How a line looks lives in lib/logfmt.js, where it is tested.
+const LogFmt = require('./lib/logfmt');
+const elog = require('electron-log');
+const LOG_MAX = 2 * 1024 * 1024;
+const logsDir = () => path.join(app.getPath('logs'));
+function setupLogging() {
+  elog.transports.file.maxSize = LOG_MAX;
+  elog.transports.file.resolvePathFn = () => path.join(logsDir(), 'main.log');
+  // Our own format, so main.log and the renderer's forwarded lines read the same. It must return an
+  // ARRAY: electron-log runs the result through more transforms, which reduce over it.
+  elog.transports.file.format = ({ message }) => [message.data[0]];
+  elog.transports.console.format = ({ message }) => [message.data[0]];
+  if (app.isPackaged) elog.transports.console.level = false; // no console to print to
+  // electron-log keeps main.old.log; ask for 5 files' worth of history
+  elog.transports.file.archiveLogFn = (file) => {
+    const f = file.path !== undefined ? file.path : String(file);
+    const dir = path.dirname(f), ext = path.extname(f), base = path.basename(f, ext);
+    try {
+      for (let i = 4; i >= 1; i--) {
+        const from = path.join(dir, `${base}.${i}${ext}`);
+        if (fs.existsSync(from)) fs.renameSync(from, path.join(dir, `${base}.${i + 1}${ext}`));
+      }
+      fs.renameSync(f, path.join(dir, `${base}.1${ext}`));
+    } catch {}
+  };
+}
+// One way in for everything, main and renderer alike.
+const log = (level, msg, data, scope = 'main') => {
+  try { elog[LogFmt.level(level)](LogFmt.line({ level, scope, msg, data })); } catch {}
+};
+const logError = (msg, err, data, scope = 'main') => {
+  try { elog.error(LogFmt.errorLine({ scope, msg, err, data })); } catch {}
+};
+// A failed tool run is the most common real-world failure: keep the command and what it said.
+const logTool = (name, args, err, stderr) => {
+  logError(`${name} failed`, err, {
+    args: Array.isArray(args) ? args.join(' ').slice(0, 300) : String(args || ''),
+    code: err && (err.code !== undefined ? err.code : err.exitCode),
+    stderr: String(stderr || '').trim().split('\n').slice(-4).join(' ⏎ ').slice(0, 600),
+  });
+};
+
+// Crashes and swallowed rejections: log, and keep running where it is safe to.
+process.on('uncaughtException', (err) => logError('uncaught exception', err));
+process.on('unhandledRejection', (reason) => logError('unhandled rejection', reason instanceof Error ? reason : { message: LogFmt.data(reason) }));
+app.on('render-process-gone', (_e, _wc, details) => log('error', 'render process gone', details));
+app.on('child-process-gone', (_e, details) => log('error', 'child process gone', details));
+app.on('will-quit', () => log('info', 'app quit'));
+
+// Every ipcMain.handle in this file gets wrapped once, here: a handler that throws used to reject
+// in the renderer with no trace of why on this side.
+const rawHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, fn) => rawHandle(channel, async (event, ...args) => {
+  try { return await fn(event, ...args); }
+  catch (err) { logError(`ipc ${channel}`, err); throw err; }
+});
+
 // Custom scheme that streams local files with HTTP range support (needed for
 // scrubbing) while keeping Chromium's normal web security enabled.
 protocol.registerSchemesAsPrivileged([
@@ -198,6 +258,8 @@ if (!app.requestSingleInstanceLock()) {
     if (f) win.webContents.send('open-session', f);
   });
   app.whenReady().then(async () => {
+    setupLogging();
+    elog.info(startupHeader()); // the block every run starts with
     protocol.handle('localvideo', handleVideoRequest);
     await startUiServer();
 
@@ -277,6 +339,7 @@ ipcMain.handle('load-session', async (_e, filePath) => {
   const raw = await guardedReadFile(filePath, 'utf8');
   if (raw === null) throw new Error(`Could not read ${filePath}`);
   const data = JSON.parse(String(raw).replace(/^﻿/, ''));
+  log('info', 'session read', { path: filePath, version: data && data.version, videos: Array.isArray(data && data.videos) ? data.videos.length : 0, bytes: String(raw).length });
   return { filePath, data };
 });
 
@@ -311,6 +374,7 @@ async function guardedFs(p, work, fallback) {
   clearTimeout(timer);
   if (result === TIMED_OUT) {
     if (root) deadRoots.set(root, Date.now()); // the rest of this share answers at once now
+    log('warn', 'path timed out, treating the share as unreachable', { root: root || '(no root)', path: p, afterMs: FILE_CHECK_MS });
     return fallback;
   }
   return result;
@@ -328,6 +392,31 @@ const guardedReadHead = (p, bytes) => guardedFs(p, async () => {
 ipcMain.handle('file-exists', (_e, p) => fileExists(p));
 // a new session load gets a fresh chance at a share that may be back
 ipcMain.on('forget-dead-paths', () => deadRoots.clear());
+
+// ---- logging: what the renderer sends, and the two App ▾ items ----
+// The renderer forwards window.onerror, unhandledrejection and console.error here, plus a few
+// info-level user actions. Paths are fine in a log; file contents are never sent.
+ipcMain.on('log', (_e, level, msg, data) => log(level, msg, data, 'ui'));
+ipcMain.handle('open-logs', async () => {
+  const dir = logsDir();
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  log('info', 'open logs folder', { dir });
+  const err = await require('electron').shell.openPath(dir);
+  if (err) { logError('open logs folder', { message: err }, { dir }); return { ok: false, error: err, dir }; }
+  return { ok: true, dir };
+});
+// Everything Mark needs in one paste: the start-up header, what's on the board, and the log tail.
+ipcMain.handle('copy-diagnostics', async (_e, session) => {
+  const file = path.join(logsDir(), 'main.log');
+  const text = LogFmt.diagnostics({
+    header: startupHeader(),
+    session: LogFmt.sessionSummary(session || {}),
+    log: (await guardedReadFile(file, 'utf8')) || '',
+  });
+  require('electron').clipboard.writeText(text);
+  log('info', 'diagnostics copied', { lines: LogFmt.tail(text, 1e9).length });
+  return { ok: true, lines: LogFmt.tail(text, 1e9).length };
+});
 
 // ---- ffprobe / ffmpeg proxies ----
 
@@ -401,11 +490,14 @@ ipcMain.handle('make-proxy', (e, filePath) => {
       child.on('close', (code) => {
         proxyJobs.delete(filePath);
         if (code === 0) {
-          try { fs.renameSync(tmp, out); } catch (err) { return reject(new Error('Could not save playable copy: ' + err.message)); }
+          try { fs.renameSync(tmp, out); } catch (err) { logError('proxy rename', err, { tmp, out }); return reject(new Error('Could not save playable copy: ' + err.message)); }
           send(filePath, 1);
+          log('info', 'playable copy made', { path: filePath, out });
           resolve({ proxy: out });
         } else {
           try { fs.unlinkSync(tmp); } catch {}
+          if (code !== null) logTool('ffmpeg (playable copy)', ProxyCache.args(filePath, tmp), { code }, tail);
+          else log('info', 'playable copy cancelled', { path: filePath });
           reject(new Error(code === null ? 'Cancelled' : 'ffmpeg failed:\n' + tail.split('\n').slice(-4).join('\n')));
         }
       });
@@ -546,6 +638,23 @@ ipcMain.handle('thumb', (_e, filePath) => new Promise((resolve) => {
 // call the app makes on its own, it runs once at launch, and App ▾ can turn it off.
 const REPO = { owner: 'CaptainSamus', repo: 'OzyMultiMediaPlayer' };
 const isPortable = () => !!process.env.PORTABLE_EXECUTABLE_DIR;
+// The block at the top of every run (and of every diagnostics paste). Answers "what was running?"
+function startupHeader() {
+  let ytdlp = false;
+  try { ytdlp = fs.existsSync(binPath('yt-dlp')); } catch {}
+  return LogFmt.header({
+    version: (() => { try { return require('./package.json').buildVersion || app.getVersion(); } catch { return null; } })(),
+    build: !app.isPackaged ? 'dev' : isPortable() ? 'portable' : 'installed',
+    platform: process.platform,
+    arch: process.arch,
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    userData: app.getPath('userData'),
+    logs: logsDir(),
+    tools: { ffmpeg: checkTools(), ffprobe: checkTools(), 'yt-dlp': ytdlp },
+    settings: readSettings(),
+  });
+}
 const canAutoUpdate = () => process.platform === 'win32' && app.isPackaged && !isPortable();
 const appVersion = () => require('./package.json').buildVersion || app.getVersion();
 let updater = null, updateReady = false;
@@ -564,15 +673,16 @@ function getUpdater() {
   if (!updater) {
     try {
       ({ autoUpdater: updater } = require('electron-updater'));
+      updater.logger = elog; // electron-updater's own diagnostics land in the same file
       updater.autoDownload = false;
       updater.autoInstallOnAppQuit = true;
       updater.allowPrerelease = readSettings().updates.includePrerelease;
-      updater.on('update-available', (info) => toWin({ kind: 'available', version: info.version, notes: typeof info.releaseNotes === 'string' ? info.releaseNotes.slice(0, 500) : '' }));
-      updater.on('update-not-available', () => toWin({ kind: 'none', version: appVersion() }));
+      updater.on('update-available', (info) => { log('info', 'update available', { version: info.version }); toWin({ kind: 'available', version: info.version, notes: typeof info.releaseNotes === 'string' ? info.releaseNotes.slice(0, 500) : '' }); });
+      updater.on('update-not-available', () => { log('info', 'update: already newest', { version: appVersion() }); toWin({ kind: 'none', version: appVersion() }); });
       updater.on('download-progress', (p) => toWin({ kind: 'progress', percent: Math.round(p.percent) }));
-      updater.on('update-downloaded', (info) => { updateReady = true; toWin({ kind: 'ready', version: info.version }); });
-      updater.on('error', (err) => toWin({ kind: 'error', message: String(err && err.message || err).slice(0, 200) }));
-    } catch (e) { updater = null; }
+      updater.on('update-downloaded', (info) => { updateReady = true; log('info', 'update downloaded, ready to install', { version: info.version }); toWin({ kind: 'ready', version: info.version }); });
+      updater.on('error', (err) => { logError('update', err); toWin({ kind: 'error', message: String(err && err.message || err).slice(0, 200) }); });
+    } catch (e) { logError('electron-updater could not start', e); updater = null; }
   }
   return updater;
 }
@@ -657,6 +767,7 @@ ipcMain.handle('seq-info', async (_e, dir, seq) => {
   const firstMtime = firstStat.mtimeMs;
   const size = !checkTools() ? {} : await new Promise((resolve) => {
     execFile(binPath('ffprobe'), ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', first], { windowsHide: true }, (err, out) => {
+      if (err) logTool('ffprobe (sequence size)', ['-show_entries', 'stream=width,height', first], err, '');
       try { const s = JSON.parse(out).streams[0]; resolve({ width: s.width, height: s.height }); } catch { resolve({}); }
     });
   });
@@ -760,6 +871,7 @@ ipcMain.handle('resolve-stream', (_e, pageUrl) => new Promise((resolve) => {
   const attempt = (i) => {
     if (i >= clients.length) return resolve({ ok: false, error: lastErr || 'Could not resolve this video', outdated });
     execFile(binPath('yt-dlp'), WebStream.resolveArgs(key, clients[i]), { windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout: 60000 }, (err, stdout, stderr) => {
+    if (err) logTool(`yt-dlp resolve (${clients[i]})`, WebStream.resolveArgs(key, clients[i]), err, stderr);
       const info = WebStream.parseResolved(stdout);
       if (!info) {
         lastErr = String(stderr || (err && err.message) || '').trim().split('\n').slice(-1)[0] || lastErr;
@@ -840,7 +952,10 @@ ipcMain.handle('ytdlp-available', () => fs.existsSync(binPath('yt-dlp')));
 ipcMain.handle('list-playlist', (_e, url) => new Promise((resolve) => {
   if (!fs.existsSync(binPath('yt-dlp'))) return resolve({ ok: false, error: 'yt-dlp not found' });
   execFile(binPath('yt-dlp'), ['--flat-playlist', '-J', '--no-warnings', String(url)], { windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout: 120000 }, (err, stdout, stderr) => {
-    if (err) return resolve({ ok: false, error: String(stderr || err.message).trim().split('\n').slice(-2).join('\n'), outdated: Playlist.isOutdatedError(stderr) });
+    if (err) {
+      logTool('yt-dlp playlist', ['--flat-playlist', String(url)], err, stderr);
+      return resolve({ ok: false, error: String(stderr || err.message).trim().split('\n').slice(-2).join('\n'), outdated: Playlist.isOutdatedError(stderr) });
+    }
     const pl = Playlist.parseFlat(stdout);
     resolve(pl ? { ok: true, playlist: pl } : { ok: false, error: 'Could not read playlist' });
   });
