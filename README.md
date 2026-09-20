@@ -165,6 +165,13 @@ itself when you click **Update yt-dlp** in the sidebar.
   tab in every session.
 - **Image tiles.** jpg, png, gif, webp and bmp become picture tiles: title
   bar, move, resize, groups and sessions, no playback controls.
+- **Text tiles / sticky notes.** Add a text tile to the board for notes and
+  labels. Selecting one shows a style toolbar: font, size, colour, align,
+  and bubble fill and outline.
+- **Copy and paste.** `Ctrl+C` copies the selected tiles and `Ctrl+V` pastes
+  them onto the board.
+- **Hover play.** A play mode where videos play only while the cursor is
+  over them.
 - **Image sequences and EXR.** A run of numbered frames
   (`shot.0001.exr`, `plate_0001.png`, … in exr, png, tif, jpg, webp or
   dpx) plays like a video in a Nuke-style frame player: it is never turned
