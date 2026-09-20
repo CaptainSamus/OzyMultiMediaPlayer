@@ -796,3 +796,49 @@ body.mode-board.hand .tile.web .pan-shield, body.mode-board.panning .tile.web .p
 /* the Wheel zoom toggle, next to the zoom slider */
 .wheel-zoom { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; cursor: pointer; user-select: none; white-space: nowrap; }
 .wheel-zoom input { cursor: pointer; margin: 0; }
+
+/* ---------- text tiles (board only) ---------- */
+/* No overlay and no tile background: a text tile is just its bubble, so the bubble's own
+   fill/border is the whole look. overflow stays visible so a descender is never clipped. */
+.text-tile { background: transparent; overflow: visible; outline: none; box-shadow: none !important; }
+body.mode-board .text-tile { box-shadow: none; outline-color: transparent; }
+.text-bubble { width: 100%; border-radius: 8px; box-sizing: border-box; }
+.text-body { white-space: pre-wrap; overflow-wrap: anywhere; outline: none; min-height: 1em; cursor: text; }
+.text-tile:not(.editing) .text-body { cursor: inherit; user-select: none; }
+.text-tile .remove {
+  position: absolute; top: -10px; right: -10px; z-index: 7;
+  width: 20px; height: 20px; padding: 0; line-height: 1; font-size: 12px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.6); border: 1px solid #444; color: #ddd; border-radius: 4px; cursor: pointer;
+  opacity: 0; transition: opacity 0.15s ease;
+}
+.text-tile:hover .remove { opacity: 1; }
+.text-tile .remove:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+/* the remove button and the handles counter-zoom like .overlay does */
+.text-tile .remove { zoom: var(--ui-scale, 1); }
+/* text is board-only: gallery has no place to put it */
+body:not(.mode-board) .text-tile { display: none; }
+
+/* the floating style toolbar for the selected text tiles */
+.text-toolbar {
+  position: fixed; z-index: 60; display: flex; gap: 6px; align-items: center;
+  padding: 6px 8px; background: var(--panel-2); border: 1px solid #333338;
+  border-radius: 8px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.text-toolbar[hidden] { display: none; }
+.text-toolbar button, .text-toolbar select, .text-toolbar input[type=number] {
+  background: var(--panel-2); color: var(--text); border: 1px solid #333338;
+  border-radius: 4px; padding: 3px 7px; cursor: pointer; font: inherit; font-size: 12px;
+}
+.text-toolbar input[type=number] { width: 56px; cursor: text; }
+.text-toolbar button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.text-toolbar button:disabled, .text-toolbar input:disabled { opacity: 0.4; cursor: default; }
+.text-toolbar .swatch { width: 18px; height: 18px; border-radius: 50%; border: 1px solid #555; padding: 0; }
+.text-toolbar .sep { width: 1px; align-self: stretch; background: #333338; }
+.color-pop {
+  position: fixed; z-index: 61; display: grid; grid-template-columns: repeat(4, 22px);
+  gap: 6px; padding: 8px; background: var(--panel-2); border: 1px solid #333338;
+  border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.color-pop button { width: 22px; height: 22px; border-radius: 50%; border: 1px solid #555; padding: 0; cursor: pointer; }
+.color-pop input[type=color] { grid-column: 1 / -1; width: 100%; height: 24px; padding: 0; border: 1px solid #333338; background: none; cursor: pointer; }

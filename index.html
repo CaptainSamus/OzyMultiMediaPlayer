@@ -16,6 +16,7 @@
         <button id="add-url">YouTube / Twitch URL…</button>
       </div>
     </div>
+    <button id="add-text" title="Text (or double-click the board)">T</button>
     <button id="btn-sidebar" title="Sources sidebar: folders and playlists to drag from (`)">☰ Sources</button>
     <button id="btn-open" title="Open a saved .mvp session (Ctrl+O)">Open session</button>
     <button id="btn-save" title="Save session (Ctrl+S). Right-click: Save as… (Ctrl+Shift+S)">Save</button>
@@ -341,6 +342,15 @@
     </div>
   </template>
 
+  <template id="tpl-text">
+    <div class="tile text-tile">
+      <div class="text-bubble"><div class="text-body"></div></div>
+      <button class="remove" title="Remove">✕</button>
+      <div class="handle tl" data-corner="tl"></div><div class="handle tr" data-corner="tr"></div>
+      <div class="handle bl" data-corner="bl"></div><div class="handle br" data-corner="br"></div>
+    </div>
+  </template>
+
   <template id="web-tile-template">
     <div class="tile web">
       <!-- Stream / Download modes play a real <video>; Player mode shows the iframe instead -->
@@ -393,6 +403,7 @@
   <script src="lib/exrheader.js"></script>
   <script src="lib/webstream.js"></script>
   <script src="lib/session.js"></script>
+  <script src="lib/texttile.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

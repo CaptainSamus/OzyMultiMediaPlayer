@@ -12,7 +12,7 @@ const zoomLabel = document.getElementById('zoom-label');
 const modeEl = document.getElementById('mode');
 
 const SESSION_FORMAT = 'multi-video-player-session';
-const SESSION_VERSION = 4;
+const SESSION_VERSION = 5;
 
 /** @type {Array<{path:string, el:HTMLElement, video:HTMLVideoElement, seek:HTMLInputElement, time:HTMLElement, scrubbing:boolean, volume:number, aspect:number, board?:{x:number,y:number,w:number,h:number}, tick?:Function}>} */
 const tiles = [];
@@ -35,6 +35,8 @@ const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 4;
 const GAP = 8;
 const DEFAULT_ASPECT = 16 / 9;
+const TEXT_DEFAULT_W = 240; // canvas px a new text tile starts at
+const TEXT_MIN_W = 40;      // narrower than this and a word can't wrap at all
 // rowHeight is now only the size new tiles start at (it follows scale-all) and the fallback for
 // older session files; each tile keeps its own gallery height in tile.galleryH.
 const layout = { mode: 'gallery', rowHeight: 240, galleryScale: 1, timeDisplay: 'clock', timelineExpanded: false, timelineHeight: 140 };
@@ -232,7 +234,9 @@ function ytPlayback(yt) {
     get rate() { return st.rate || 1; }, set rate(r) { st.rate = r; yt.rate(r); },
   };
 }
-const tileName = (t) => t.title || basename(t.path);
+// A text tile has no path and no title: its own first words name it, on one line (the name goes
+// into status lines, undo labels and the timeline legend, where a newline would break the layout).
+const tileName = (t) => (t.type === 'text' ? (t.text.trim().replace(/\s+/g, ' ').slice(0, 24) || 'Text') : t.title || basename(t.path));
 
 function setMasterVolume(v, { updateSlider = true } = {}) {
   masterVolume = clamp(Number(v), 0, 1);
@@ -304,6 +308,7 @@ function layoutTile(t) {
     s.width = t.board.w + 'px';
     s.height = t.board.h + 'px';
   } else {
+    if (t.freeAspect) return; // text tiles have no gallery form; they are hidden there
     const maxW = innerWidth();
     let h = galleryHOf(t); // each tile's own height
     let w = h * t.aspect;
@@ -321,6 +326,7 @@ function applyBoardView() {
   grid.style.backgroundSize = `${spacing}px ${spacing}px`;
   grid.style.backgroundPosition = `${board.panX}px ${board.panY}px`;
   updateZoomUI();
+  updateTextToolbar(); // it floats over the board in screen space, so pan and zoom move it
 }
 
 function layoutTiles() {
@@ -399,11 +405,13 @@ function setSelected(tile, on) {
   if (on) selection.add(tile); else selection.delete(tile);
   tile.el.classList.toggle('selected', on);
   syncActiveFromSelection();
+  updateTextToolbar();
 }
 function clearSelection() {
-  for (const t of selection) t.el.classList.remove('selected');
+  for (const t of selection) { t.el.classList.remove('selected'); if (t.editing) endTextEdit(t); }
   selection.clear();
   syncActiveFromSelection();
+  updateTextToolbar();
 }
 function selectOnly(tile) { clearSelection(); setSelected(tile, true); }
 function selectGroupOf(tile) { clearSelection(); for (const m of tile.group.members) setSelected(m, true); }
@@ -425,6 +433,7 @@ function groupOf(tile) { return tile.group || null; }
 function activeGroup() { return active; }
 function paintGroup(t) {
   const sw = t.el.querySelector('.group-swatch');
+  if (!sw) return; // a text tile has no overlay to paint
   sw.hidden = !t.group;
   if (t.group) sw.style.background = Groups.PALETTE[t.group.color];
 }
@@ -921,7 +930,7 @@ function recordRowHeight() { return { kind: 'rowHeight', label: 'resize gallery'
 function finishRowHeight(entry) { entry.after = layout.rowHeight; if (entry.after !== entry.before) undoStack.push(entry); }
 */
 // one gallery tile's corner drag
-function recordGResize(tile) { return { kind: 'gresize', label: `resize ${basename(tile.path)}`, tile, before: galleryHOf(tile), after: null }; }
+function recordGResize(tile) { return { kind: 'gresize', label: `resize ${tileName(tile)}`, tile, before: galleryHOf(tile), after: null }; }
 function finishGResize(entry) { entry.after = galleryHOf(entry.tile); if (entry.after !== entry.before) undoStack.push(entry); }
 // Ctrl+wheel, the zoom slider and +/- scale everything in many small steps: one entry per burst.
 let rowEntry = null, rowTimer = null;
@@ -940,10 +949,25 @@ function noteGalleryScaleChange() {
 function recordRemove(tile) {
   const g = tile.group;
   undoStack.push({
-    kind: 'remove', label: `remove ${basename(tile.path)}`, record: collectSession().videos[tiles.indexOf(tile)],
+    kind: 'remove', label: `remove ${tileName(tile)}`, record: collectSession().videos[tiles.indexOf(tile)],
     index: tiles.indexOf(tile), tile, group: g,
     groupMembers: g ? [...g.members] : [], starts: g ? new Map([...g.members].map((t) => [t, t.sync ? { ...t.sync } : null])) : null,
   });
+}
+
+// A new text tile is the one thing you can add with a keystroke, so it is the one add that is
+// undoable: 'before' takes it away again, 'after' rebuilds it from the same record a remove uses.
+function recordAddText(tile) {
+  undoStack.push({ kind: 'add', label: `add ${tileName(tile)}`, record: collectSession().videos[tiles.indexOf(tile)], index: tiles.indexOf(tile), tile, group: null, groupMembers: [], starts: null });
+}
+// one entry per editing session / per toolbar interaction
+function recordTextEdit(tile, before, after) {
+  if (before === after) return;
+  undoStack.push({ kind: 'text', label: 'edit text', tile, before, after });
+}
+function recordTextStyle(list, befores) {
+  const changes = list.map((t, i) => ({ tile: t, before: befores[i], after: { ...t.style } })).filter((c) => JSON.stringify(c.before) !== JSON.stringify(c.after));
+  if (changes.length) undoStack.push({ kind: 'tstyle', label: 'text style', changes });
 }
 
 function applyRects(entry, dir) { // dir: 'before' | 'after'
@@ -951,9 +975,11 @@ function applyRects(entry, dir) { // dir: 'before' | 'after'
 }
 function restoreRemoved(entry) {
   const v = entry.record;
-  const t = v.type === 'image' ? addImageTile(v.path, v)
+  const t = v.type === 'text' ? addTextTile(v)
+    : v.type === 'image' ? addImageTile(v.path, v)
     : v.type === 'sequence' ? addSequenceTile(v.dir, v.seq, v) // its disk cache is reused (same key)
     : v.type && v.type !== 'file' ? addWebTile(v.url, WebUrl.parse(v.url), v) : addVideo(v.path, v);
+  if (!t) return; // a text record whose board was unusable: nothing to put back
   // put it back at its old index so gallery order is preserved
   tiles.splice(tiles.indexOf(t), 1); tiles.splice(Math.min(entry.index, tiles.length), 0, t);
   canvas.insertBefore(t.el, canvas.children[entry.index] || null);
@@ -991,6 +1017,18 @@ function applyEntry(entry, dir) {
   else if (entry.kind === 'remove') {
     if (dir === 'before') restoreRemoved(entry);
     else if (tiles.includes(entry.tile)) removeTile(entry.tile, { record: false });
+  }
+  // an add is a remove read backwards
+  else if (entry.kind === 'add') {
+    if (dir === 'before') { if (tiles.includes(entry.tile)) removeTile(entry.tile, { record: false }); }
+    else restoreRemoved(entry);
+  }
+  else if (entry.kind === 'text') {
+    if (tiles.includes(entry.tile)) { entry.tile.text = entry[dir]; renderTextTile(entry.tile); updateTextToolbar(); }
+  }
+  else if (entry.kind === 'tstyle') {
+    for (const c of entry.changes) if (tiles.includes(c.tile)) { c.tile.style = { ...c[dir] }; renderTextTile(c.tile); }
+    updateTextToolbar();
   }
 }
 function undo() { const e = undoStack.undo(); if (!e) { setStatus('Nothing to undo'); return; } applyEntry(e, 'before'); logUi('info', 'undo', { what: e.label }); setStatus('Undo: ' + e.label); }
@@ -1120,7 +1158,9 @@ function placeOnBoard(list, at = null) {
     let i = 0;
     for (const t of list) {
       const h = galleryHOf(t);
-      t.board = { x: at.x + 24 * i, y: at.y + 24 * i, w: h * t.aspect, h };
+      t.board = t.freeAspect
+        ? { x: at.x + 24 * i, y: at.y + 24 * i, w: TEXT_DEFAULT_W, h: 40 } // width is the user's; height follows the text
+        : { x: at.x + 24 * i, y: at.y + 24 * i, w: h * t.aspect, h };
       i++;
     }
     return;
@@ -1147,8 +1187,8 @@ function placeOnBoard(list, at = null) {
   }
   let x = x0, y = y0, rowH = 0;
   for (const t of list) {
-    const h = galleryHOf(t);
-    const w = h * t.aspect;
+    const h = t.freeAspect ? 40 : galleryHOf(t);
+    const w = t.freeAspect ? TEXT_DEFAULT_W : h * t.aspect;
     if (x > x0 && x + w > x0 + rowW) { x = x0; y += rowH + GAP; rowH = 0; }
     t.board = { x, y, w, h };
     x += w + GAP;
@@ -1189,7 +1229,11 @@ function setMode(mode) {
   if (!isBoard() || mode !== 'board') { clearSelection(); hideGuides(); }
   document.body.classList.toggle('mode-board', isBoard());
   for (const b of modeEl.querySelectorAll('button')) b.classList.toggle('active', b.dataset.mode === mode);
+  for (const t of tiles) if (t.type === 'text') t.el.hidden = !isBoard(); // text is board-only
   layoutTiles();
+  // now they are visible again, let the text say how tall each box really is
+  if (isBoard()) for (const t of tiles) if (t.type === 'text') renderTextTile(t);
+  updateTextToolbar();
 }
 
 /* DISABLED (Mark, 2026-09-12): these searched for one shared row height; Fit all now scales the
@@ -1225,7 +1269,8 @@ function fitGallery() {
 // Fit all (gallery): one factor for every tile, so the sizes set by hand keep their ratios.
 function fitGallery() {
   if (!tiles.length) return;
-  const items = tiles.map((t) => ({ aspect: t.aspect, h: galleryHOf(t) }));
+  const items = tiles.filter((t) => !t.freeAspect).map((t) => ({ aspect: t.aspect, h: galleryHOf(t) }));
+  if (!items.length) return;
   const f = Arrange.fitScale(items, innerWidth(), innerHeight(), GAP);
   scaleGallery(f);
 }
@@ -1280,6 +1325,21 @@ function startResize(tile, corner, e) {
     const scale = onBoard ? board.zoom : 1;
     const dx = (ev.clientX - startX) * sx / scale;
     const dy = (ev.clientY - startY) * sy / scale;
+    // A text tile has no aspect: the corner sets its width only, anchored on the opposite edge,
+    // and the height comes back from the wrapped text.
+    if (tile.freeAspect) {
+      if (!onBoard) return;
+      const b = tile.board;
+      const w = Math.max(TEXT_MIN_W, start.w + dx);
+      if (corner.includes('l')) b.x = start.x + (start.w - w);
+      b.y = start.y;
+      b.w = w;
+      layoutTile(tile);
+      renderTextTile(tile);
+      if (board.linked && !ev.altKey) resolveOverlaps(fixed);
+      updateTextToolbar();
+      return;
+    }
     // follow whichever axis the user is pulling harder on
     const fromW = (start.w + dx) / tile.aspect;
     const fromH = start.h + dy;
@@ -1318,6 +1378,7 @@ function attachTileDrag(tile) {
   el.addEventListener('pointerdown', (e) => {
     if (!isBoard() || e.button !== 0 || !tile.board || e.altKey) return;
     if (e.target.closest('.handle, input, button, select')) return;
+    if (tile.editing && e.target.closest('.text-body')) return; // put the caret, don't drag the tile
     if (e.shiftKey) {
       // shift-click toggles membership without starting a drag
       setSelected(tile, !selection.has(tile));
@@ -1371,6 +1432,7 @@ function attachTileDrag(tile) {
         layoutTile(t);
       }
       if (board.linked && !ev.altKey) resolveOverlaps(movingSet);
+      updateTextToolbar();
     };
     const onUp = () => {
       el.removeEventListener('pointermove', onMove);
@@ -1384,6 +1446,7 @@ function attachTileDrag(tile) {
         tile.suppressClick = true;
         setTimeout(() => { tile.suppressClick = false; }, 0);
       }
+      updateTextToolbar();
     };
     el.addEventListener('pointermove', onMove);
     el.addEventListener('pointerup', onUp);
@@ -1949,6 +2012,7 @@ function wireFullscreenButton(el) {
 document.addEventListener('fullscreenchange', () => {
   for (const t of tiles) {
     const b = t.el.querySelector('.fullscreen');
+    if (!b) continue; // text tiles have no overlay and never go fullscreen
     const on = document.fullscreenElement === t.el;
     if (!b.dataset.enterTitle) b.dataset.enterTitle = b.title;
     b.title = on ? 'Exit fullscreen (Esc)' : b.dataset.enterTitle;
@@ -1979,6 +2043,7 @@ function removeTile(tile, { record = true } = {}) {
   updateChrome();
   markOnBoard();
   renderTimeline();
+  updateTextToolbar();
 }
 
 // ---------- web tiles (YouTube / Twitch) ----------
@@ -2466,6 +2531,313 @@ function addImageTile(filePath, state = {}, at = null) {
   updateChrome();
   return tile;
 }
+
+// ---------- text tiles (board only) ----------
+// Miro-style notes: floating text or a filled bubble. A text tile is the odd one out among tiles –
+// no path, no playback, no overlay – so it carries `freeAspect` and `type: 'text'` and every piece
+// of code that assumed "tile = media" checks one of those. The user sets the width; the height is
+// always whatever the wrapped text needs, written back into board.h so lasso, snap, overlap
+// resolution and Arrange see the real box.
+const textTileTemplate = document.getElementById('tpl-text');
+
+function addTextTile(record = {}) {
+  const b = record.board;
+  if (!b || !isFinite(Number(b.x)) || !isFinite(Number(b.y)) || !(Number(b.w) > 0)) return null;
+  const frag = textTileTemplate.content.cloneNode(true);
+  const el = frag.querySelector('.tile');
+  const tile = {
+    type: 'text', el, video: null, yt: null, img: null,
+    text: TextTile.sanitize(record.text),
+    style: TextTile.normalize(record.style),
+    aspect: null, freeAspect: true, editing: false,
+    board: { x: Number(b.x), y: Number(b.y), w: Math.max(TEXT_MIN_W, Number(b.w)), h: Number(b.h) > 0 ? Number(b.h) : 40 },
+    bookmarks: [], sync: null, group: null, suppressClick: false, volume: 0, ownMuted: false,
+    galleryH: layout.rowHeight,
+  };
+  tiles.push(tile);
+  const body = el.querySelector('.text-body');
+  el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
+  el.addEventListener('pointerenter', () => { hoveredTile = tile; });
+  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; });
+  el.addEventListener('dblclick', (e) => { e.stopPropagation(); beginTextEdit(tile); });
+  el.addEventListener('contextmenu', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    showRowMenu(e, [['Edit', () => beginTextEdit(tile)], ['Bring to front', () => bringToFront(tile)], ['Remove', () => removeTile(tile)]]);
+  });
+  el.addEventListener('click', (e) => {
+    if (isBoard() || !e.shiftKey || e.target.closest('button')) return;
+    setSelected(tile, !selection.has(tile));
+    selectionStatus();
+  });
+  // while typing, the body owns the keyboard: single-key shortcuts and Space must not reach the board
+  body.addEventListener('keydown', (e) => {
+    if (!tile.editing) return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); endTextEdit(tile); return; }
+    e.stopPropagation();
+  });
+  // Clicking the style toolbar must not end the edit: the point of it is restyling while typing.
+  body.addEventListener('blur', (e) => {
+    if (!tile.editing) return;
+    const to = e.relatedTarget;
+    if (to && to.closest && to.closest('.text-toolbar, .color-pop')) return;
+    endTextEdit(tile);
+  });
+  for (const h of el.querySelectorAll('.handle')) {
+    h.addEventListener('pointerdown', (e) => startResize(tile, h.dataset.corner, e));
+    h.addEventListener('dblclick', (e) => e.stopPropagation()); // no aspect to reset to
+  }
+  attachTileDrag(tile);
+  canvas.appendChild(frag);
+  el.hidden = !isBoard();
+  layoutTile(tile);
+  // hidden elements measure 0, so in gallery mode keep the saved height until the board shows it
+  if (isBoard()) renderTextTile(tile); else applyTextStyleToEl(tile);
+  updateChrome();
+  return tile;
+}
+
+// Re-apply the style and let the text decide the height. Called after every text, style or width
+// change; cheap enough (one forced layout) to run inside a resize drag.
+function renderTextTile(tile) {
+  applyTextStyleToEl(tile);
+  const bubble = tile.el.querySelector('.text-bubble');
+  // the element is already at its board width, so offsetHeight is the wrapped height
+  tile.board.h = Math.max(BOARD_MIN_H, bubble.offsetHeight);
+  layoutTile(tile);
+}
+
+// the look only; the height it implies is renderTextTile's job (and needs a visible element)
+function applyTextStyleToEl(tile) {
+  const el = tile.el;
+  const bubble = el.querySelector('.text-bubble');
+  const body = el.querySelector('.text-body');
+  const s = tile.style;
+  if (body.textContent !== tile.text) body.textContent = tile.text;
+  body.style.fontFamily = s.font;
+  body.style.fontSize = s.size + 'px';
+  body.style.color = s.color;
+  body.style.textAlign = s.align;
+  body.style.lineHeight = '1.25';
+  bubble.style.background = s.bubble ? s.fill : 'transparent';
+  bubble.style.border = s.bubble && s.outlineWidth > 0 ? `${s.outlineWidth}px solid ${s.outline}` : 'none';
+  bubble.style.borderRadius = '8px';
+  bubble.style.padding = s.bubble ? '12px' : '0';
+}
+
+function beginTextEdit(tile) {
+  if (!isBoard() || tile.editing) return;
+  for (const t of tiles) if (t !== tile && t.editing) endTextEdit(t); // only one at a time
+  tile.editing = true;
+  tile.el.classList.add('editing');
+  bringToFront(tile);
+  const body = tile.el.querySelector('.text-body');
+  tile._textBefore = tile.text;
+  body.contentEditable = 'plaintext-only';
+  body.focus();
+  // caret at the end, so typing continues the note rather than replacing it
+  const sel = window.getSelection();
+  if (sel) { const r = document.createRange(); r.selectNodeContents(body); r.collapse(false); sel.removeAllRanges(); sel.addRange(r); }
+  updateTextToolbar();
+}
+
+function endTextEdit(tile) {
+  if (!tile.editing) return;
+  tile.editing = false;
+  tile.el.classList.remove('editing');
+  const body = tile.el.querySelector('.text-body');
+  const before = tile._textBefore;
+  tile.text = TextTile.sanitize(body.textContent);
+  body.contentEditable = 'false';
+  try { body.blur(); } catch {}
+  // An empty note is no note, like Miro. One that was never finished isn't worth an undo step.
+  if (!tile.text) { removeTile(tile, { record: !tile.isNew }); return; }
+  renderTextTile(tile);
+  // a brand new note is one undo step ("add"), not "add" plus "edit text"
+  if (tile.isNew) { tile.isNew = false; recordAddText(tile); } else recordTextEdit(tile, before, tile.text);
+  updateTextToolbar();
+}
+
+// A new tile at a point on the board, straight into edit mode.
+function createTextTileAt(world) {
+  const tile = addTextTile({ text: '', style: TextTile.DEFAULTS, board: { x: world.x, y: world.y, w: TEXT_DEFAULT_W, h: 40 } });
+  if (!tile) return null;
+  tile.isNew = true; // the undo entry is pushed once there is something in it (see endTextEdit)
+  bringToFront(tile);
+  selectOnly(tile);
+  beginTextEdit(tile);
+  return tile;
+}
+function viewCentreWorld() {
+  const r = gridRect();
+  return toCanvas(r.left + r.width / 2, r.top + r.height / 2);
+}
+
+document.getElementById('add-text').addEventListener('click', () => {
+  if (!isBoard()) { setStatus('Text tiles live on the board – switch to Board mode'); return; }
+  const c = viewCentreWorld();
+  createTextTileAt({ x: c.x - TEXT_DEFAULT_W / 2, y: c.y });
+});
+// double-click empty board space makes a note there
+grid.addEventListener('dblclick', (e) => {
+  if (!isBoard()) return;
+  if (e.target !== grid && e.target !== canvas) return; // not on a tile
+  e.preventDefault();
+  createTextTileAt(toCanvas(e.clientX, e.clientY));
+});
+
+// ---------- the floating text style toolbar ----------
+// One toolbar for the whole app, shown whenever the selection holds a text tile and parked just
+// above the selected tiles' screen rects. Built once, imperatively (the CSP forbids innerHTML
+// markup with inline style), then refreshed from the first selected tile.
+let textToolbar = null;   // { el, ...controls }
+let colorPop = null;
+let styleTimer = null, styleBefores = null;
+
+function selectedTextTiles() { return [...selection].filter((t) => t.type === 'text' && tiles.includes(t)); }
+
+function applyTextStyle(patch, { debounce = false } = {}) {
+  const list = selectedTextTiles();
+  if (!list.length) return;
+  if (!styleBefores) styleBefores = list.map((t) => ({ ...t.style }));
+  for (const t of list) { t.style = TextTile.normalize({ ...t.style, ...patch }); renderTextTile(t); }
+  fillTextToolbar();
+  positionTextToolbar();
+  const commit = () => { const b = styleBefores; styleBefores = null; if (b) recordTextStyle(list, b); };
+  clearTimeout(styleTimer);
+  if (debounce) styleTimer = setTimeout(commit, 250); else commit();
+}
+
+function buildTextToolbar() {
+  const el = document.createElement('div');
+  el.className = 'text-toolbar';
+  el.addEventListener('pointerdown', (e) => {
+    e.stopPropagation(); // never clears the selection or starts a lasso
+    // a button press keeps the caret where it is; the select and the number inputs need the focus
+    if (e.target.closest('button') && !e.target.closest('input, select')) e.preventDefault();
+  });
+  const mk = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; el.appendChild(n); return n; };
+
+  const font = mk('select', 'font');
+  for (const f of TextTile.FONTS) {
+    const o = document.createElement('option');
+    o.value = f; o.textContent = f; o.style.fontFamily = f; // each option in its own face
+    font.appendChild(o);
+  }
+  font.title = 'Font';
+  font.addEventListener('change', () => applyTextStyle({ font: font.value }));
+
+  const minus = mk('button', null, '−'); minus.title = 'Smaller';
+  const size = mk('input'); size.type = 'number'; size.min = '8'; size.max = '400'; size.step = '2'; size.title = 'Size';
+  const plus = mk('button', null, '+'); plus.title = 'Bigger';
+  const bump = (d) => { const v = Number(size.value) || TextTile.DEFAULTS.size; size.value = String(v + d); applyTextStyle({ size: Number(size.value) }); };
+  minus.addEventListener('click', () => bump(-2));
+  plus.addEventListener('click', () => bump(2));
+  size.addEventListener('input', () => applyTextStyle({ size: Number(size.value) }, { debounce: true }));
+
+  mk('div', 'sep');
+  const color = mk('button', 'swatch'); color.title = 'Text colour';
+  color.addEventListener('click', () => openColorPop(color, textToolbar.state().color, (c) => applyTextStyle({ color: c })));
+
+  mk('div', 'sep');
+  const aligns = {};
+  for (const [a, label] of [['left', 'L'], ['center', 'C'], ['right', 'R']]) {
+    const b = mk('button', 'align', label);
+    b.title = `Align ${a}`;
+    b.addEventListener('click', () => applyTextStyle({ align: a }));
+    aligns[a] = b;
+  }
+
+  mk('div', 'sep');
+  const bubble = mk('button', 'bubble', 'Bubble');
+  bubble.title = 'Draw the text inside a filled box';
+  bubble.addEventListener('click', () => applyTextStyle({ bubble: !textToolbar.state().bubble }));
+  const fill = mk('button', 'swatch'); fill.title = 'Bubble fill';
+  fill.addEventListener('click', () => openColorPop(fill, textToolbar.state().fill, (c) => applyTextStyle({ fill: c })));
+  const outline = mk('button', 'swatch'); outline.title = 'Bubble outline';
+  outline.addEventListener('click', () => openColorPop(outline, textToolbar.state().outline, (c) => applyTextStyle({ outline: c })));
+  const ow = mk('input'); ow.type = 'number'; ow.min = '0'; ow.max = '20'; ow.step = '1'; ow.title = 'Outline width';
+  ow.addEventListener('input', () => applyTextStyle({ outlineWidth: Number(ow.value) }, { debounce: true }));
+
+  document.body.appendChild(el);
+  textToolbar = { el, font, size, color, aligns, bubble, fill, outline, ow, state: () => (selectedTextTiles()[0] || { style: TextTile.DEFAULTS }).style || TextTile.DEFAULTS };
+  return textToolbar;
+}
+
+// the controls show the first selected text tile; mixed selections are not indicated
+function fillTextToolbar() {
+  const first = selectedTextTiles()[0];
+  if (!textToolbar || !first) return;
+  const s = first.style;
+  textToolbar.font.value = s.font;
+  if (document.activeElement !== textToolbar.size) textToolbar.size.value = String(s.size);
+  textToolbar.color.style.background = s.color;
+  for (const [a, b] of Object.entries(textToolbar.aligns)) b.classList.toggle('on', s.align === a);
+  textToolbar.bubble.classList.toggle('on', s.bubble);
+  textToolbar.fill.style.background = s.fill;
+  textToolbar.outline.style.background = s.outline;
+  if (document.activeElement !== textToolbar.ow) textToolbar.ow.value = String(s.outlineWidth);
+  for (const c of [textToolbar.fill, textToolbar.outline, textToolbar.ow]) c.disabled = !s.bubble;
+}
+
+function positionTextToolbar() {
+  const list = selectedTextTiles();
+  if (!textToolbar || !list.length) return;
+  const rects = list.map((t) => t.el.getBoundingClientRect());
+  const left = Math.min(...rects.map((r) => r.left));
+  const top = Math.min(...rects.map((r) => r.top));
+  const bottom = Math.max(...rects.map((r) => r.bottom));
+  const el = textToolbar.el;
+  const r = el.getBoundingClientRect();
+  const maxX = document.documentElement.clientWidth - r.width - 8;
+  let y = top - r.height - 8;
+  if (y < 40) y = bottom + 8; // under the app toolbar: flip below the tiles
+  el.style.left = Math.max(8, Math.min(left, maxX)) + 'px';
+  el.style.top = Math.max(8, Math.min(y, document.documentElement.clientHeight - r.height - 8)) + 'px';
+}
+
+function updateTextToolbar() {
+  const list = selectedTextTiles();
+  if (!list.length || !isBoard()) {
+    if (textToolbar) textToolbar.el.hidden = true;
+    closeColorPop();
+    return;
+  }
+  if (!textToolbar) buildTextToolbar();
+  textToolbar.el.hidden = false;
+  fillTextToolbar();
+  positionTextToolbar();
+}
+
+function closeColorPop() { if (colorPop) { colorPop.remove(); colorPop = null; } }
+// The 8 group colours plus a full picker, anchored under the swatch that opened it.
+function openColorPop(anchor, current, onPick) {
+  const wasMine = colorPop && colorPop._anchor === anchor;
+  closeColorPop();
+  if (wasMine) return;
+  const pop = document.createElement('div');
+  pop.className = 'color-pop';
+  pop._anchor = anchor;
+  pop.addEventListener('pointerdown', (e) => e.stopPropagation());
+  for (const hex of Object.values(Groups.PALETTE)) {
+    const b = document.createElement('button');
+    b.style.background = hex;
+    b.title = hex;
+    b.addEventListener('click', () => { onPick(hex); closeColorPop(); });
+    pop.appendChild(b);
+  }
+  const picker = document.createElement('input');
+  picker.type = 'color';
+  picker.value = /^#[0-9a-f]{6}$/i.test(current) ? current : '#ffffff';
+  picker.addEventListener('input', () => onPick(picker.value));
+  pop.appendChild(picker);
+  document.body.appendChild(pop);
+  const a = anchor.getBoundingClientRect();
+  const r = pop.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(a.left, document.documentElement.clientWidth - r.width - 8)) + 'px';
+  pop.style.top = Math.min(a.bottom + 6, document.documentElement.clientHeight - r.height - 8) + 'px';
+  colorPop = pop;
+}
+window.addEventListener('pointerdown', (e) => { if (colorPop && !colorPop.contains(e.target)) closeColorPop(); }, true);
 
 // ---------- image sequences: a Nuke-style frame player ----------
 // A sequence tile draws frame N into a <canvas> from an in-memory bitmap cache; frames are never
@@ -3011,7 +3383,11 @@ function collectSession() {
       timelineHeight: layout.timelineHeight,
     },
     masterVolume,
-    videos: tiles.map((t) => (t.type === 'sequence' ? {
+    videos: tiles.map((t) => (t.type === 'text' ? {
+      // a text tile is only its words, its look and its box; older builds skip it (no path)
+      type: 'text', text: t.text, style: { ...t.style },
+      board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
+    } : t.type === 'sequence' ? {
       // image sequence: folder + run description + its look; the decoded-frame cache is found again by key
       type: 'sequence', dir: t.dir, path: t.path, galleryH: Math.round(galleryHOf(t)),
       seq: { name: t.seq.name, sep: t.seq.sep, pad: t.seq.pad, ext: t.seq.ext, start: t.seq.start, end: t.seq.end, count: t.seq.count, missing: t.seq.missing, single: !!t.seq.single, fps: t.fps, exposure: t.exposure, colour: t.colour, layer: t.seq.layer || '', part: t.seq.part || 0 },
@@ -3090,6 +3466,11 @@ async function applySession(data) {
     if (v.type === 'youtube' || v.type === 'twitch') {
       const parsed = typeof v.url === 'string' ? WebUrl.parse(v.url) : null;
       if (parsed && parsed.kind !== 'playlist') byIndex.set(i, addWebTile(v.url, parsed, v));
+      continue;
+    }
+    if (v.type === 'text') {
+      const t = addTextTile(v); // null when the record has no usable board: text has no gallery form
+      if (t) byIndex.set(i, t);
       continue;
     }
     if (v.type === 'sequence') {
@@ -3331,7 +3712,8 @@ document.getElementById('btn-fit').addEventListener('click', fitAll);
 function boardTilesInOrder() { return tiles.filter((t) => t.board).sort((a, b) => (a.board.y - b.board.y) || (a.board.x - b.board.x)); }
 // Fit to view: every tile the same height, the largest that flow-wraps inside the current view (undo = resize).
 function tidyFitToView() {
-  const list = boardTilesInOrder(); if (!list.length) return;
+  // text tiles size themselves from their text, so they sit this one out and keep their own box
+  const list = boardTilesInOrder().filter((t) => !t.freeAspect); if (!list.length) return;
   const entry = recordResize(list);
   const r = gridRect(); const W = (r.width - 2 * GAP) / board.zoom, H = (r.height - 2 * GAP) / board.zoom;
   const origin = toCanvas(r.left + GAP, r.top + GAP);
@@ -3352,7 +3734,7 @@ function tidyGrid() {
 // centred in the viewport; undo = resize.
 function maximizeSelectionInView() {
   if (!isBoard()) { setStatus('Board only'); return; }
-  const list = boardTilesInOrder().filter((t) => selection.has(t));
+  const list = boardTilesInOrder().filter((t) => selection.has(t) && !t.freeAspect);
   if (!list.length) { setStatus('Select a video first'); return; }
   const entry = recordResize(tiles.filter((t) => t.board));
   const r = gridRect(); const W = (r.width - 2 * GAP) / board.zoom, H = (r.height - 2 * GAP) / board.zoom;
@@ -3502,7 +3884,8 @@ addSelectedBtn.addEventListener('click', addSelected);
 sbEl.tabIndex = -1;
 sbEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && sbSelected.size) { e.preventDefault(); e.stopPropagation(); addSelected(); } });
 
-function onBoardPaths() { return new Set(tiles.map((t) => t.path.toLowerCase())); }
+// text tiles have no path at all, so they never mark a sidebar row as on the board
+function onBoardPaths() { return new Set(tiles.filter((t) => typeof t.path === 'string').map((t) => t.path.toLowerCase())); }
 function markOnBoard() {
   const on = onBoardPaths();
   for (const it of sbEl.querySelectorAll('.sb-item')) it.classList.toggle('onboard', on.has(it.dataset.path.toLowerCase()));
@@ -3723,11 +4106,13 @@ window.api.ytdlpAvailable().then((ok) => {
 window.addEventListener('keydown', (e) => {
   const tag = (e.target && e.target.tagName) || '';
   // a focused button (you just clicked one) shouldn't swallow the shortcuts
-  const inControl = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
+  // a tile being typed into counts as a control: its keys are text, not shortcuts
+  const inControl = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || !!(e.target && e.target.isContentEditable);
   const ctrl = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
 
-  if (e.key === 'Escape' && tsEl) { e.preventDefault(); closeTileSettings(); return; } // the ⚙ popover first
+  if (e.key === 'Escape' && colorPop) { e.preventDefault(); closeColorPop(); return; } // the colour pop first
+  if (e.key === 'Escape' && tsEl) { e.preventDefault(); closeTileSettings(); return; } // then the ⚙ popover
   // Esc leaves a fullscreen tile (Electron doesn't do this for page fullscreen by itself)
   if (e.key === 'Escape' && document.fullscreenElement) { e.preventDefault(); document.exitFullscreen().catch(() => {}); return; }
 

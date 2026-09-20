@@ -1,0 +1,84 @@
+{
+  "format": "multi-video-player-session",
+  "version": 5,
+  "savedAt": "2026-09-19T09:00:00.000Z",
+  "layout": {
+    "mode": "board",
+    "rowHeight": 240,
+    "galleryScale": 1,
+    "board": { "panX": -120, "panY": -80, "zoom": 0.75 },
+    "linked": true,
+    "timeDisplay": "clock",
+    "timelineExpanded": false,
+    "timelineHeight": 140
+  },
+  "masterVolume": 1,
+  "videos": [
+    {
+      "path": "C:\\nowhere\\clip.mp4",
+      "galleryH": 240,
+      "color": "blue",
+      "loop": false,
+      "currentTime": 0,
+      "volume": 1,
+      "muted": false,
+      "playbackRate": 1,
+      "paused": true,
+      "aspect": 1.7777777777777777,
+      "board": { "x": 0, "y": 0, "w": 640, "h": 360 },
+      "bookmarks": [],
+      "sync": null
+    },
+    {
+      "type": "text",
+      "text": "Sticky note\nsecond line",
+      "style": {
+        "font": "Segoe UI",
+        "size": 24,
+        "color": "#1a1a1a",
+        "align": "left",
+        "bubble": true,
+        "fill": "#ffd166",
+        "outline": "#000000",
+        "outlineWidth": 2
+      },
+      "board": { "x": 700, "y": 0, "w": 240, "h": 96 }
+    },
+    {
+      "type": "text",
+      "text": "plain floating text",
+      "style": {
+        "font": "Georgia",
+        "size": 40,
+        "color": "#e8e8ea",
+        "align": "center",
+        "bubble": false,
+        "fill": "#ffd166",
+        "outline": "#00000000",
+        "outlineWidth": 0
+      },
+      "board": { "x": 700, "y": 160, "w": 360, "h": 60 }
+    },
+    {
+      "type": "text",
+      "text": "unknown font, silly size",
+      "style": {
+        "font": "Papyrus",
+        "size": 9999,
+        "color": "not-a-colour",
+        "align": "justify",
+        "bubble": "yes",
+        "fill": "#0f0",
+        "outline": "#112233ff",
+        "outlineWidth": 99
+      },
+      "board": { "x": 700, "y": 280, "w": 400, "h": 120 }
+    },
+    {
+      "type": "text",
+      "text": "no board, must be dropped",
+      "style": {}
+    }
+  ],
+  "groups": []
+}
