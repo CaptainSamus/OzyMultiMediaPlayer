@@ -687,6 +687,7 @@ body.resizing .tile.resizing { pointer-events: auto; }
 .ctx { position: fixed; z-index: 200; background: var(--panel-2); border: 1px solid #333338; border-radius: 6px; padding: 4px; display: flex; flex-direction: column; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
 .ctx button { text-align: left; background: transparent; border: none; color: var(--text); padding: 5px 10px; cursor: pointer; font: inherit; border-radius: 4px; }
 .ctx button:hover { background: #35353c; }
+.ctx button:disabled { color: var(--muted); cursor: default; background: transparent; }
 
 /* image tiles: a static picture with just the title bar */
 .tile.image img { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }

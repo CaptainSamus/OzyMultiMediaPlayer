@@ -955,10 +955,16 @@ function recordRemove(tile) {
   });
 }
 
-// A new text tile is the one thing you can add with a keystroke, so it is the one add that is
-// undoable: 'before' takes it away again, 'after' rebuilds it from the same record a remove uses.
-function recordAddText(tile) {
-  undoStack.push({ kind: 'add', label: `add ${tileName(tile)}`, record: collectSession().videos[tiles.indexOf(tile)], index: tiles.indexOf(tile), tile, group: null, groupMembers: [], starts: null });
+// Adds you make with a keystroke are undoable: a new text tile, and a whole paste as one step.
+// 'before' takes them away again, 'after' rebuilds them from the same records a remove stores.
+function recordAdd(list, label) {
+  const all = collectSession().videos;
+  const items = list.filter((t) => tiles.includes(t)).map((t) => {
+    const index = tiles.indexOf(t);
+    return { record: all[index], index, tile: t, group: null, groupMembers: [], starts: null };
+  });
+  if (!items.length) return;
+  undoStack.push({ kind: 'add', label: label || `add ${tileName(items[0].tile)}`, items });
 }
 // one entry per editing session / per toolbar interaction
 function recordTextEdit(tile, before, after) {
@@ -975,11 +981,8 @@ function applyRects(entry, dir) { // dir: 'before' | 'after'
 }
 function restoreRemoved(entry) {
   const v = entry.record;
-  const t = v.type === 'text' ? addTextTile(v)
-    : v.type === 'image' ? addImageTile(v.path, v)
-    : v.type === 'sequence' ? addSequenceTile(v.dir, v.seq, v) // its disk cache is reused (same key)
-    : v.type && v.type !== 'file' ? addWebTile(v.url, WebUrl.parse(v.url), v) : addVideo(v.path, v);
-  if (!t) return; // a text record whose board was unusable: nothing to put back
+  const t = buildFromRecord(v);
+  if (!t) return; // e.g. a text record whose board was unusable: nothing to put back
   // put it back at its old index so gallery order is preserved
   tiles.splice(tiles.indexOf(t), 1); tiles.splice(Math.min(entry.index, tiles.length), 0, t);
   canvas.insertBefore(t.el, canvas.children[entry.index] || null);
@@ -1018,10 +1021,10 @@ function applyEntry(entry, dir) {
     if (dir === 'before') restoreRemoved(entry);
     else if (tiles.includes(entry.tile)) removeTile(entry.tile, { record: false });
   }
-  // an add is a remove read backwards
+  // an add is a remove read backwards; a paste is one add of several tiles
   else if (entry.kind === 'add') {
-    if (dir === 'before') { if (tiles.includes(entry.tile)) removeTile(entry.tile, { record: false }); }
-    else restoreRemoved(entry);
+    if (dir === 'before') for (const it of entry.items) { if (tiles.includes(it.tile)) removeTile(it.tile, { record: false }); }
+    else for (const it of [...entry.items].sort((a, b) => a.index - b.index)) restoreRemoved(it);
   }
   else if (entry.kind === 'text') {
     if (tiles.includes(entry.tile)) { entry.tile.text = entry[dir]; renderTextTile(entry.tile); updateTextToolbar(); }
@@ -1521,6 +1524,17 @@ grid.addEventListener('pointerdown', (e) => {
   const onBackground = e.target === grid || e.target === canvas;
   if (e.button === 1 || (e.button === 0 && e.altKey) || (e.button === 0 && onBackground && board.hand)) return startPan(e);
   if (e.button === 0 && onBackground) return startLasso(e);
+});
+// right-click on empty board space: copy the selection, or paste where the cursor is
+grid.addEventListener('contextmenu', (e) => {
+  if (!isBoard()) return;
+  if (e.target !== grid && e.target !== canvas) return; // a tile's own menu wins
+  e.preventDefault();
+  lastPointer = { clientX: e.clientX, clientY: e.clientY };
+  showRowMenu(e, [
+    ['Copy', () => copySelection(), !selection.size],
+    ['Paste', () => pasteClipboard(), !clipboard || !clipboard.records.length],
+  ]);
 });
 // stop Chromium's middle-click autoscroll from fighting the pan
 grid.addEventListener('mousedown', (e) => { if (isBoard() && e.button === 1) e.preventDefault(); });
@@ -2653,7 +2667,7 @@ function endTextEdit(tile) {
   if (!tile.text) { removeTile(tile, { record: !tile.isNew }); return; }
   renderTextTile(tile);
   // a brand new note is one undo step ("add"), not "add" plus "edit text"
-  if (tile.isNew) { tile.isNew = false; recordAddText(tile); } else recordTextEdit(tile, before, tile.text);
+  if (tile.isNew) { tile.isNew = false; recordAdd([tile]); } else recordTextEdit(tile, before, tile.text);
   updateTextToolbar();
 }
 
@@ -3434,6 +3448,42 @@ function collectSession() {
   };
 }
 
+// One session record -> one tile. The single place that knows which record shape builds which
+// kind of tile, shared by opening a session, undoing a remove, and pasting. Returns the tile (null
+// when the record can't build one) and whether its file is currently unreachable.
+function buildFromRecord(v) {
+  if (!v || typeof v !== 'object') return null;
+  if (v.type === 'youtube' || v.type === 'twitch') {
+    const parsed = typeof v.url === 'string' ? WebUrl.parse(v.url) : null;
+    return parsed && parsed.kind !== 'playlist' ? addWebTile(v.url, parsed, v) : null;
+  }
+  // text: null when the record has no usable board, since text has no gallery form
+  if (v.type === 'text') return addTextTile(v);
+  if (v.type === 'sequence') {
+    const seq = v.seq;
+    if (typeof v.dir !== 'string' || !seq || typeof seq.name !== 'string') return null;
+    return addSequenceTile(v.dir, seq, v); // its disk cache is reused (same key)
+  }
+  if (typeof v.path !== 'string') return null;
+  return v.type === 'image' ? addImageTile(v.path, v) : addVideo(v.path, v);
+}
+// the same, plus the "is the file still there?" check the file-backed kinds need
+async function addFromRecord(v) {
+  const missing = await recordFileMissing(v);
+  return { tile: buildFromRecord(v), missing };
+}
+async function recordFileMissing(v) {
+  if (!v || typeof v !== 'object') return false;
+  if (v.type === 'sequence') {
+    const seq = v.seq;
+    if (typeof v.dir !== 'string' || !seq || typeof seq.name !== 'string') return false;
+    return !(await window.api.fileExists(joinPath(v.dir, Sequence.framePath(seq, seq.start))));
+  }
+  if (v.type === 'youtube' || v.type === 'twitch' || v.type === 'text') return false;
+  if (typeof v.path !== 'string') return false;
+  return !(await window.api.fileExists(v.path));
+}
+
 async function applySession(data) {
   if (!data || !Array.isArray(data.videos)) throw new Error('Not a Multi Video Player session file.');
   const startedAt = Date.now();
@@ -3462,27 +3512,9 @@ async function applySession(data) {
   let missing = 0;
   const byIndex = new Map(); // index in data.videos -> tile (v3 files and bad entries leave gaps)
   for (const [i, v] of data.videos.entries()) {
-    if (!v) continue;
-    if (v.type === 'youtube' || v.type === 'twitch') {
-      const parsed = typeof v.url === 'string' ? WebUrl.parse(v.url) : null;
-      if (parsed && parsed.kind !== 'playlist') byIndex.set(i, addWebTile(v.url, parsed, v));
-      continue;
-    }
-    if (v.type === 'text') {
-      const t = addTextTile(v); // null when the record has no usable board: text has no gallery form
-      if (t) byIndex.set(i, t);
-      continue;
-    }
-    if (v.type === 'sequence') {
-      const seq = v.seq;
-      if (typeof v.dir !== 'string' || !seq || typeof seq.name !== 'string') continue;
-      if (!(await window.api.fileExists(joinPath(v.dir, Sequence.framePath(seq, seq.start))))) missing++;
-      byIndex.set(i, addSequenceTile(v.dir, seq, v));
-      continue;
-    }
-    if (typeof v.path !== 'string') continue;
-    if (!(await window.api.fileExists(v.path))) missing++;
-    byIndex.set(i, v.type === 'image' ? addImageTile(v.path, v) : addVideo(v.path, v));
+    const r = await addFromRecord(v);
+    if (r.missing) missing++;
+    if (r.tile) byIndex.set(i, r.tile);
   }
   // groups (session v4); v3 files have none
   nextGroupId = 1;
@@ -3967,10 +3999,11 @@ function showRowMenu(e, items) {
   closeRowMenu();
   ctxEl = document.createElement('div');
   ctxEl.className = 'ctx';
-  for (const [label, act] of items) {
+  for (const [label, act, disabled] of items) {
     const b = document.createElement('button');
     b.textContent = label;
-    b.addEventListener('click', () => { closeRowMenu(); act(); });
+    if (disabled) b.disabled = true; // shown greyed rather than hidden, so the menu keeps its shape
+    else b.addEventListener('click', () => { closeRowMenu(); act(); });
     ctxEl.appendChild(b);
   }
   document.body.appendChild(ctxEl);
@@ -4101,6 +4134,71 @@ window.api.ytdlpAvailable().then((ok) => {
   if (!ok) sbNote.textContent = 'yt-dlp not found; playlists unavailable';
 });
 
+// ---------- copy / paste ----------
+// In-app clipboard: the selected tiles' session records, the same shape a saved file and undo's
+// remove already use, so paste can rebuild every tile type through addFromRecord. Groups are not
+// copied; pasted tiles start ungrouped with their own volume / mute / loop / bookmarks.
+let clipboard = null;        // { records, origin: {x,y}|null, lastPaste: {x,y}|null }
+let pointerOverBoard = false;
+let lastPointer = null;      // last client coords seen over the board, for "paste at the cursor"
+grid.addEventListener('pointerenter', () => { pointerOverBoard = true; });
+grid.addEventListener('pointerleave', () => { pointerOverBoard = false; });
+grid.addEventListener('pointermove', (e) => { lastPointer = { clientX: e.clientX, clientY: e.clientY }; });
+
+// what a tile looks like as one line of text, for the OS clipboard
+const recordLine = (r) => (r.type === 'text' ? r.text : r.url || r.dir || r.path || '');
+
+function copySelection() {
+  if (!selection.size) { setStatus('Nothing selected to copy'); return; }
+  const all = collectSession().videos; // same order as `tiles`, which undo already relies on
+  const records = tiles.map((t, i) => i).filter((i) => selection.has(tiles[i])).map((i) => all[i]);
+  const bb = Clipboard.bbox(records);
+  clipboard = { records, origin: bb ? { x: bb.x, y: bb.y } : null, lastPaste: null };
+  setStatus(`Copied ${records.length} tile${records.length === 1 ? '' : 's'}`);
+  logUi('info', 'copy', { tiles: records.length });
+  // also hand the paths / text to the OS clipboard, so they can be pasted elsewhere. Best effort.
+  try {
+    const lines = records.map(recordLine).filter(Boolean);
+    if (lines.length) navigator.clipboard.writeText(lines.join('\n')).catch(() => {});
+  } catch {}
+}
+
+async function pasteClipboard() {
+  if (!clipboard || !clipboard.records.length) { setStatus('Nothing to paste'); return; }
+  let target = null;
+  if (isBoard() && pointerOverBoard && lastPointer) {
+    target = toCanvas(lastPointer.clientX, lastPointer.clientY); // drop the block under the cursor
+  } else {
+    const base = clipboard.lastPaste || clipboard.origin;
+    if (base) target = { x: base.x + 24, y: base.y + 24 }; // repeated pastes stagger
+  }
+  const recs = Clipboard.placeRecords(clipboard.records, target);
+  const added = [];
+  let missing = 0, skipped = 0;
+  for (const v of recs) {
+    if (!isBoard() && v.type === 'text') { skipped++; continue; } // text has no gallery form
+    const r = await addFromRecord({ ...v, sync: null }); // groups aren't copied, so nor are offsets
+    if (r.missing) missing++;
+    if (r.tile) added.push(r.tile);
+  }
+  if (added.length) {
+    clearSelection();
+    for (const t of added) { bringToFront(t); setSelected(t, true); }
+    if (isBoard()) placeOnBoard(added.filter((t) => !t.board));
+    layoutTiles();
+    recordAdd(added, `paste ${added.length} tile${added.length === 1 ? '' : 's'}`);
+  }
+  clipboard.lastPaste = target;
+  updateChrome();
+  markOnBoard();
+  renderTimeline();
+  logUi('info', 'paste', { tiles: added.length, missing, skipped });
+  const notes = [];
+  if (missing) notes.push(`${missing} missing`);
+  if (skipped) notes.push('text tiles paste on the board only');
+  setStatus(`Pasted ${added.length} tile${added.length === 1 ? '' : 's'}` + (notes.length ? ` – ${notes.join(', ')}` : ''));
+}
+
 // ---------- keyboard ----------
 
 window.addEventListener('keydown', (e) => {
@@ -4132,6 +4230,9 @@ window.addEventListener('keydown', (e) => {
   if (ctrl && key === 'y' && !inControl) { e.preventDefault(); redo(); return; }
   if (ctrl && e.key.toLowerCase() === 'g' && !inControl) { e.preventDefault(); e.shiftKey ? (active && dissolveGroup(active)) : toggleGroupFromSelection(); return; }
   if (ctrl && e.key.toLowerCase() === 'a' && !isBoard() && !inControl) { e.preventDefault(); document.getElementById('add-local').click(); return; }
+  // inControl already covers a text tile being edited, where these are the native copy and paste
+  if (ctrl && key === 'c' && !inControl) { e.preventDefault(); copySelection(); return; }
+  if (ctrl && key === 'v' && !inControl) { e.preventDefault(); pasteClipboard(); return; }
 
   if (inControl) return;
   if (key === 'c' && !ctrl) { tryOpenCompare(); return; }
