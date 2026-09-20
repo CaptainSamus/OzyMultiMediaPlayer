@@ -4152,7 +4152,7 @@ function copySelection() {
   if (!selection.size) { setStatus('Nothing selected to copy'); return; }
   const all = collectSession().videos; // same order as `tiles`, which undo already relies on
   const records = tiles.map((t, i) => i).filter((i) => selection.has(tiles[i])).map((i) => all[i]);
-  const bb = Clipboard.bbox(records);
+  const bb = TileClipboard.bbox(records);
   clipboard = { records, origin: bb ? { x: bb.x, y: bb.y } : null, lastPaste: null };
   setStatus(`Copied ${records.length} tile${records.length === 1 ? '' : 's'}`);
   logUi('info', 'copy', { tiles: records.length });
@@ -4172,19 +4172,26 @@ async function pasteClipboard() {
     const base = clipboard.lastPaste || clipboard.origin;
     if (base) target = { x: base.x + 24, y: base.y + 24 }; // repeated pastes stagger
   }
-  const recs = Clipboard.placeRecords(clipboard.records, target);
+  const recs = TileClipboard.placeRecords(clipboard.records, target);
+  // a record with no board of its own (a gallery-only tile) cascades under the pasted block
+  const loosePoints = isBoard() ? TileClipboard.cascadePoints(recs, GAP) : [];
   const added = [];
-  let missing = 0, skipped = 0;
+  let missing = 0, skipped = 0, loose = 0;
   for (const v of recs) {
     if (!isBoard() && v.type === 'text') { skipped++; continue; } // text has no gallery form
+    const wasLoose = !(v.board && isFinite(Number(v.board.x)));
     const r = await addFromRecord({ ...v, sync: null }); // groups aren't copied, so nor are offsets
     if (r.missing) missing++;
-    if (r.tile) added.push(r.tile);
+    if (r.tile) {
+      if (isBoard() && wasLoose && !r.tile.board) placeOnBoard([r.tile], loosePoints[loose] || null);
+      added.push(r.tile);
+    }
+    if (wasLoose) loose++;
   }
   if (added.length) {
     clearSelection();
     for (const t of added) { bringToFront(t); setSelected(t, true); }
-    if (isBoard()) placeOnBoard(added.filter((t) => !t.board));
+    if (isBoard()) placeOnBoard(added.filter((t) => !t.board)); // anything still unplaced
     layoutTiles();
     recordAdd(added, `paste ${added.length} tile${added.length === 1 ? '' : 's'}`);
   }
