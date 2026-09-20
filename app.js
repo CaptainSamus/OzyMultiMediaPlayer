@@ -828,6 +828,7 @@ const cmp = { el: document.getElementById('compare'), a: null, b: null, saved: [
 const cmpQ = (s) => cmp.el.querySelector(s);
 
 function openCompare(a, b) {
+  hpReset(); // the compare view owns playback while it is open
   cmp.a = a; cmp.b = b; cmp.mode = 'wipe'; cmp.wipe = 50;
   cmp.el.classList.remove('flip', 'show-a');
   cmp.el.style.setProperty('--wipe', '50%');
@@ -1809,8 +1810,8 @@ function addVideo(filePath, state = {}) {
   fwdBtn.addEventListener('click', (e) => seekBy(e.shiftKey ? 30 : 5));
   for (const b of [backBtn, fwdBtn, el.querySelector('.fstep-back'), el.querySelector('.fstep-fwd')]) b.addEventListener('dblclick', (e) => e.stopPropagation());
 
-  el.addEventListener('pointerenter', () => { hoveredTile = tile; });
-  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; });
+  el.addEventListener('pointerenter', () => { hoveredTile = tile; hpEnter(tile); });
+  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; hpLeave(tile); });
 
   const errorText = errorEl.querySelector('.error-text');
   const makeBtn = errorEl.querySelector('.make-proxy');
@@ -2024,6 +2025,7 @@ function wireFullscreenButton(el) {
   for (const ev of ['pointerdown', 'dblclick']) b.addEventListener(ev, (e) => e.stopPropagation()); // never a board drag
 }
 document.addEventListener('fullscreenchange', () => {
+  if (document.fullscreenElement) hpReset(); // a fullscreen tile owns playback; hovering resumes on exit
   for (const t of tiles) {
     const b = t.el.querySelector('.fullscreen');
     if (!b) continue; // text tiles have no overlay and never go fullscreen
@@ -2459,8 +2461,8 @@ function addWebTile(url, parsed, state = {}, at = null) {
   for (const b of [playBtn, muteBtn]) b.addEventListener('dblclick', (e) => e.stopPropagation());
 
   // ----- shared tile behaviour: hover, select, remove, resize, drag -----
-  el.addEventListener('pointerenter', () => { hoveredTile = tile; });
-  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; });
+  el.addEventListener('pointerenter', () => { hoveredTile = tile; hpEnter(tile); });
+  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; hpLeave(tile); });
   el.addEventListener('click', (e) => {
     if (isBoard() || !e.shiftKey || e.target.closest('button, input, select')) return;
     setSelected(tile, !selection.has(tile));
@@ -2520,8 +2522,8 @@ function addImageTile(filePath, state = {}, at = null) {
   el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
   wireFullscreenButton(el);
   img.addEventListener('dblclick', () => toggleTileFullscreen(el));
-  el.addEventListener('pointerenter', () => { hoveredTile = tile; });
-  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; });
+  el.addEventListener('pointerenter', () => { hoveredTile = tile; hpEnter(tile); });
+  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; hpLeave(tile); });
   el.addEventListener('click', (e) => {
     if (isBoard() || !e.shiftKey || e.target.closest('button')) return;
     setSelected(tile, !selection.has(tile));
@@ -2571,8 +2573,8 @@ function addTextTile(record = {}) {
   tiles.push(tile);
   const body = el.querySelector('.text-body');
   el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
-  el.addEventListener('pointerenter', () => { hoveredTile = tile; });
-  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; });
+  el.addEventListener('pointerenter', () => { hoveredTile = tile; hpEnter(tile); });
+  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; hpLeave(tile); });
   el.addEventListener('dblclick', (e) => { e.stopPropagation(); beginTextEdit(tile); });
   el.addEventListener('contextmenu', (e) => {
     e.preventDefault(); e.stopPropagation();
@@ -3160,8 +3162,8 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
   applyTileLoop(tile);
   wireSettingsButton(tile);
 
-  el.addEventListener('pointerenter', () => { hoveredTile = tile; });
-  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; });
+  el.addEventListener('pointerenter', () => { hoveredTile = tile; hpEnter(tile); });
+  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; hpLeave(tile); });
   el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
   wireFullscreenButton(el);
   for (const h of el.querySelectorAll('.handle')) {
@@ -3710,8 +3712,14 @@ document.getElementById('btn-cache').addEventListener('click', async () => {
   if (!files) { setStatus('Cache is empty'); return; }
   if (confirm(`${files} cached files (playable copies and thumbnails) use ${mb} MB. Clear the cache?`)) { await window.api.clearCache(); setStatus('Cache cleared'); }
 });
-document.getElementById('btn-play-all').addEventListener('click', () => tiles.forEach(playTile));
-document.getElementById('btn-pause-all').addEventListener('click', () => tiles.forEach(pauseTile));
+document.getElementById('btn-play-all').addEventListener('click', () => {
+  if (hoverPlayOn()) { setStatus('Hover play is on'); return; }
+  tiles.forEach(playTile);
+});
+document.getElementById('btn-pause-all').addEventListener('click', () => {
+  if (hoverPlayOn()) { setStatus('Hover play is on'); return; }
+  tiles.forEach(pauseTile);
+});
 /* DISABLED (Mark, 2026-09-11): Mute all + Unmute all merged into one toggle (below)
 document.getElementById('btn-mute-all').addEventListener('click', () => tiles.forEach((t) => setOwnMuted(t, true)));
 document.getElementById('btn-unmute-all').addEventListener('click', () => {
@@ -4126,6 +4134,7 @@ window.api.getSettings().then((s) => {
   sidebar.setTab(settings.sidebar.tab);
   refreshUpdateMenu(); // the update checkboxes come from the same settings file
   wheelZoomEl.checked = !!settings.wheelZoom;
+  hoverPlayBtn.classList.toggle('toggled', !!settings.hoverPlay); // the mode survives a restart
   renderFolders();
   renderPlaylists(); // from the cache in settings.json, no refetch
 });
@@ -4133,6 +4142,62 @@ window.api.ytdlpAvailable().then((ok) => {
   document.getElementById('sb-add-playlist').disabled = !ok;
   if (!ok) sbNote.textContent = 'yt-dlp not found; playlists unavailable';
 });
+
+// ---------- hover play ----------
+// A viewing mode: every video stays paused until the cursor rests on it. The timing rules live in
+// lib/hoverplay.js; this half owns the tiles - turning an action into a play/pause on the right
+// thing (a synced group moves together), and keeping one timer pointed at the next due moment.
+const hp = HoverPlay.create({ delay: 150 });
+let hpTimer = null;
+let hpSeq = 0;
+const hpId = (t) => (t.hpId || (t.hpId = ++hpSeq)); // stable per tile, unlike an index
+const hpTile = (id) => tiles.find((t) => t.hpId === id) || null;
+const hoverPlayOn = () => !!(settings && settings.hoverPlay);
+const hoverPlayBusy = () => !cmp.el.hidden || !!document.fullscreenElement; // compare / fullscreen own playback
+
+function hpApply(actions) {
+  for (const a of actions) {
+    const t = hpTile(a.id);
+    if (!t || !t.pb || !tiles.includes(t)) continue;
+    const g = t.group;
+    // a synced group plays and pauses as one, so hovering a member moves the whole group
+    if (g && g.sync && t.sync) { t.pb[a.op](); broadcast(t, a.op); }
+    else t.pb[a.op]();
+  }
+  hpSchedule();
+}
+function hpSchedule() {
+  clearTimeout(hpTimer);
+  hpTimer = null;
+  const due = hp.nextDue();
+  if (due === null) return;
+  hpTimer = setTimeout(() => hpApply(hp.tick(performance.now())), Math.max(0, due - performance.now()));
+}
+// called from every tile's pointerenter / pointerleave, next to where hoveredTile is set
+function hpEnter(t) {
+  if (!hoverPlayOn() || !t.pb || hoverPlayBusy()) return;
+  hpApply(hp.enter(hpId(t), performance.now()));
+}
+function hpLeave(t) {
+  if (!hoverPlayOn() || !t.pb) return;
+  hpApply(hp.leave(hpId(t), performance.now()));
+}
+function hpReset() { hpApply(hp.reset()); }
+
+const hoverPlayBtn = document.getElementById('hover-play');
+function setHoverPlay(on) {
+  settings.hoverPlay = !!on;
+  saveSettings();
+  hoverPlayBtn.classList.toggle('toggled', settings.hoverPlay);
+  hpReset(); // whatever hover started stops either way
+  if (settings.hoverPlay) {
+    tiles.forEach(pauseTile); // start from silence: nothing plays until you hover it
+    setStatus('Hover play on: a video plays while the cursor rests on it. Space and Play all are off.');
+  } else {
+    setStatus('Hover play off: videos stay as they are, Space and Play all work again.');
+  }
+}
+hoverPlayBtn.addEventListener('click', () => setHoverPlay(!hoverPlayOn()));
 
 // ---------- copy / paste ----------
 // In-app clipboard: the selected tiles' session records, the same shape a saved file and undo's
@@ -4265,6 +4330,7 @@ window.addEventListener('keydown', (e) => {
 
   if (e.code === 'Space') {
     e.preventDefault();
+    if (hoverPlayOn()) { setStatus('Hover play is on'); return; } // the cursor decides what plays
     const anyPlaying = tiles.some(isPlaying);
     tiles.forEach((t) => (anyPlaying ? pauseTile(t) : playTile(t)));
   } else if (e.key === 'Escape') {
