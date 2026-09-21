@@ -1,12 +1,16 @@
 // Fetches the platform binaries that packaging needs into bin/. Dev/CI-time only; the app never downloads them.
-//   Windows: bin/yt-dlp.exe
-//   macOS:   bin/yt-dlp (universal) and bin/darwin-<arch>/ffmpeg for arm64 and x64.
+//   Windows: bin/yt-dlp.exe, bin/qjs.exe
+//   macOS:   bin/yt-dlp (universal), bin/darwin-<arch>/ffmpeg and bin/darwin-<arch>/qjs for arm64 and x64.
 //            ffmpeg-static only installs the build machine's own arch, so both are fetched here from
 //            the same release ffmpeg-static uses; electron-builder then picks one per arch.
+// qjs is QuickJS-NG: yt-dlp runs YouTube's player JavaScript in it to solve the URL challenge.
+// Its tag is pinned rather than 'latest' so a build is reproducible; bump QJS_TAG by hand.
 // OZY_FETCH_PLATFORM=darwin|win32 overrides the platform (to test the other path).
 const fs = require('fs'); const path = require('path'); const https = require('https'); const zlib = require('zlib');
 const platform = process.env.OZY_FETCH_PLATFORM || process.platform;
 const bin = path.join(__dirname, '..', 'bin');
+const QJS_TAG = 'v0.17.0';
+const QJS = 'https://github.com/quickjs-ng/quickjs/releases/download/' + QJS_TAG + '/';
 
 function download(url, out, { gunzip = false } = {}) {
   if (fs.existsSync(out)) { console.log('already present', path.relative(process.cwd(), out)); return Promise.resolve(); }
@@ -32,8 +36,10 @@ function download(url, out, { gunzip = false } = {}) {
     const tag = process.env[pkg['binary-release-tag-env-var']] || pkg['binary-release-tag'];
     for (const arch of ['arm64', 'x64']) {
       await download(`https://github.com/eugeneware/ffmpeg-static/releases/download/${tag}/ffmpeg-darwin-${arch}.gz`, path.join(bin, `darwin-${arch}`, 'ffmpeg'), { gunzip: true });
+      await download(QJS + `qjs-darwin-${arch === 'arm64' ? 'arm64' : 'x86_64'}`, path.join(bin, `darwin-${arch}`, 'qjs'));
     }
   } else {
     await download('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe', path.join(bin, 'yt-dlp.exe'));
+    await download(QJS + 'qjs-windows-x86_64.exe', path.join(bin, 'qjs.exe'));
   }
 })().catch((e) => { console.error(e.message); process.exit(1); });

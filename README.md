@@ -14,8 +14,11 @@ working offline without them.
 
 Every release on the [Releases page](https://github.com/CaptainSamus/OzyMultiMediaPlayer/releases)
 has an installer and a portable version for each system. All of them are
-self-contained: ffmpeg, ffprobe and yt-dlp are bundled inside, so nothing is
-downloaded on first run.
+self-contained: ffmpeg, ffprobe, yt-dlp and
+[QuickJS-NG](https://github.com/quickjs-ng/quickjs) (MIT) are bundled inside, so
+nothing is downloaded on first run. QuickJS-NG is a small JavaScript engine that
+yt-dlp uses to solve YouTube's player challenge; without it YouTube hands out no
+playable formats at all.
 
 | System | Installer | Portable (nothing to install) |
 |---|---|---|
@@ -50,7 +53,8 @@ npm run dist       # build the installer and portable exe into dist\
 
 `npm install` downloads Electron, electron-builder and the ffmpeg/ffprobe
 binaries once into `node_modules/`. `npm run dist` (or `npm run prefetch`)
-downloads `yt-dlp.exe` once into `bin/` for packaging. Releases are built by
+downloads `yt-dlp.exe` and `qjs.exe` (QuickJS-NG, pinned to the `QJS_TAG` in
+`scripts/fetch-ytdlp.js`) once into `bin/` for packaging. Releases are built by
 GitHub Actions (`.github/workflows/release.yml`) when a `v*` tag is pushed:
 Windows and macOS, all attached to one release. You can also
 double-click `start.bat`, or open a session straight away with

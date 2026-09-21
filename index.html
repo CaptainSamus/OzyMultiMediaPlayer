@@ -359,7 +359,7 @@
       <iframe allow="autoplay; fullscreen; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin"></iframe>
       <div class="pan-shield"></div>
       <div class="overlay">
-        <div class="top"><button class="remove" title="Remove">✕</button><span class="group-swatch" hidden></span><span class="name"></span><select class="web-mode" title="How this video plays: a direct 720p stream, YouTube's own player (higher quality, needs a click), or a full-quality download kept in the cache"><option value="stream">Stream</option><option value="player">Player</option><option value="download">Local</option></select><button class="fullscreen" title="Fullscreen (Esc leaves)">⛶</button></div>
+        <div class="top"><button class="remove" title="Remove">✕</button><span class="group-swatch" hidden></span><span class="name"></span><select class="web-mode" title="How this video plays: YouTube's own player, or a full-quality download kept in the cache"><!-- Stream is hidden for YouTube from app.js (DISABLED, Mark 2026-09-21, until Task 35); Twitch clips have no embed, so they still use it --><option value="stream">Stream</option><option value="player">Player</option><option value="download">Local</option></select><button class="fullscreen" title="Fullscreen (Esc leaves)">⛶</button></div>
         <div class="bottom">
           <div class="markers"></div>
           <input type="range" class="seek" min="0" max="10000" value="0" step="1" title="Scrub">

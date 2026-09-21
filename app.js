@@ -2216,7 +2216,13 @@ function addWebTile(url, parsed, state = {}, at = null) {
     if (!streamable) { modeSel.hidden = true; return; }
     modeSel.value = tile.webMode;
     const opt = [...modeSel.options].find((o) => o.value === 'stream');
-    if (opt) opt.textContent = WebStream.labelFor('stream', tile.webQuality);
+    if (opt) {
+      opt.textContent = WebStream.labelFor('stream', tile.webQuality);
+      /* DISABLED (Mark, 2026-09-21): Stream is broken until Task 35; Player + timeline sync covers
+         the need. The <option> stays in index.html so restoring it is one line here.
+         A Twitch clip has no embed, so Stream is still its only way to play. */
+      opt.hidden = canPlayer;
+    }
     const playerOpt = [...modeSel.options].find((o) => o.value === 'player');
     if (playerOpt) playerOpt.hidden = !canPlayer; // Twitch clips: stream / local only
   };

@@ -47,9 +47,11 @@ gain a `qjs` option so the argument list is built in one place and unit-tested.
 rewritten to say why each is there (`android_vr` remains as the fallback that needs no runtime
 when the binary is missing).
 
-**Default mode.** `WebStream.DEFAULT_MODE = 'download'`. Existing sessions keep whatever mode
-they saved. A tile whose Stream attempt fails and whose download is available falls through to
-Local as today.
+**Default mode.** `WebStream.DEFAULT_MODE = 'player'` (amended 2026-09-21, Mark: Player, not
+Local - nothing may download until the user asks for it). Existing sessions keep whatever mode they
+saved, except Stream: `WebStream.mode('stream')` returns `'player'` and the Stream `<option>` is
+hidden for YouTube tiles (commented in place, not deleted) until Task 35. Twitch clips have no
+embed, so Stream remains their default and stays visible for them.
 
 **Diagnostics.** `--no-warnings` is dropped from resolve and download; stderr is already captured
 and only its last lines are shown to the user, so warnings cost nothing in the UI. `logTool` is
@@ -68,7 +70,9 @@ those two elements before `-f`; `DEFAULT_MODE === 'download'`; `mode('stream')` 
 
 **Out of scope.** Electron upgrade; Deno; auto-updating qjs.
 
-## 2. Task 35 — Stream mode as a DASH player (MediaSource Extensions)
+## 2. Task 35 (deferred 2026-09-21, Mark) — Stream mode as a DASH player (MediaSource Extensions)
+
+Deferred: Player mode plus timeline sync covers the need; keep this design if Stream is wanted later.
 
 **Purpose.** Play a YouTube video straight from YouTube's servers again, at up to 1080p, without
 downloading it first, with seeking and frame stepping working as they do for local files.
