@@ -201,25 +201,15 @@ itself when you click **Update yt-dlp** in the sidebar.
     row says how many layers a sequence has.
   - A missing frame shows the one before it with a "frame N missing"
     badge.
-- **How web videos play.** YouTube videos and Twitch clips play as real
-  videos: the bundled yt-dlp resolves the actual stream, so they start
-  without a click and behave like local files (timeline, Sync, frame step,
-  A/B, bookmarks). The pulldown on the tile's title bar switches between
-  **720p** (the direct stream), **Player** (YouTube's own embed, for higher
-  quality, and it needs a click) and **Local** (yt-dlp downloads the
-  full-quality file into the cache, with progress and Cancel; after that it
-  plays offline and frame-exact). Stream URLs expire, so a tile that has sat
-  for hours re-resolves itself. If YouTube refuses the direct stream (it
-  sometimes blocks them outright), the tile says so over its thumbnail and
-  offers the two things that do work: **Download** or **Player**, and it
-  remembers which you pick. Twitch live channels stay embed-only.
-- **YouTube default.** YouTube tiles open in the embedded **Player** by
-  default. **Local** (a full-quality download into the cache) is a menu
-  option, and nothing downloads until you pick it. **Stream** is hidden for
-  YouTube, because YouTube no longer offers a single audio + video file.
-- **JavaScript runtime for yt-dlp.** yt-dlp now ships with a JavaScript
-  runtime (QuickJS-NG, 2 MB, MIT) that it needs for YouTube's player
-  challenge; yt-dlp has deprecated extraction without one.
+- **How web videos play.** YouTube tiles use YouTube's own embedded player
+  by default, synced to the timeline and groups like any tile. The pulldown
+  on the tile's title bar offers **Local**: yt-dlp downloads the full-quality
+  file into the cache (with progress and Cancel; nothing downloads until you
+  pick it) for offline, frame-accurate work. **Stream** (a direct 720p URL)
+  is currently hidden for YouTube, because YouTube no longer serves a single
+  audio + video file, and remains the only mode for Twitch clips. yt-dlp
+  ships with a JavaScript runtime (QuickJS-NG, 2 MB, MIT) that it needs for
+  YouTube's player challenge. Twitch live channels stay embed-only.
 - **YouTube titles.** YouTube tiles show the video's title.
 - **Scrubbing over YouTube.** Scrubbing the timeline or a tile over a
   YouTube player no longer stalls it, and Sync leaves a buffering YouTube
