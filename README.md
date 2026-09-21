@@ -213,6 +213,19 @@ itself when you click **Update yt-dlp** in the sidebar.
   sometimes blocks them outright), the tile says so over its thumbnail and
   offers the two things that do work: **Download** or **Player**, and it
   remembers which you pick. Twitch live channels stay embed-only.
+- **YouTube default.** YouTube tiles open in the embedded **Player** by
+  default. **Local** (a full-quality download into the cache) is a menu
+  option, and nothing downloads until you pick it. **Stream** is hidden for
+  YouTube, because YouTube no longer offers a single audio + video file.
+- **JavaScript runtime for yt-dlp.** yt-dlp now ships with a JavaScript
+  runtime (QuickJS-NG, 2 MB, MIT) that it needs for YouTube's player
+  challenge; yt-dlp has deprecated extraction without one.
+- **YouTube titles.** YouTube tiles show the video's title.
+- **Scrubbing over YouTube.** Scrubbing the timeline or a tile over a
+  YouTube player no longer stalls it, and Sync leaves a buffering YouTube
+  tile alone.
+- **Date-stamped photo folders.** Folders containing date-stamped or
+  timestamped photos no longer fail to list (a sequence-detection crash).
 - **YouTube / Twitch tiles.** YouTube tiles use the app's own play, scrub,
   mute and volume controls and join Play all / Pause all and group mute /
   volume. They also get bookmarks, appear on the timeline, and join Sync and
