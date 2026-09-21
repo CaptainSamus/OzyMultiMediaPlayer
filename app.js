@@ -2093,6 +2093,8 @@ function ytController(iframe) {
       if ('playerState' in d.info) setState(d.info.playerState);
       if ('muted' in d.info) st.muted = d.info.muted;
       if ('volume' in d.info) st.volume = d.info.volume;
+      // the embed knows the video's real title; it costs nothing to take it
+      if (d.info.videoData && typeof d.info.videoData.title === 'string' && d.info.videoData.title) st.title = d.info.videoData.title;
     }
     if (d.event === 'onStateChange') setState(d.info);
     for (const l of listeners) l(st, d.event);
@@ -2113,6 +2115,9 @@ function ytController(iframe) {
     destroy: () => { clearInterval(hello); window.removeEventListener('message', onMsg); },
   };
 }
+
+// Background title lookups run one after another, never in parallel (see addWebTile).
+let titleQueue = Promise.resolve();
 
 // state: a session record ({ currentTime, volume, muted, paused, aspect, board, title }); at: board drop point.
 function addWebTile(url, parsed, state = {}, at = null) {
@@ -2161,6 +2166,19 @@ function addWebTile(url, parsed, state = {}, at = null) {
   if (parsed.type === 'youtube') tile.hue = GROUP_PALETTE.includes(state.color) ? state.color : GROUP_PALETTE[(tiles.length - 1) % GROUP_PALETTE.length];
   nameEl.textContent = tile.title;
   nameEl.title = url + '\nRight-click: copy URL';
+  // Until something tells us better, a web tile is named "YouTube · <id>". The real title arrives
+  // from the embed (infoDelivery carries videoData) or from a yt-dlp resolve; whichever comes
+  // first wins, and a name the user or a playlist already set is never overwritten.
+  const placeholderTitle = WebUrl.label(parsed);
+  const setWebTitle = (t) => {
+    const s = typeof t === 'string' ? t.trim() : '';
+    if (!s || s === tile.title || tile.title !== placeholderTitle) return;
+    tile.title = s;
+    nameEl.textContent = s;
+    renderTimeline();   // the legend and the lanes name it too
+    if (active) renderGroupBar();
+  };
+  tile.setWebTitle = setWebTitle;
   nameEl.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); sourceContext(e, parsed.type, url); });
 
   // ----- loading -----
@@ -2252,6 +2270,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
       streamBlocked((r && r.error) || 'Could not resolve this video');
       return;
     }
+    setWebTitle(r.title);
     tile.webQuality = r.height || 0;
     resolvedAt = r.resolvedAt || Date.now();
     refreshModeUI();
@@ -2385,6 +2404,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
     const pb = tile.pb = ytPlayback(yt);
     let first = true, knownDuration = 0, lastState = yt.st.state;
     yt.onChange((st, ev) => {
+      if (st.title) setWebTitle(st.title);
       // its own loop: YouTube has no loop-one-video flag, so restart when it ends
       if (st.state === 0 && lastState !== 0 && tile.loop && !loopOverridden(tile)) { pb.time = 0; yt.play(); }
       lastState = st.state;
@@ -2493,8 +2513,21 @@ function addWebTile(url, parsed, state = {}, at = null) {
   refreshMute();
   refreshModeUI();
   canvas.appendChild(frag);
-  // Stream is the default: nothing needs a click, and the tile is a normal video tile.
+  // Player is the default: the embed loads, nothing is downloaded, and nothing needs a click.
   if (tile.webMode === 'player') load(); else setWebMode(tile.webMode, { initial: true });
+  // The embed usually names the video within a second or two. If it doesn't (blocked embed, or a
+  // mode that never loads one), ask yt-dlp once, purely for the title - main caches the answer, and
+  // this never changes the tile's mode or starts a download.
+  if (parsed.type === 'youtube') {
+    setTimeout(() => {
+      if (!tiles.includes(tile) || tile.title !== placeholderTitle) return;
+      // one at a time: opening a session full of web tiles must not start a dozen yt-dlp processes
+      titleQueue = titleQueue.then(() => {
+        if (!tiles.includes(tile) || tile.title !== placeholderTitle) return null;
+        return window.api.resolveStream(url).then((r) => { if (r && r.ok) setWebTitle(r.title); });
+      }).catch(() => {});
+    }, 3000);
+  }
   if (isBoard() && !tile.board && at) placeOnBoard([tile], at);
   updateChrome();
   return tile;

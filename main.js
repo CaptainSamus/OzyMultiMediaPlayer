@@ -873,7 +873,9 @@ app.on('will-quit', cancelAllFrames);
 const WebStream = require('./lib/webstream');
 // Without the runtime yt-dlp fails on YouTube in ways that read like a yt-dlp bug, so say what is
 // actually wrong rather than letting somebody debug the wrong thing for an hour.
-const missingRuntimePrefix = () => (qjs() ? '' : 'YouTube needs the bundled JavaScript runtime (qjs), which is missing. ');
+// Only when the binary really is absent AND the failure looks like its absence, so a private or
+// deleted video is not reported as a missing runtime.
+const missingRuntimePrefix = (stderr) => (!qjs() && WebStream.runtimeLikely(stderr) ? 'YouTube needs the bundled JavaScript runtime (qjs), which is missing. ' : '');
 const resolved = new Map(); // url -> { url, height, title, resolvedAt }
 ipcMain.handle('resolve-stream', (_e, pageUrl) => new Promise((resolve) => {
   const key = String(pageUrl);
@@ -882,15 +884,16 @@ ipcMain.handle('resolve-stream', (_e, pageUrl) => new Promise((resolve) => {
   if (!fs.existsSync(binPath('yt-dlp'))) return resolve({ ok: false, error: 'yt-dlp not found' });
   // Which YouTube player client yields real formats changes over time, so try them in turn.
   const clients = String(key).includes('youtube') || String(key).includes('youtu.be') ? WebStream.CLIENTS : [''];
-  let lastErr = '', outdated = false;
+  let lastErr = '', lastStderr = '', outdated = false;
   const attempt = (i) => {
-    if (i >= clients.length) return resolve({ ok: false, error: missingRuntimePrefix() + (lastErr || 'Could not resolve this video'), outdated });
+    if (i >= clients.length) return resolve({ ok: false, error: missingRuntimePrefix(lastStderr) + (lastErr || 'Could not resolve this video'), outdated });
     const args = WebStream.resolveArgs(key, clients[i], { qjs: qjs() });
     execFile(binPath('yt-dlp'), args, { windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout: 60000 }, (err, stdout, stderr) => {
     if (err) logTool(`yt-dlp resolve (${clients[i]})`, args, err, stderr);
       const info = WebStream.parseResolved(stdout);
       if (!info) {
         lastErr = String(stderr || (err && err.message) || '').trim().split('\n').slice(-1)[0] || lastErr;
+        lastStderr += String(stderr || ''); // every client's complaint, for runtimeLikely
         outdated = outdated || Playlist.isOutdatedError(stderr);
         return attempt(i + 1);
       }
@@ -943,7 +946,7 @@ ipcMain.handle('download-video', (e, pageUrl, type, id) => {
         resolve({ file: out });
       } else {
         for (const p of [tmp, tmp + '.mp4', tmp + '.mkv', tmp + '.webm']) { try { fs.unlinkSync(p); } catch {} }
-        reject(new Error(code === null ? 'Cancelled' : missingRuntimePrefix() + 'yt-dlp failed:\n' + tail.trim().split('\n').slice(-3).join('\n')));
+        reject(new Error(code === null ? 'Cancelled' : missingRuntimePrefix(tail) + 'yt-dlp failed:\n' + tail.trim().split('\n').slice(-3).join('\n')));
       }
     });
     };
@@ -973,7 +976,7 @@ ipcMain.handle('list-playlist', (_e, url) => new Promise((resolve) => {
   execFile(binPath('yt-dlp'), args, { windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout: 120000 }, (err, stdout, stderr) => {
     if (err) {
       logTool('yt-dlp playlist', args, err, stderr);
-      return resolve({ ok: false, error: missingRuntimePrefix() + String(stderr || err.message).trim().split('\n').slice(-2).join('\n'), outdated: Playlist.isOutdatedError(stderr) });
+      return resolve({ ok: false, error: missingRuntimePrefix(stderr) + String(stderr || err.message).trim().split('\n').slice(-2).join('\n'), outdated: Playlist.isOutdatedError(stderr) });
     }
     const pl = Playlist.parseFlat(stdout);
     resolve(pl ? { ok: true, playlist: pl } : { ok: false, error: 'Could not read playlist' });
