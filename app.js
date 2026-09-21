@@ -204,10 +204,15 @@ const effectiveFps = (t) => t.fpsOverride || t.fps || null;
 // tile.pb: one shape over a local <video> or a YouTube player, so groups, Sync, loops, bookmarks
 // and the timeline don't care which. Twitch and image tiles have none. (t.video stays for
 // DOM-only things: fullscreen, A/B, frame step.)
+// Preview a position during a drag. Every adapter that can do better than a real seek provides
+// `scrub`; anything else just seeks, which is free for local files.
+const pbScrub = (pb, t) => { if (!pb) return; if (pb.scrub) pb.scrub(t); else pb.time = t; };
+
 function videoPlayback(video) {
   return {
     web: false, kind: 'video', settling: false,
     get time() { return video.currentTime || 0; }, set time(t) { video.currentTime = t; },
+    scrub(t) { video.currentTime = t; }, // a local file seeks instantly: preview and commit are the same
     get duration() { return video.duration || 0; },
     get paused() { return video.paused; },
     play() { video.play().catch(() => {}); }, pause() { video.pause(); },
@@ -222,12 +227,22 @@ function ytPlayback(yt) {
   const st = yt.st;
   return {
     web: true, kind: 'web',
-    get settling() { return performance.now() - seekAt < 1000; },
+    // A second after a seek, and for as long as the embed says it is still buffering (state 3).
+    // Without the buffering part the drift engine starts re-seeking a tile that has not finished
+    // loading the last seek, which keeps it buffering forever; the 10 s cap stops a dead embed
+    // from holding its group up for good.
+    get settling() {
+      const since = performance.now() - seekAt;
+      return since < 1000 || (st.state === 3 && since < 10000);
+    },
     get time() {
       const t = st.state === 1 && st.at ? st.time + (performance.now() - st.at) / 1000 * (st.rate || 1) : st.time;
       return st.duration > 0 ? Math.min(t, st.duration) : t;
     },
     set time(t) { yt.seek(t); st.time = t; st.at = performance.now(); seekAt = st.at; },
+    // While the user is dragging: ask the player to show that frame without committing to it
+    // (allowSeekAhead false), and do not start settling - there is a real seek coming on release.
+    scrub(t) { yt.scrub(t); st.time = t; st.at = performance.now(); },
     get duration() { return st.duration || 0; },
     get paused() { return yt.paused; },
     play() { yt.play(); }, pause() { yt.pause(); },
@@ -601,6 +616,8 @@ function broadcast(leader, action, value) {
       if (action === 'play') { if (gt >= m.start && gt < m.start + m.duration) p.play(); }
       else if (action === 'pause') p.pause();
       else if (action === 'seek') p.time = Groups.memberTime(gt, m.start, m.duration);
+      // mid-drag: members preview too, so a YouTube member is not made to re-buffer on every step
+      else if (action === 'scrub') pbScrub(p, Groups.memberTime(gt, m.start, m.duration));
     }
   } finally { syncing = false; }
 }
@@ -612,6 +629,9 @@ setInterval(() => {
     const ms = memberModel(g);
     const lead = leadOf(ms);
     if (!lead) continue;
+    // Someone is dragging a member's bar: the group is deliberately out of sync until they let go,
+    // and correcting it mid-drag just re-seeks (and re-buffers) the other members for nothing.
+    if (timelineScrubbing || ms.some((m) => m.tile.scrubbing)) continue;
     const gt = Groups.groupTime(lead.tile.pb.time, lead.start);
     const loopEnd = Groups.loopEnd(g.loop, ms.filter((m) => m.duration > 0), g.range); // ignore members still loading
     if (loopEnd !== null && gt >= loopEnd - 0.05) {
@@ -670,6 +690,14 @@ function tlTime(model) { return model.group ? groupTimeOf(model.group) : model.m
 function tlSeek(model, gt) {
   if (model.group && model.group.sync) seekGroup(model.group, gt);
   else for (const m of model.members) m.tile.pb.time = Groups.memberTime(gt, m.start, m.duration);
+}
+// True while the bottom timeline is being dragged: the drift engine leaves every group alone until
+// the drag ends, the same as it does for a tile's own bar (tile.scrubbing).
+let timelineScrubbing = false;
+// A preview seek on every member, never the group machinery (no broadcast, no drift work) - the
+// real seek happens once on release.
+function tlScrub(model, gt) {
+  for (const m of model.members) pbScrub(m.tile.pb, Groups.memberTime(gt, m.start, m.duration));
 }
 
 function renderTimeline() {
@@ -796,10 +824,24 @@ tlQ('.tl-bar').addEventListener('pointerdown', (e) => {
   if (e.button !== 0 || e.target.classList.contains('tl-handle') || !tl._model) return;
   const bar = tlQ('.tl-bar'); const r = bar.getBoundingClientRect();
   try { bar.setPointerCapture(e.pointerId); } catch {}
-  const seek = (ev) => tlSeek(tl._model, Timeline.tFor(ev.clientX - r.left, tl._end, r.width));
-  seek(e);
-  const onMove = (ev) => seek(ev);
-  const onUp = () => { bar.removeEventListener('pointermove', onMove); bar.removeEventListener('pointerup', onUp); bar.removeEventListener('pointercancel', onUp); };
+  const gtAt = (ev) => Timeline.tFor(ev.clientX - r.left, tl._end, r.width);
+  const seek = (ev) => tlSeek(tl._model, gtAt(ev));
+  seek(e); // the click itself is a real seek
+  // A drag only previews, at most every 150 ms: a YouTube embed re-buffers on every real seek and
+  // would spin for as long as the drag lasts.
+  const sc = Scrub.create();
+  let lastGt = gtAt(e);
+  timelineScrubbing = true;
+  const onMove = (ev) => {
+    lastGt = gtAt(ev);
+    const t = sc.move(lastGt, performance.now());
+    if (t !== null) tlScrub(tl._model, t);
+  };
+  const onUp = () => {
+    timelineScrubbing = false;
+    tlSeek(tl._model, sc.end(lastGt)); // where the drag actually ended, committed once
+    bar.removeEventListener('pointermove', onMove); bar.removeEventListener('pointerup', onUp); bar.removeEventListener('pointercancel', onUp);
+  };
   bar.addEventListener('pointermove', onMove); bar.addEventListener('pointerup', onUp); bar.addEventListener('pointercancel', onUp);
 });
 for (const which of ['in', 'out']) {
@@ -888,11 +930,28 @@ cmpQ('.cmp-mode').addEventListener('click', (e) => {
   cmp.el.classList.toggle('flip', cmp.mode === 'flip');
 });
 const cmpSeek = cmpQ('.cmp-seek');
+// A/B pairs two local videos today, but the same rule applies if either side is ever a web tile:
+// preview while dragging, commit once on release.
+const cmpScrubber = Scrub.create();
+let cmpScrubT = 0;
 cmpSeek.addEventListener('pointerdown', () => { cmp.scrubbing = true; });
-cmpSeek.addEventListener('pointerup', () => { cmp.scrubbing = false; });
+const endCmpScrub = () => {
+  if (!cmp.scrubbing) return;
+  cmp.scrubbing = false;
+  if (cmp.a && cmp.a.pb) { cmp.a.pb.time = cmpScrubber.end(cmpScrubT); broadcast(cmp.a, 'seek'); }
+};
+cmpSeek.addEventListener('pointerup', endCmpScrub);
+cmpSeek.addEventListener('pointercancel', endCmpScrub);
 cmpSeek.addEventListener('input', () => {
   const p = cmp.a.pb; if (!p.duration) return;
-  p.time = Number(cmpSeek.value) / 10000 * p.duration;
+  const t = Number(cmpSeek.value) / 10000 * p.duration;
+  if (cmp.scrubbing) {
+    cmpScrubT = t;
+    const v = cmpScrubber.move(t, performance.now());
+    if (v !== null) pbScrub(p, v);
+    return;
+  }
+  p.time = t;
   broadcast(cmp.a, 'seek');
 });
 cmpQ('.cmp-wipe').addEventListener('pointerdown', (e) => {
@@ -1913,8 +1972,15 @@ function addVideo(filePath, state = {}) {
   playBtn.addEventListener('click', () => tile.togglePlay());
 
   // scrubbing
+  // This file seeks instantly, but its group may hold a YouTube tile that does not: the broadcast
+  // is throttled during the drag and sent once on release.
+  const scrubber = Scrub.create();
   const beginScrub = () => { tile.scrubbing = true; el.classList.add('scrubbing'); };
-  const endScrub = () => { tile.scrubbing = false; el.classList.remove('scrubbing'); updateSeek(); };
+  const endScrub = () => {
+    const wasScrubbing = tile.scrubbing;
+    tile.scrubbing = false; el.classList.remove('scrubbing'); updateSeek();
+    if (wasScrubbing) { scrubber.end(0); broadcast(tile, 'seek'); }
+  };
   seek.addEventListener('pointerdown', beginScrub);
   seek.addEventListener('pointerup', endScrub);
   seek.addEventListener('pointercancel', endScrub);
@@ -1924,7 +1990,8 @@ function addVideo(filePath, state = {}) {
     video.currentTime = frac * video.duration;
     seek.style.setProperty('--progress', (frac * 100).toFixed(2) + '%');
     updateTimeLabel();
-    broadcast(tile, 'seek');
+    if (!tile.scrubbing) { broadcast(tile, 'seek'); return; }
+    if (scrubber.move(frac, performance.now()) !== null) broadcast(tile, 'scrub'); // preview the group
   });
   seek.addEventListener('change', () => { if (!tile.scrubbing) updateSeek(); });
   seek.addEventListener('keydown', (e) => {
@@ -2109,7 +2176,11 @@ function ytController(iframe) {
     // just-paused tile as still playing and restarts the others
     play: () => { post('playVideo'); if (st.ready && !isPlayState(st.state)) assume('play'); },
     pause: () => { post('pauseVideo'); if (st.ready && isPlayState(st.state)) assume('pause'); },
-    seek: (t) => post('seekTo', [t, true]), mute: () => post('mute'), unmute: () => post('unMute'),
+    seek: (t) => post('seekTo', [t, true]),
+    // allowSeekAhead false: show the frame, don't start fetching from there. YouTube's own advice
+    // for a drag; with true it re-buffers on every pointermove and never catches up.
+    scrub: (t) => post('seekTo', [t, false]),
+    mute: () => post('mute'), unmute: () => post('unMute'),
     volume: (v) => post('setVolume', [Math.round(v * 100)]), rate: (r) => post('setPlaybackRate', [r]),
     get paused() { return st.state !== 1 && st.state !== 3; }, // 1 playing, 3 buffering
     destroy: () => { clearInterval(hello); window.removeEventListener('message', onMsg); },
@@ -2170,6 +2241,9 @@ function addWebTile(url, parsed, state = {}, at = null) {
   // from the embed (infoDelivery carries videoData) or from a yt-dlp resolve; whichever comes
   // first wins, and a name the user or a playlist already set is never overwritten.
   const placeholderTitle = WebUrl.label(parsed);
+  // a drag on this tile's own bar previews at most every 150 ms and commits once on release
+  const webScrubber = Scrub.create();
+  let webScrubT = 0;
   const setWebTitle = (t) => {
     const s = typeof t === 'string' ? t.trim() : '';
     if (!s || s === tile.title || tile.title !== placeholderTitle) return;
@@ -2448,8 +2522,15 @@ function addWebTile(url, parsed, state = {}, at = null) {
       if (videoActive()) return; // the shared handler below drives the <video>
       if (!yt.st.duration) return;
       const t = Number(seek.value) / 10000 * yt.st.duration;
-      pb.time = t;
       timeEl.textContent = `${fmtTime(t)} / ${fmtTime(yt.st.duration)}`;
+      if (tile.scrubbing) {
+        // mid-drag: preview only, and leave the rest of a synced group alone until release
+        webScrubT = t;
+        const v = webScrubber.move(t, performance.now());
+        if (v !== null) pbScrub(pb, v);
+        return;
+      }
+      pb.time = t;
       broadcast(tile, 'seek');
     });
   }
@@ -2457,8 +2538,17 @@ function addWebTile(url, parsed, state = {}, at = null) {
   if (!tile.tick) tile.tick = () => { if (videoActive()) videoTick(); };
   playBtn.addEventListener('click', () => tile.togglePlay());
   muteBtn.addEventListener('click', () => { setOwnMuted(tile, !tile.ownMuted); refreshMute(); });
-  seek.addEventListener('pointerdown', () => { tile.scrubbing = true; el.classList.add('scrubbing'); });
-  const endVideoScrub = () => { tile.scrubbing = false; el.classList.remove('scrubbing'); };
+  seek.addEventListener('pointerdown', () => { tile.scrubbing = true; el.classList.add('scrubbing'); webScrubT = tile.pb ? tile.pb.time : 0; });
+  const endVideoScrub = () => {
+    const wasScrubbing = tile.scrubbing;
+    tile.scrubbing = false;
+    el.classList.remove('scrubbing');
+    // the embed was only previewing during the drag: commit where it ended, once
+    if (wasScrubbing && !videoActive() && tile.pb && tile.pb.web) {
+      tile.pb.time = webScrubber.end(webScrubT);
+      broadcast(tile, 'seek');
+    }
+  };
   seek.addEventListener('pointerup', endVideoScrub);
   seek.addEventListener('pointercancel', endVideoScrub);
   seek.addEventListener('input', () => {
@@ -3131,6 +3221,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     get frameSlack() { return 1.5 / tile.fps; },
     get time() { return tile.frame / tile.fps; }, // frame i covers [i / fps, (i + 1) / fps)
     set time(t) { seekFrame(t * tile.fps + 1e-6); },
+    scrub(t) { seekFrame(t * tile.fps + 1e-6); }, // frames come from the cache: no preview needed
     get duration() { return total / tile.fps; },
     get paused() { return !playing; },
     play() {
@@ -3174,8 +3265,14 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     for (const t of tiles) t.refreshTime && t.refreshTime();
     renderTimeline();
   });
+  // frames come from the cache, but a synced YouTube member does not: throttle the broadcast
+  const scrubber = Scrub.create();
   const beginScrub = () => { tile.scrubbing = true; el.classList.add('scrubbing'); };
-  const endScrub = () => { tile.scrubbing = false; el.classList.remove('scrubbing'); };
+  const endScrub = () => {
+    const wasScrubbing = tile.scrubbing;
+    tile.scrubbing = false; el.classList.remove('scrubbing');
+    if (wasScrubbing) { scrubber.end(0); broadcast(tile, 'seek'); }
+  };
   seek.addEventListener('pointerdown', beginScrub);
   seek.addEventListener('pointerup', endScrub);
   seek.addEventListener('pointercancel', endScrub);
@@ -3184,7 +3281,8 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     seekFrame(Math.round(frac * (total - 1)));
     seek.style.setProperty('--progress', (frac * 100).toFixed(2) + '%');
     refreshTime();
-    broadcast(tile, 'seek');
+    if (!tile.scrubbing) { broadcast(tile, 'seek'); return; }
+    if (scrubber.move(frac, performance.now()) !== null) broadcast(tile, 'scrub'); // preview the group
   });
   rateSel.addEventListener('change', () => { pb.rate = Number(rateSel.value); broadcast(tile, 'rate', pb.rate); });
   cv.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.suppressClick) tile.togglePlay(); });
