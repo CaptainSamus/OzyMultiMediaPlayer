@@ -702,6 +702,9 @@ body.resizing .tile.resizing { pointer-events: auto; }
 .tile.web.twitch .bottom { display: none; }
 .tile.web.stream .seek, .tile.web.stream .markers { display: none; }
 body.tile-dragging .tile.web iframe, body.resizing .tile.web iframe { pointer-events: none; } /* keep the drag when the cursor crosses an embed */
+/* Same for a file being dragged in from Explorer: without this the embed swallows the drop (and
+   the end of the drag), so the file never arrives and the overlay has nothing to close it. */
+body.dragging .tile.web iframe { pointer-events: none; }
 /* An embed swallows mouse presses, so a board pan can't start on one. With ✋ Pan + zoom on (or while
    a pan is running) this transparent layer takes the presses instead; otherwise it lets them through
    so the embed's own controls keep working. */

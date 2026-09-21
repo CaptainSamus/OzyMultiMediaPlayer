@@ -414,6 +414,33 @@ function bringToFront(tile) {
   tile.el.style.zIndex = String(++zTop);
 }
 
+// Every board interaction (drag, resize, lasso, pan) marks the body and the tile while it runs,
+// and `body.tile-dragging .tile` / `body.resizing .tile` set pointer-events: none on everything
+// else so the drag cannot be stolen. If the release is lost - it landed inside a cross-origin
+// embed, the window lost focus, the pointer was cancelled - those marks stay, and with them the
+// board is frozen: measured on 2026-09-21, elementFromPoint over a tile returned <main>. This
+// puts everything back, and every interaction calls it when its pointer sequence ends any way at
+// all. Mark's workaround (switch to Gallery and back) still calls it too, as the last resort.
+// Each board interaction registers how to end itself here while it runs, so a recovery can stop
+// it properly rather than only tidying the classes: a half-dead drag whose pointermove listeners
+// are still attached goes on moving tiles (and throws in boardBounds, seen 2026-09-21).
+const activeInteractions = new Set();
+function endActiveInteractions() {
+  for (const end of [...activeInteractions]) { activeInteractions.delete(end); try { end(); } catch {} }
+}
+function resetBoardInteraction() {
+  endActiveInteractions();
+  document.body.classList.remove('tile-dragging', 'resizing', 'panning');
+  for (const t of tiles) t.el.classList.remove('dragging', 'resizing');
+  document.body.style.cursor = '';
+  if (marqueeEl) marqueeEl.hidden = true;
+  hideGuides();
+}
+// The release still reaches the window even when it happened over an embed, so listen in the
+// capture phase; blur covers alt-tab mid-drag, and pointercancel a drag Chromium gave up on.
+for (const ev of ['pointerup', 'pointercancel']) window.addEventListener(ev, () => setTimeout(resetBoardInteraction, 0), true);
+window.addEventListener('blur', () => resetBoardInteraction());
+
 // ---------- board: selection ----------
 
 function setSelected(tile, on) {
@@ -1289,6 +1316,7 @@ function setMode(mode) {
     if (!board.initialized) { board.panX = GAP; board.panY = GAP; board.zoom = 1; board.initialized = true; }
   }
   layout.mode = mode;
+  resetBoardInteraction(); // Mark's own workaround for a stuck board; keep it working
   if (!isBoard() || mode !== 'board') { clearSelection(); hideGuides(); }
   document.body.classList.toggle('mode-board', isBoard());
   for (const b of modeEl.querySelectorAll('button')) b.classList.toggle('active', b.dataset.mode === mode);
@@ -1420,10 +1448,15 @@ function startResize(tile, corner, e) {
       setTileGalleryH(tile, h); // gallery: just this tile
     }
   };
+  let ended = false;
   const onUp = () => {
+    if (ended) return; // pointerup, lostpointercapture and a recovery can all arrive
+    ended = true;
+    activeInteractions.delete(onUp);
     handle.removeEventListener('pointermove', onMove);
     handle.removeEventListener('pointerup', onUp);
     handle.removeEventListener('pointercancel', onUp);
+    handle.removeEventListener('lostpointercapture', onUp);
     tile.el.classList.remove('resizing');
     document.body.classList.remove('resizing');
     document.body.style.cursor = '';
@@ -1432,6 +1465,8 @@ function startResize(tile, corner, e) {
   handle.addEventListener('pointermove', onMove);
   handle.addEventListener('pointerup', onUp);
   handle.addEventListener('pointercancel', onUp);
+  handle.addEventListener('lostpointercapture', onUp);
+  activeInteractions.add(onUp);
 }
 
 // ---------- board: move a tile ----------
@@ -1456,6 +1491,10 @@ function attachTileDrag(tile) {
     if (single) selectOnly(tile);
     else if (tile.group && !selection.has(tile)) selectGroupOf(tile);
     const start = { x: e.clientX, y: e.clientY };
+    // Capture from the very first event, not once the drag passes the 4 px threshold: a release
+    // over a cross-origin embed is only delivered back here if this element already owns the
+    // pointer. Losing the capture anyway ends the drag like a normal release (onUp below).
+    try { el.setPointerCapture(e.pointerId); } catch {}
     let moving = false;
     let group = [];
     let movingSet = new Set();
@@ -1465,7 +1504,6 @@ function attachTileDrag(tile) {
       if (!moving) {
         if (Math.hypot(dx, dy) < 4) return;
         moving = true;
-        try { el.setPointerCapture(ev.pointerId); } catch {}
         // dragging something outside the selection makes it the selection
         if (!selection.has(tile)) selectOnly(tile);
         if (single) group = [tile];
@@ -1497,10 +1535,15 @@ function attachTileDrag(tile) {
       if (board.linked && !ev.altKey) resolveOverlaps(movingSet);
       updateTextToolbar();
     };
+    let ended = false;
     const onUp = () => {
+      if (ended) return; // pointerup, lostpointercapture and a recovery can all arrive
+      ended = true;
+      activeInteractions.delete(onUp);
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', onUp);
       el.removeEventListener('pointercancel', onUp);
+      el.removeEventListener('lostpointercapture', onUp);
       hideGuides();
       if (moving) {
         finishRects(undoEntry);
@@ -1514,6 +1557,8 @@ function attachTileDrag(tile) {
     el.addEventListener('pointermove', onMove);
     el.addEventListener('pointerup', onUp);
     el.addEventListener('pointercancel', onUp);
+    el.addEventListener('lostpointercapture', onUp); // the embed, or Chromium, took the pointer
+    activeInteractions.add(onUp); // a recovery ends this drag properly, listeners and all
   });
 }
 
@@ -1525,7 +1570,11 @@ function startPan(e) {
   const ox = e.clientX - board.panX, oy = e.clientY - board.panY;
   document.body.classList.add('panning');
   const onMove = (ev) => { board.panX = ev.clientX - ox; board.panY = ev.clientY - oy; applyBoardView(); };
+  let ended = false;
   const onUp = () => {
+    if (ended) return;
+    ended = true;
+    activeInteractions.delete(onUp);
     grid.removeEventListener('pointermove', onMove);
     grid.removeEventListener('pointerup', onUp);
     grid.removeEventListener('pointercancel', onUp);
@@ -1534,6 +1583,7 @@ function startPan(e) {
   grid.addEventListener('pointermove', onMove);
   grid.addEventListener('pointerup', onUp);
   grid.addEventListener('pointercancel', onUp);
+  activeInteractions.add(onUp);
 }
 
 function startLasso(e) {
@@ -1567,7 +1617,11 @@ function startLasso(e) {
     for (const t of [...hits]) if (t.group && t.group.sticky) for (const m of t.group.members) hits.add(m);
     for (const t of tiles) if (t.board) setSelected(t, hits.has(t) || before.has(t));
   };
+  let ended = false;
   const onUp = () => {
+    if (ended) return;
+    ended = true;
+    activeInteractions.delete(onUp);
     grid.removeEventListener('pointermove', onMove);
     grid.removeEventListener('pointerup', onUp);
     grid.removeEventListener('pointercancel', onUp);
@@ -1577,6 +1631,7 @@ function startLasso(e) {
   grid.addEventListener('pointermove', onMove);
   grid.addEventListener('pointerup', onUp);
   grid.addEventListener('pointercancel', onUp);
+  activeInteractions.add(onUp);
 }
 
 grid.addEventListener('pointerdown', (e) => {
@@ -4517,17 +4572,50 @@ window.addEventListener('keydown', (e) => {
 });
 
 // ---------- drag & drop ----------
+//
+// Measured over CDP on 2026-09-21 (Task 38), board mode, a Player-mode YouTube tile beside a local
+// video, each interaction released over the embed:
+//   (a) tile drag   -> body.tile-dragging and .tile.dragging stay set. Every OTHER tile then
+//                      computes pointer-events: none (body.tile-dragging .tile), and
+//                      elementFromPoint over a tile returns <main>, so nothing can be grabbed.
+//   (b) corner resize -> the same through body.resizing / .tile.resizing.
+//   (c) lasso and (d) pan -> recover on their own: their listeners sit on #grid with pointer
+//                      capture, so the release comes back to #grid even over the embed.
+//   (e) dragenter x2 + dragleave x1 -> body.dragging sticks and #drop-hint stays visible.
+// (a) and (b) are Mark's "tiles cannot be moved until I switch to Gallery and back"; (e) is the
+// stuck blue overlay. Both are the same shape of bug: a release the app never sees.
 
+/* DISABLED (fable, 2026-09-21): the counter never balanced when a drag ended inside an iframe,
+   which left body.dragging (and the overlay) on for good. lib/dragstate.js replaces it.
 let dragDepth = 0;
+*/
+const dropState = DragState.create({ idleMs: 400 });
+let dropTimer = null;
+function applyDropState(visible) {
+  document.body.classList.toggle('dragging', visible);
+  if (visible && !dropTimer) {
+    // while it is up, check that the drag is still really there
+    dropTimer = setInterval(() => applyDropState(dropState.tick(performance.now())), 200);
+  } else if (!visible && dropTimer) {
+    clearInterval(dropTimer); dropTimer = null;
+  }
+}
 // drags that start in the Sources sidebar don't get the big "Release to add" overlay
 const isSidebarDrag = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('application/x-ozy-items');
-window.addEventListener('dragenter', (e) => { e.preventDefault(); if (isSidebarDrag(e)) return; dragDepth++; document.body.classList.add('dragging'); });
-window.addEventListener('dragover', (e) => { e.preventDefault(); });
-window.addEventListener('dragleave', (e) => { if (isSidebarDrag(e)) return; if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); } });
+// a dragleave only counts when the pointer really left the window: between elements it fires
+// constantly, and Chromium reports relatedTarget null when it leaves for good
+const leftTheWindow = (e) => e.relatedTarget === null
+  || e.clientX <= 0 || e.clientY <= 0
+  || e.clientX >= document.documentElement.clientWidth || e.clientY >= document.documentElement.clientHeight;
+window.addEventListener('dragenter', (e) => { e.preventDefault(); if (isSidebarDrag(e)) return; applyDropState(dropState.enter(performance.now())); });
+window.addEventListener('dragover', (e) => { e.preventDefault(); if (isSidebarDrag(e)) return; applyDropState(dropState.over(performance.now())); });
+window.addEventListener('dragleave', (e) => { if (isSidebarDrag(e)) return; if (leftTheWindow(e)) applyDropState(dropState.leave()); });
+// every way a drag can end that still reaches us
+for (const ev of ['dragend', 'pointerup', 'mouseup', 'blur']) window.addEventListener(ev, () => applyDropState(dropState.end()));
+document.addEventListener('visibilitychange', () => { if (document.hidden) applyDropState(dropState.end()); });
 window.addEventListener('drop', async (e) => {
   e.preventDefault();
-  dragDepth = 0;
-  document.body.classList.remove('dragging');
+  applyDropState(dropState.drop());
   const at = isBoard() && tiles.length ? toCanvas(e.clientX, e.clientY) : null; // on the board, drop where the cursor is
   const raw = e.dataTransfer.getData('application/x-ozy-items');
   if (raw) { try { addItemsToBoard(JSON.parse(raw), at); } catch {} return; }
