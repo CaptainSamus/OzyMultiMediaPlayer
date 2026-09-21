@@ -600,7 +600,11 @@ ipcMain.handle('list-folder', async (_e, dir) => {
   const entries = await guardedReaddir(dir, { withFileTypes: true });
   if (!entries) return { ok: false, files: [], sequences: [] };
   const names = entries.filter((d) => d.isFile()).map((d) => d.name);
-  const { sequences, members } = readSequences(dir, names);
+  // Spotting sequences is a convenience; listing the folder is not. If detection ever throws on
+  // some filename nobody thought of, the folder still lists its plain files.
+  let sequences = [], members = new Set();
+  try { ({ sequences, members } = readSequences(dir, names)); }
+  catch (err) { logError('sequence detect failed', err, { dir, files: names.length }); sequences = []; members = new Set(); }
   const files = [];
   for (const n of Sources.filterMedia(names, { images: true })) {
     if (members.has(n)) continue;
