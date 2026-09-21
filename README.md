@@ -216,6 +216,11 @@ itself when you click **Update yt-dlp** in the sidebar.
   tile alone.
 - **Date-stamped photo folders.** Folders containing date-stamped or
   timestamped photos no longer fail to list (a sequence-detection crash).
+- **Board interactions over YouTube embeds.** Board interactions recover if
+  a drag, resize or file drop is released over a YouTube embed: the
+  "Release to add" overlay no longer gets stuck and tiles stay movable and
+  resizable without switching modes. Files dropped onto a Player tile are
+  added at that spot.
 - **YouTube / Twitch tiles.** YouTube tiles use the app's own play, scrub,
   mute and volume controls and join Play all / Pause all and group mute /
   volume. They also get bookmarks, appear on the timeline, and join Sync and
