@@ -710,6 +710,8 @@ body.dragging .tile.web iframe { pointer-events: none; }
    so the embed's own controls keep working. */
 .tile.web .pan-shield { position: absolute; inset: 0; pointer-events: none; }
 body.mode-board.hand .tile.web .pan-shield, body.mode-board.panning .tile.web .pan-shield { pointer-events: auto; }
+/* EZ play: the shield takes the click so Ozy, not the embed, plays or pauses */
+body.ez-play .tile.web .pan-shield { pointer-events: auto; cursor: pointer; }
 
 /* A/B compare */
 #compare { position: fixed; inset: 0; z-index: 100; background: #000; display: flex; flex-direction: column; }

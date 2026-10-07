@@ -1474,6 +1474,7 @@ function startResize(tile, corner, e) {
 function attachTileDrag(tile) {
   const el = tile.el;
   el.addEventListener('pointerdown', (e) => {
+    tile.guard.pointerDown(); // a fresh press: whatever click the last drag was waiting for never came
     if (!isBoard() || e.button !== 0 || !tile.board || e.altKey) return;
     if (e.target.closest('.handle, input, button, select')) return;
     if (tile.editing && e.target.closest('.text-body')) return; // put the caret, don't drag the tile
@@ -1485,8 +1486,10 @@ function attachTileDrag(tile) {
       // shift-click toggles membership without starting a drag
       setSelected(tile, !selection.has(tile));
       selectionStatus();
-      tile.suppressClick = true;
-      setTimeout(() => { tile.suppressClick = false; }, 0);
+      // DISABLED (2026-10-07): cleared by a setTimeout(0) that fired before the click arrived; tile.guard replaces it
+      // tile.suppressClick = true;
+      // setTimeout(() => { tile.suppressClick = false; }, 0);
+      tile.guard.afterDrag(); // a shift-click must not play either
       return;
     }
     // Ctrl: just this tile, even inside a sticky group. A plain click picks one tile, or a sticky
@@ -1553,8 +1556,10 @@ function attachTileDrag(tile) {
         finishRects(undoEntry);
         for (const t of group) t.el.classList.remove('dragging');
         document.body.classList.remove('tile-dragging');
-        tile.suppressClick = true;
-        setTimeout(() => { tile.suppressClick = false; }, 0);
+        // DISABLED (2026-10-07): cleared by a setTimeout(0) that fired before the click arrived; tile.guard replaces it
+        // tile.suppressClick = true;
+        // setTimeout(() => { tile.suppressClick = false; }, 0);
+        tile.guard.afterDrag(); // the click this release produces must not toggle play
       }
       updateTextToolbar();
     };
@@ -1834,7 +1839,8 @@ function addVideo(filePath, state = {}) {
     volume: DEFAULT_VIDEO_VOLUME,
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
     board: null,
-    suppressClick: false,
+    suppressClick: false, // kept for older code paths
+    guard: ClickGuard.create(),
     galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
     bookmarks: parseBookmarks(state.bookmarks),
   };
@@ -2014,11 +2020,14 @@ function addVideo(filePath, state = {}) {
   // click on picture = play/pause; double-click = fullscreen this tile
   video.addEventListener('click', (e) => {
     // Shift-click selects (board: attachTileDrag; gallery: the el click below) and never plays or pauses.
-    // (suppressClick is cleared by a setTimeout(0) that fires before this click arrives, so it can't guard this.)
+    // On the board this handler does not see the click at all: the tile owns the pointer, so the
+    // click goes to the tile element and tileClick() plays it.
     if (e.shiftKey) return;
-    if (!tile.suppressClick) tile.togglePlay();
+    if (!tile.guard.shouldAct()) return; // this click ended a drag
+    tile.togglePlay();
   });
   el.addEventListener('click', (e) => {
+    tileClick(tile, e);
     if (isBoard() || !e.shiftKey || e.target.closest('button, input, select, .bm-panel')) return;
     setSelected(tile, !selection.has(tile));
     selectionStatus();
@@ -2280,7 +2289,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
     path: url, url, type: parsed.type, kind: parsed.kind, el, video: null, seek, time: timeEl, scrubbing: false,
     volume: clamp(Number(state.volume ?? DEFAULT_VIDEO_VOLUME), 0, 1),
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : (parsed.kind === 'short' ? 9 / 16 : 16 / 9),
-    board: null, suppressClick: false, galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
+    board: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
     bookmarks: parsed.type === 'youtube' ? parseBookmarks(state.bookmarks) : [], info: null, proxy: null, fps: null,
     group: null, sync: null, ownMuted: !!state.muted,
     title: typeof state.title === 'string' && state.title ? state.title : WebUrl.label(parsed),
@@ -2524,7 +2533,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
   });
   const onVideoPlayState = () => { if (tile.group && tile.group === active) renderGroupBar(); };
   for (const ev of ['play', 'pause', 'ended']) video.addEventListener(ev, onVideoPlayState);
-  video.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.suppressClick) tile.togglePlay(); });
+  video.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.guard.shouldAct()) return; tile.togglePlay(); });
   video.addEventListener('dblclick', () => { if (cmp.el.hidden) toggleTileFullscreen(el); });
 
   // ----- YouTube controls -----
@@ -2639,6 +2648,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
   el.addEventListener('pointerenter', () => { hoveredTile = tile; hpEnter(tile); });
   el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; hpLeave(tile); });
   el.addEventListener('click', (e) => {
+    tileClick(tile, e); // with EZ play on, the .pan-shield over the embed takes the click and lands here
     if (isBoard() || !e.shiftKey || e.target.closest('button, input, select')) return;
     setSelected(tile, !selection.has(tile));
     selectionStatus();
@@ -2690,7 +2700,7 @@ function addImageTile(filePath, state = {}, at = null) {
   const tile = {
     type: 'image', path: filePath, el, img, video: null, yt: null,
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
-    board: null, bookmarks: [], sync: null, group: null, suppressClick: false, volume: 0, ownMuted: false,
+    board: null, bookmarks: [], sync: null, group: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), volume: 0, ownMuted: false,
     galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
   };
   const sb = state.board;
@@ -2755,7 +2765,7 @@ function addTextTile(record = {}) {
     style: TextTile.normalize(record.style),
     aspect: null, freeAspect: true, editing: false,
     board: { x: Number(b.x), y: Number(b.y), w: Math.max(TEXT_MIN_W, Number(b.w)), h: Number(b.h) > 0 ? Number(b.h) : 40 },
-    bookmarks: [], sync: null, group: null, suppressClick: false, volume: 0, ownMuted: false,
+    bookmarks: [], sync: null, group: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), volume: 0, ownMuted: false,
     galleryH: layout.rowHeight,
   };
   tiles.push(tile);
@@ -3088,7 +3098,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     type: 'sequence', dir, seq, path: joinPath(dir, Sequence.pattern(seq)), title: Sequence.label(seq),
     el, video: null, mediaEl: cv, seek, time: timeEl, scrubbing: false,
     volume: 0, ownMuted: false, aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
-    board: null, suppressClick: false, bookmarks: parseBookmarks(state.bookmarks), group: null, sync: null,
+    board: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), bookmarks: parseBookmarks(state.bookmarks), group: null, sync: null,
     galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
     fps: Number(look.fps) > 0 ? Number(look.fps) : 24,
     exposure: clamp(Number(look.exposure) || 0, -10, 10),
@@ -3344,9 +3354,10 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     if (scrubber.move(frac, performance.now()) !== null) broadcast(tile, 'scrub'); // preview the group
   });
   rateSel.addEventListener('change', () => { pb.rate = Number(rateSel.value); broadcast(tile, 'rate', pb.rate); });
-  cv.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.suppressClick) tile.togglePlay(); });
+  cv.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.guard.shouldAct()) return; tile.togglePlay(); });
   cv.addEventListener('dblclick', () => { if (!cmp.el.hidden) return; toggleTileFullscreen(el); });
   el.addEventListener('click', (e) => {
+    tileClick(tile, e);
     if (isBoard() || !e.shiftKey || e.target.closest('button, input, select, .bm-panel')) return;
     setSelected(tile, !selection.has(tile));
     selectionStatus();
@@ -4331,6 +4342,7 @@ window.api.getSettings().then((s) => {
   refreshUpdateMenu(); // the update checkboxes come from the same settings file
   wheelZoomEl.checked = !!settings.wheelZoom;
   hoverPlayBtn.classList.toggle('toggled', !!settings.hoverPlay); // the mode survives a restart
+  ezPlayBtn.classList.toggle('toggled', !!settings.ezPlay); document.body.classList.toggle('ez-play', !!settings.ezPlay);
   renderFolders();
   renderPlaylists(); // from the cache in settings.json, no refetch
 });
@@ -4394,6 +4406,37 @@ function setHoverPlay(on) {
   }
 }
 hoverPlayBtn.addEventListener('click', () => setHoverPlay(!hoverPlayOn()));
+
+// ---------- EZ play ----------
+// A click anywhere on a tile that is not a control plays or pauses it. The picture already does
+// this; EZ play extends it to the overlay bars and, for embeds, to a shield over the iframe.
+const ezPlayBtn = document.getElementById('ez-play');
+const ezPlayOn = () => !!(settings && settings.ezPlay);
+function setEzPlay(on) {
+  settings.ezPlay = !!on;
+  saveSettings();
+  ezPlayBtn.classList.toggle('toggled', settings.ezPlay);
+  document.body.classList.toggle('ez-play', settings.ezPlay);
+  setStatus(settings.ezPlay ? 'EZ play on: click anywhere on a video to play or pause it' : 'EZ play off');
+}
+ezPlayBtn.addEventListener('click', () => setEzPlay(!ezPlayOn()));
+// Every click that reaches a tile's element. On the board the tile owns the pointer from
+// pointerdown (attachTileDrag), so Chromium delivers the click here, not to the <video> / canvas
+// under the cursor: e.target is the tile and the picture's own handler never runs. So look up
+// what is really under the pointer and play from here. In the gallery the picture gets its own
+// click and this only adds EZ play (tile chrome, and the shield over an embed).
+function tileClick(tile, e) {
+  if (!tile.pb || (isBoard() && board.hand)) return;
+  const retargeted = e.target === tile.el;
+  const hit = retargeted ? document.elementFromPoint(e.clientX, e.clientY) : e.target;
+  if (!hit || !tile.el.contains(hit)) return;
+  const plays = ClickGuard.clickPlays({
+    shift: e.shiftKey, retargeted, onPicture: hit === tile.mediaEl && hit.tagName !== 'IFRAME',
+    ez: ezPlayOn(), onControl: !ClickGuard.ezTarget((s) => !!hit.closest(s)),
+  });
+  if (!plays || !tile.guard.shouldAct()) return;
+  if (tile.togglePlay) tile.togglePlay(); else if (tile.pb.paused) tile.pb.play(); else tile.pb.pause();
+}
 
 // ---------- copy / paste ----------
 // In-app clipboard: the selected tiles' session records, the same shape a saved file and undo's
