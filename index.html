@@ -40,6 +40,10 @@
       <button id="btn-optimize" title="Make a heavy scene lighter: pause what is off screen, play at a lower resolution, see what the scene costs">Optimize ▾</button>
       <div class="menu-list" id="opt-list" hidden>
         <label class="menu-check" title="A video scrolled out of view stops decoding and resumes when it comes back"><input type="checkbox" id="opt-offscreen"> Pause offscreen videos</label>
+        <div class="menu-title">Playback quality <small>local videos; each tile's ⚙ can override</small></div>
+        <label class="menu-check"><input type="radio" name="opt-quality" value="full"> Full</label>
+        <label class="menu-check"><input type="radio" name="opt-quality" value="half"> ½ resolution</label>
+        <label class="menu-check"><input type="radio" name="opt-quality" value="quarter"> ¼ resolution</label>
       </div>
     </div>
     <span class="sep"></span>
@@ -236,6 +240,7 @@
           <button class="remove" title="Remove this video">✕</button>
           <span class="group-swatch" hidden></span>
           <span class="name"></span>
+          <span class="q-badge" hidden title="Playback quality (⚙ to change)"></span>
           <button class="fullscreen" title="Fullscreen (double-click the picture also works; Esc leaves)">⛶</button>
         </div>
         <div class="vol-zone" title="Volume: click or drag anywhere on the bar. Mouse wheel and ↑/↓ work too.">
@@ -416,6 +421,7 @@
   <script src="lib/scrub.js"></script>
   <script src="lib/dragstate.js"></script>
   <script src="lib/visibility.js"></script>
+  <script src="lib/proxy.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

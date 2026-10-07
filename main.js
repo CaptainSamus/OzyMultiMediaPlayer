@@ -437,8 +437,8 @@ const Sequence = require('./lib/sequence');
 const ExrHeader = require('./lib/exrheader');
 
 const proxyDir = () => path.join(app.getPath('userData'), 'proxies');
-function proxyPathFor(filePath, stat) {
-  return path.join(proxyDir(), ProxyCache.name(filePath, stat.size, stat.mtimeMs));
+function proxyPathFor(filePath, stat, tier = 'full') {
+  return path.join(proxyDir(), ProxyCache.name(filePath, stat.size, stat.mtimeMs, tier));
 }
 let toolsAvailable = null;
 function checkTools() {
@@ -450,11 +450,13 @@ function checkTools() {
 }
 
 ipcMain.handle('probe', async (_e, filePath) => {
-  const base = { codec: null, width: null, height: null, fps: null, duration: null, mime: null, proxy: null, available: checkTools() };
+  const base = { codec: null, width: null, height: null, fps: null, duration: null, mime: null, proxy: null, tiers: { half: null, quarter: null }, available: checkTools() };
   const stat = await guardedStat(filePath); // may be on a share that no longer answers
   if (!stat) return base;
   const proxy = proxyPathFor(filePath, stat);
   if (fs.existsSync(proxy)) base.proxy = proxy; // the proxy cache is ours, always local
+  // smaller copies already made for the playback tiers (Optimize menu / a tile's own quality)
+  for (const tier of ['half', 'quarter']) { const p = proxyPathFor(filePath, stat, tier); if (fs.existsSync(p)) base.tiers[tier] = p; }
   if (!base.available) return base;
   const json = await new Promise((resolve) => {
     execFile(binPath('ffprobe'), [
@@ -470,57 +472,70 @@ ipcMain.handle('probe', async (_e, filePath) => {
   return { ...base, ...Codecs.parseProbe(json, path.extname(filePath).toLowerCase()) };
 });
 
-// One ffmpeg at a time; others wait their turn.
-const proxyJobs = new Map(); // filePath -> { child, reject }
+// One ffmpeg at a time; others wait their turn. A job is one file at one tier ('full' is the
+// playable copy; 'half' / 'quarter' the smaller playback copies).
+const proxyJobs = new Map(); // `${filePath}|${tier}` -> { child, reject }: the one that is running
+const proxyPending = new Map(); // same key -> its promise, waiting or running; asking again joins it
+const proxyCancelled = new Set(); // keys cancelled while still waiting their turn
 let proxyQueue = Promise.resolve();
 
-ipcMain.handle('make-proxy', (e, filePath) => {
+ipcMain.handle('make-proxy', (e, filePath, tier = 'full') => {
+  tier = ProxyCache.divisor(tier) === 1 ? 'full' : tier;
+  const key = ProxyCache.jobKey(filePath, tier);
+  const what = tier === 'full' ? 'playable copy' : `${tier}-resolution copy`;
+  proxyCancelled.delete(key); // wanted again before its turn came
   const send = (...args) => { if (!e.sender.isDestroyed()) e.sender.send('proxy-progress', ...args); };
   // The checks run before the promise is made: an async executor would swallow a throw (mkdirSync
   // can fail) and the job would never settle, wedging the queue behind it.
   const run = async () => {
+    if (proxyCancelled.delete(key)) throw new Error('Cancelled');
     if (!checkTools()) throw new Error('ffmpeg not found');
     const stat = await guardedStat(filePath);
     if (!stat) throw new Error('File not found');
     fs.mkdirSync(proxyDir(), { recursive: true });
-    const out = proxyPathFor(filePath, stat);
+    const out = proxyPathFor(filePath, stat, tier);
     if (fs.existsSync(out)) return { proxy: out };
     const tmp = out + '.part.mp4';
     return new Promise((resolve, reject) => {
-      const child = spawn(binPath('ffmpeg'), ProxyCache.args(filePath, tmp), { windowsHide: true });
-      proxyJobs.set(filePath, { child, reject });
+      const child = spawn(binPath('ffmpeg'), ProxyCache.args(filePath, tmp, tier), { windowsHide: true });
+      proxyJobs.set(key, { child, reject });
       let duration = 0, tail = '';
       child.stderr.on('data', (buf) => {
         const s = buf.toString();
         tail = (tail + s).slice(-2000);
         if (!duration) { const m = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(s); if (m) duration = +m[1] * 3600 + +m[2] * 60 + +m[3]; }
         const t = ProxyCache.parseTime(s);
-        if (t !== null && duration) send(filePath, Math.min(0.99, t / duration));
+        if (t !== null && duration) send(filePath, Math.min(0.99, t / duration), tier);
       });
       child.on('close', (code) => {
-        proxyJobs.delete(filePath);
+        proxyJobs.delete(key);
         if (code === 0) {
-          try { fs.renameSync(tmp, out); } catch (err) { logError('proxy rename', err, { tmp, out }); return reject(new Error('Could not save playable copy: ' + err.message)); }
-          send(filePath, 1);
-          log('info', 'playable copy made', { path: filePath, out });
+          try { fs.renameSync(tmp, out); } catch (err) { logError('proxy rename', err, { tmp, out }); return reject(new Error(`Could not save ${what}: ` + err.message)); }
+          send(filePath, 1, tier);
+          log('info', `${what} made`, { path: filePath, tier, out });
           resolve({ proxy: out });
         } else {
           try { fs.unlinkSync(tmp); } catch {}
-          if (code !== null) logTool('ffmpeg (playable copy)', ProxyCache.args(filePath, tmp), { code }, tail);
-          else log('info', 'playable copy cancelled', { path: filePath });
+          if (code !== null) logTool(`ffmpeg (${what})`, ProxyCache.args(filePath, tmp, tier), { code }, tail);
+          else log('info', `${what} cancelled`, { path: filePath, tier });
           reject(new Error(code === null ? 'Cancelled' : 'ffmpeg failed:\n' + tail.split('\n').slice(-4).join('\n')));
         }
       });
     });
   };
-  const p = proxyQueue.then(run, run);
-  proxyQueue = p.catch(() => {});
-  return p;
+  // asked again while this file and tier is waiting or encoding: the same job, never a second ffmpeg
+  return ProxyCache.once(proxyPending, key, () => {
+    const p = proxyQueue.then(run, run);
+    proxyQueue = p.catch(() => {});
+    return p;
+  });
 });
 
-ipcMain.on('cancel-proxy', (_e, filePath) => {
-  const job = proxyJobs.get(filePath);
+ipcMain.on('cancel-proxy', (_e, filePath, tier = 'full') => {
+  const key = ProxyCache.jobKey(filePath, tier);
+  const job = proxyJobs.get(key);
   if (job) job.child.kill();
+  else if (proxyPending.has(key)) proxyCancelled.add(key); // still waiting its turn: dropped when it gets there
 });
 
 // Cache = playable copies + thumbnails + decoded sequence frames (frames/ has a folder per sequence look).
@@ -542,6 +557,7 @@ ipcMain.handle('cache-info', () => {
 });
 ipcMain.handle('clear-cache', () => {
   for (const job of proxyJobs.values()) job.child.kill();
+  for (const key of proxyPending.keys()) if (!proxyJobs.has(key)) proxyCancelled.add(key); // and the ones still waiting
   cancelAllFrames();
   for (const dir of [proxyDir(), thumbDir(), framesDir()]) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
 });

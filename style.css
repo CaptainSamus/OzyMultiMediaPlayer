@@ -787,6 +787,10 @@ body.mode-board.hand .tile.web .pan-shield, body.mode-board.panning .tile.web .p
 /* App ▾ menu checkboxes and the update banner */
 .menu-list .menu-check { display: flex; align-items: center; gap: 6px; padding: 5px 10px; color: var(--text); font-size: 12px; white-space: nowrap; cursor: pointer; }
 .menu-list .menu-check input { cursor: pointer; }
+.menu-title { padding: 6px 10px 2px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.menu-title small { display: block; }
+.q-badge { flex: 0 0 auto; font-size: 11px; padding: 0 6px; border-radius: 4px; background: rgba(255,255,255,0.15); white-space: nowrap; }
+.q-badge[hidden] { display: none; }
 .menu-list #btn-version { color: var(--muted); cursor: default; }
 #update-banner {
   display: flex; align-items: center; gap: 10px; padding: 7px 12px;

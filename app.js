@@ -12,7 +12,7 @@ const zoomLabel = document.getElementById('zoom-label');
 const modeEl = document.getElementById('mode');
 
 const SESSION_FORMAT = 'multi-video-player-session';
-const SESSION_VERSION = 5;
+const SESSION_VERSION = 6;
 
 /** @type {Array<{path:string, el:HTMLElement, video:HTMLVideoElement, seek:HTMLInputElement, time:HTMLElement, scrubbing:boolean, volume:number, aspect:number, board?:{x:number,y:number,w:number,h:number}, tick?:Function}>} */
 const tiles = [];
@@ -39,7 +39,7 @@ const TEXT_DEFAULT_W = 240; // canvas px a new text tile starts at
 const TEXT_MIN_W = 40;      // narrower than this and a word can't wrap at all
 // rowHeight is now only the size new tiles start at (it follows scale-all) and the fallback for
 // older session files; each tile keeps its own gallery height in tile.galleryH.
-const layout = { mode: 'gallery', rowHeight: 240, galleryScale: 1, timeDisplay: 'clock', timelineExpanded: false, timelineHeight: 140 };
+const layout = { mode: 'gallery', rowHeight: 240, galleryScale: 1, timeDisplay: 'clock', timelineExpanded: false, timelineHeight: 140, quality: 'full' };
 const board = { panX: 0, panY: 0, zoom: 1, initialized: false, linked: true, hand: false };
 let zTop = 1;
 const selection = new Set(); // board mode: tiles picked with the lasso / shift-click
@@ -1849,6 +1849,10 @@ function addVideo(filePath, state = {}) {
   tiles.push(tile);
   tile.info = null; tile.proxy = null; tile.fps = null;
   tile.fpsOverride = Number(state.fpsOverride) > 0 ? Number(state.fpsOverride) : null; // ⚙: frame step / timecode only
+  tile.quality = Session.tileQuality(state);      // 'scene' | 'full' | 'half' | 'quarter'
+  tile.tiers = { half: null, quarter: null };       // cached tier files found by probe / made on demand
+  tile.tier = 'full';                               // what is loaded right now
+  tile.tierJob = null;                              // tier being encoded, if any
   tile.group = null; tile.sync = null; tile.ownMuted = !!state.muted;
   // its own colour for multi-video timelines: saved, else round-robin by position at creation
   tile.hue = GROUP_PALETTE.includes(state.color) ? state.color : GROUP_PALETTE[(tiles.length - 1) % GROUP_PALETTE.length];
@@ -1948,6 +1952,81 @@ function addVideo(filePath, state = {}) {
   };
   tile.setSource = (url) => { errorEl.classList.add('hidden'); video.src = url; };
 
+  // ----- playback resolution (Optimize menu, ⚙): play a half / quarter size copy instead -----
+  // the tier this tile should play: its own override, else the scene's
+  const wanted = () => (tile.quality === 'scene' ? layout.quality : tile.quality);
+  tile.wantedTier = wanted;
+  const tierMark = (q) => (q === 'half' ? '½' : q === 'quarter' ? '¼' : '');
+  const qBadge = el.querySelector('.q-badge');
+  const showBadge = (text) => { qBadge.textContent = text; qBadge.hidden = !text; };
+  // change the file behind the <video> without losing where it was (put back on loadedmetadata, below)
+  let swapState = null;
+  tile.swapSource = (url) => {
+    // nothing loaded yet: the first load's own restore (the saved time) applies. A swap already
+    // under way keeps the state it took from the file that was really playing.
+    if (!swapState && (video.readyState > 0 || video.error)) swapState = { time: video.currentTime, paused: video.paused, rate: video.playbackRate };
+    tile.setSource(url);
+  };
+  // Chromium remembers a URL that failed to load for the life of the page, so a copy that had to
+  // be made again (same file name) is asked for under a new query; main ignores the query.
+  const tierGen = { half: 0, quarter: 0 };
+  const tierUrl = (q) => window.api.videoUrl(tile.tiers[q]) + (tierGen[q] ? '?v=' + tierGen[q] : '');
+  const loadFull = () => {
+    tile.tier = 'full'; showBadge('');
+    if (tile.unplayable && !tile.proxy) { // the original can't play here and no playable copy was made: back to that offer
+      swapState = null; video.removeAttribute('src'); video.load();
+      showError(`${(tile.info && tile.info.codec) || 'This codec'} can't play here.`, true);
+    } else tile.swapSource(window.api.videoUrl(tile.proxy || filePath));
+  };
+  // an encode this tile no longer wants is stopped, unless another tile of the same file still wants it
+  const dropTierJob = () => {
+    const j = tile.tierJob;
+    if (!tiles.some((t) => t !== tile && t.path === filePath && t.wantedTier && t.wantedTier() === j)) window.api.cancelProxy(filePath, j);
+  };
+  tile.applyQuality = async () => {
+    if (!tile.info) return;                          // probe not back yet; the probe's own branch calls this
+    const want = wanted();
+    if (tile.tierJob && tile.tierJob !== want) dropTierJob();
+    if (want === tile.tier) { showBadge(tierMark(want)); return; }
+    if (want === 'full') { loadFull(); return; }
+    if (tile.tiers[want]) { tile.tier = want; tile.swapSource(tierUrl(want)); showBadge(tierMark(want)); return; }
+    if (!tile.info.available) { showBadge(''); setStatus('ffmpeg not found – playback quality needs it', 6000); return; }
+    if (tile.tierJob === want) return;               // already encoding this one
+    tile.tierJob = want;
+    showBadge(tierMark(want) + ' 0%');               // keeps playing what it has until the copy is ready
+    try {
+      const { proxy } = await window.api.makeProxy(filePath, want);
+      if (!tiles.includes(tile)) return;
+      tile.tiers[want] = proxy;
+    } catch (e) {
+      if (tiles.includes(tile) && wanted() === want) {
+        showBadge(tierMark(tile.tier));
+        if (!/Cancelled/.test(String(e.message))) {
+          setStatus(`Could not make a smaller copy of ${basename(filePath)} – it keeps playing as it is`, 6000);
+          logUi('warn', 'tier failed', { path: filePath, tier: want, error: String(e.message) });
+        }
+      }
+      return;
+    } finally { if (tile.tierJob === want) tile.tierJob = null; }
+    if (wanted() === want) tile.applyQuality();      // still wanted once it is done
+    else showBadge(tierMark(tile.tier));
+  };
+  tile.onTierProgress = (frac, tier) => { if (tile.tierJob === tier) showBadge(tierMark(tier) + ' ' + Math.round(frac * 100) + '%'); };
+  // A cached copy can vanish (the cache was cleared or trimmed) or be unreadable: fall back to the
+  // full file and make the copy again, once. Registered before the tile's own error handler, which
+  // must not put its "Cannot play" panel over a video that is about to play.
+  const tierRetried = new Set();
+  video.addEventListener('error', (e) => {
+    if (tile.tier === 'full') return;
+    e.stopImmediatePropagation();
+    const lost = tile.tier;
+    tile.tiers[lost] = null;
+    tierGen[lost]++;
+    logUi('warn', 'tier copy unreadable', { path: filePath, tier: lost });
+    loadFull();
+    if (!tierRetried.has(lost)) { tierRetried.add(lost); tile.applyQuality(); }
+  });
+
   const startProxy = async () => {
     makeBtn.classList.add('hidden'); cancelBtn.classList.remove('hidden'); bar.classList.remove('hidden');
     errorText.textContent = 'Making a playable copy…';
@@ -1971,16 +2050,25 @@ function addVideo(filePath, state = {}) {
     const info = await window.api.probe(filePath);
     if (!tiles.includes(tile)) return; // removed while probing
     tile.info = info; tile.fps = info.fps || null;
+    tile.tiers = info.tiers || tile.tiers;
     if (!info.available && !toolsWarned) { toolsWarned = true; setStatus('ffmpeg / ffprobe not found – Make playable and frame rates are unavailable', 8000); }
-    if (info.proxy) { tile.proxy = info.proxy; tile.setSource(window.api.videoUrl(info.proxy)); return; }
-    // known codec with no mime (prores, mpeg4, ...) can't play; probe failed (no codec) -> let Chromium try
-    const playable = info.mime ? video.canPlayType(info.mime) !== '' : !info.codec;
-    if (!playable && info.available) showError(`${info.codec || 'This codec'} can't play here.`, true);
-    else tile.setSource(window.api.videoUrl(filePath));
+    if (info.proxy) { tile.proxy = info.proxy; tile.setSource(window.api.videoUrl(info.proxy)); }
+    else {
+      // known codec with no mime (prores, mpeg4, ...) can't play; probe failed (no codec) -> let Chromium try
+      const playable = info.mime ? video.canPlayType(info.mime) !== '' : !info.codec;
+      tile.unplayable = !playable && info.available;
+      if (tile.unplayable) showError(`${info.codec || 'This codec'} can't play here.`, true);
+      else tile.setSource(window.api.videoUrl(filePath));
+    }
+    tile.applyQuality(); // a tile added into a ½ / ¼ scene, or saved with its own quality, goes there at once
   })();
 
+  // a half / quarter copy is rounded to even pixels, so its shape can be a hair off the original's:
+  // the tile takes its aspect from the full-size file (or the saved one), never from a smaller copy
+  let aspectKnown = Number(state.aspect) > 0;
   video.addEventListener('loadedmetadata', () => {
-    if (video.videoWidth > 0 && video.videoHeight > 0) {
+    if (video.videoWidth > 0 && video.videoHeight > 0 && (tile.tier === 'full' || !aspectKnown)) {
+      aspectKnown = true;
       const ar = video.videoWidth / video.videoHeight;
       if (Math.abs(ar - tile.aspect) > 0.001) {
         tile.aspect = ar;
@@ -1997,6 +2085,17 @@ function addVideo(filePath, state = {}) {
     updateSeek();
     renderMarkers();
     if (wantPlaying) video.play().catch(() => {});
+  });
+  // after the first-load restore above: a tier swap puts back what was really playing
+  video.addEventListener('loadedmetadata', () => {
+    if (tile.tier !== 'full') tierRetried.delete(tile.tier); // it loaded: a later loss gets its own retry
+    if (!swapState) return;
+    const r = ProxyCache.restore(swapState, video.duration);
+    swapState = null;
+    video.currentTime = r.time;
+    video.playbackRate = r.rate;
+    if (r.play) video.play().catch(() => {}); else video.pause();
+    updateTimeLabel(); updateSeek();
   });
   video.addEventListener('timeupdate', () => { if (!tile.scrubbing) updateTimeLabel(); });
   video.addEventListener('durationchange', () => {
@@ -3423,7 +3522,7 @@ function refreshSettingsMark(tile) {
   const b = tile.el.querySelector('.settings'); if (!b) return;
   const custom = tile.type === 'sequence'
     ? (tile.fps !== 24 || tile.exposure !== 0 || tile.colour !== 'srgb' || !!tile.seq.layer || tile.seq.part > 0)
-    : !!tile.fpsOverride;
+    : !!tile.fpsOverride || (!!tile.quality && tile.quality !== 'scene');
   b.classList.toggle('custom', custom);
 }
 function openTileSettings(tile, btn) {
@@ -3446,6 +3545,14 @@ function openTileSettings(tile, btn) {
     else { tile.fpsOverride = v > 0 ? clamp(v, 1, 240) : null; if (tile.refreshTime) tile.refreshTime(); renderTimeline(); refreshSettingsMark(tile); }
   });
   if (!seq) note(`Frame step and timecode only; playback speed is untouched. Empty = the file's own (${tile.fps ? Math.round(tile.fps * 1000) / 1000 + ' fps' : 'unknown, 24 assumed'}).`);
+  if (tile.applyQuality) { // local videos: this tile's own playback resolution
+    const q = document.createElement('select');
+    for (const [v, label] of [['scene', 'Scene default'], ['full', 'Full'], ['half', '½ resolution'], ['quarter', '¼ resolution']]) { const o = document.createElement('option'); o.value = v; o.textContent = label; q.appendChild(o); }
+    q.value = tile.quality;
+    row('Quality', q);
+    q.addEventListener('change', () => { tile.quality = q.value; tile.applyQuality(); refreshSettingsMark(tile); });
+    note('Playback resolution. Lower = lighter on the machine. A smaller copy is made once and cached.');
+  }
   if (seq && Sequence.isExr(tile.seq)) {
     const exp = document.createElement('input'); exp.type = 'range'; exp.min = '-10'; exp.max = '10'; exp.step = '0.5'; exp.value = String(tile.exposure);
     const expN = document.createElement('input'); expN.type = 'number'; expN.min = '-10'; expN.max = '10'; expN.step = '0.5'; expN.value = String(tile.exposure);
@@ -3522,6 +3629,7 @@ function clearAll() {
   while (tiles.length) removeTile(tiles[tiles.length - 1], { record: false });
   undoStack.clear();
   clearTimeout(rowTimer); rowEntry = null;
+  layout.quality = 'full'; syncQualityRadios(); // a new scene starts at full resolution
 }
 
 function addVideos(paths, at = null) {
@@ -3571,7 +3679,16 @@ async function addPaths(paths, at = null) {
 }
 
 let toolsWarned = false; // one status message if ffmpeg/ffprobe are missing
+/* DISABLED (2026-10-07): progress now carries the tier, and copies of one file all follow it
 window.api.onProxyProgress((p, frac) => { const t = tiles.find((x) => x.path === p); if (t && t.onProxyProgress) t.onProxyProgress(frac); });
+*/
+window.api.onProxyProgress((p, frac, tier) => {
+  for (const t of tiles) {
+    if (t.path !== p) continue;
+    if (tier === 'full') { if (t.onProxyProgress) t.onProxyProgress(frac); }
+    else if (t.onTierProgress) t.onTierProgress(frac, tier);
+  }
+});
 // yt-dlp download progress for web tiles in Local mode
 window.api.onDownloadProgress((pageUrl, frac) => { for (const t of tiles) if (t.url === pageUrl && t.onDownloadProgress) t.onDownloadProgress(frac); });
 
@@ -3599,6 +3716,7 @@ function collectSession() {
       timeDisplay: layout.timeDisplay,
       timelineExpanded: layout.timelineExpanded,
       timelineHeight: layout.timelineHeight,
+      quality: layout.quality, // v6: the scene's playback resolution
     },
     masterVolume,
     videos: tiles.map((t) => (t.type === 'text' ? {
@@ -3634,6 +3752,7 @@ function collectSession() {
       color: t.hue,
       loop: !!t.loop,
       fpsOverride: t.fpsOverride || null,
+      quality: t.quality || 'scene', // v6: its own playback resolution, or follow the scene
       currentTime: isFinite(t.video.currentTime) ? t.video.currentTime : 0,
       volume: t.volume,
       muted: t.group ? !!t.ownMuted : t.video.muted, // own mute, not the group's
@@ -3703,6 +3822,7 @@ async function applySession(data) {
   layout.timeDisplay = L.timeDisplay;
   layout.timelineExpanded = L.timelineExpanded;
   layout.timelineHeight = L.timelineHeight;
+  layout.quality = L.quality; syncQualityRadios(); // before the tiles are built: each goes to its tier once probed
   if (L.board) {
     board.panX = L.board.panX; board.panY = L.board.panY; board.zoom = L.board.zoom;
     board.initialized = true;
@@ -4460,6 +4580,19 @@ function setPauseOffscreen(on) {
   setStatus(settings.pauseOffscreen ? 'Offscreen videos pause until they come back into view' : 'Offscreen videos keep playing');
 }
 optOffscreen.addEventListener('change', () => setPauseOffscreen(optOffscreen.checked));
+
+// ---------- playback quality (scene) ----------
+// layout.quality is the scene's tier; a tile's own ⚙ quality overrides it. Each video tile's
+// applyQuality() (addVideo) swaps to the cached smaller copy, or has one made first.
+function syncQualityRadios() { for (const r of document.querySelectorAll('input[name="opt-quality"]')) r.checked = r.value === layout.quality; }
+function setSceneQuality(q) {
+  layout.quality = q === 'half' || q === 'quarter' ? q : 'full';
+  syncQualityRadios();
+  for (const t of tiles) if (t.applyQuality) t.applyQuality();
+  setStatus(layout.quality === 'full' ? 'Playing at full resolution' : `Playing at ${layout.quality === 'half' ? '½' : '¼'} resolution – smaller copies are made as needed`);
+}
+for (const r of document.querySelectorAll('input[name="opt-quality"]')) r.addEventListener('change', () => { if (r.checked) setSceneQuality(r.value); });
+syncQualityRadios();
 
 // ---------- copy / paste ----------
 // In-app clipboard: the selected tiles' session records, the same shape a saved file and undo's
