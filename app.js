@@ -1404,12 +1404,22 @@ function startResize(tile, corner, e) {
   const sx = corner.includes('l') ? -1 : 1;
   const sy = corner.includes('t') ? -1 : 1;
   const onBoard = isBoard();
+  // A sticky group's member scales the whole group about its bounding box (Ctrl: just this tile,
+  // mirroring Ctrl-drag). Text members scale their box too and re-wrap.
+  const groupScale = onBoard && !modKey(e) && !tile.freeAspect && tile.group && tile.group.sticky
+    ? [...tile.group.members].filter((m) => m.board) : null;
+  const members = groupScale && groupScale.length > 1 ? groupScale : null;
+  const groupBB = members ? boardBounds(members) : null;
+  const memberStart = members ? new Map(members.map((m) => [m, { ...m.board }])) : null;
+  // the corner of the group's box that stays put: the one opposite the handle
+  const groupOrigin = members ? { x: corner.includes('l') ? groupBB.minX + groupBB.w : groupBB.minX, y: corner.includes('t') ? groupBB.minY + groupBB.h : groupBB.minY } : undefined;
   const start = onBoard ? { ...tile.board } : { w: tile.el.offsetWidth, h: tile.el.offsetHeight };
   if (onBoard) { bringToFront(tile); rememberStart(); }
   // Linked mode can push neighbours, so remember every board rect
   const undoEntry = onBoard ? recordResize(tiles.filter((t) => t.board)) : recordGResize(tile);
-  const fixed = new Set([tile]);
+  const fixed = new Set(members || [tile]);
   tile.el.classList.add('resizing');
+  if (members) for (const m of members) m.el.classList.add('resizing');
   document.body.classList.add('resizing');
   document.body.style.cursor = getComputedStyle(handle).cursor;
 
@@ -1440,19 +1450,25 @@ function startResize(tile, corner, e) {
       // snap the size and the moving edges to the other tiles (Alt: free), like a move does
       if (!ev.altKey) {
         const others = tiles.filter((t) => t.board && !fixed.has(t)).map((t) => t.board);
-        const s = Snap.resize({ start, corner, h, aspect: tile.aspect, others, th: SNAP_PX / board.zoom, gap: LINK_GAP });
+        const s = Snap.resize({ start, corner, h, aspect: tile.aspect, others, th: SNAP_PX / board.zoom, gap: LINK_GAP, origin: groupOrigin });
         h = s.h;
         hideGuides();
         if (s.guideX !== null) showGuideV(s.guideX);
         if (s.guideY !== null) showGuideH(s.guideY);
       } else hideGuides();
       h = clamp(h, BOARD_MIN_H, BOARD_MAX_H);
-      const w = h * tile.aspect;
-      const b = tile.board;
-      if (corner.includes('l')) b.x = start.x + (start.w - w);
-      if (corner.includes('t')) b.y = start.y + (start.h - h);
-      b.w = w; b.h = h;
-      layoutTile(tile);
+      if (members) {
+        const factor = Arrange.clampFactor([...memberStart.values()], h / start.h, BOARD_MIN_H, BOARD_MAX_H);
+        const rects = Arrange.scaleAbout(members.map((m) => memberStart.get(m)), groupBB, factor, corner);
+        members.forEach((m, i) => { m.board = { ...rects[i] }; layoutTile(m); if (m.freeAspect) renderTextTile(m); });
+      } else {
+        const w = h * tile.aspect;
+        const b = tile.board;
+        if (corner.includes('l')) b.x = start.x + (start.w - w);
+        if (corner.includes('t')) b.y = start.y + (start.h - h);
+        b.w = w; b.h = h;
+        layoutTile(tile);
+      }
       if (board.linked && !ev.altKey) resolveOverlaps(fixed);
     } else {
       setTileGalleryH(tile, h); // gallery: just this tile
@@ -1468,6 +1484,7 @@ function startResize(tile, corner, e) {
     handle.removeEventListener('pointercancel', onUp);
     handle.removeEventListener('lostpointercapture', onUp);
     tile.el.classList.remove('resizing');
+    if (members) for (const m of members) m.el.classList.remove('resizing');
     document.body.classList.remove('resizing');
     document.body.style.cursor = '';
     hideGuides();
