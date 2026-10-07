@@ -1477,7 +1477,11 @@ function attachTileDrag(tile) {
     if (!isBoard() || e.button !== 0 || !tile.board || e.altKey) return;
     if (e.target.closest('.handle, input, button, select')) return;
     if (tile.editing && e.target.closest('.text-body')) return; // put the caret, don't drag the tile
-    if (e.shiftKey) {
+    const action = Select.onPointerDown({
+      inSelection: selection.has(tile), grouped: !!tile.group, sticky: !!(tile.group && tile.group.sticky),
+      mod: modKey(e), shift: e.shiftKey,
+    });
+    if (action === 'toggle') {
       // shift-click toggles membership without starting a drag
       setSelected(tile, !selection.has(tile));
       selectionStatus();
@@ -1485,11 +1489,11 @@ function attachTileDrag(tile) {
       setTimeout(() => { tile.suppressClick = false; }, 0);
       return;
     }
-    // Ctrl: just this tile, even inside a sticky group. Otherwise clicking a
-    // member selects its whole group (so its settings bar shows).
+    // Ctrl: just this tile, even inside a sticky group. A plain click picks one tile, or a sticky
+    // member's whole group (so its settings bar shows); a click inside the selection keeps it.
     const single = modKey(e);
-    if (single) selectOnly(tile);
-    else if (tile.group && !selection.has(tile)) selectGroupOf(tile);
+    if (action === 'only') selectOnly(tile);
+    else if (action === 'group') selectGroupOf(tile);
     const start = { x: e.clientX, y: e.clientY };
     // Capture from the very first event, not once the drag passes the 4 px threshold: a release
     // over a cross-origin embed is only delivered back here if this element already owns the
