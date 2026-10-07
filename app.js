@@ -1503,9 +1503,16 @@ function attachTileDrag(tile) {
   const el = tile.el;
   el.addEventListener('pointerdown', (e) => {
     tile.guard.pointerDown(); // a fresh press: whatever click the last drag was waiting for never came
-    if (!isBoard() || e.button !== 0 || !tile.board || e.altKey) return;
+    if (!isBoard() || e.button !== 0 || !tile.board) return;
     if (e.target.closest('.handle, input, button, select')) return;
     if (tile.editing && e.target.closest('.text-body')) return; // put the caret, don't drag the tile
+    // Alt-drag on a sticky group's member rearranges inside the group (swap two slots)
+    const swapMembers = tile.group ? [...tile.group.members].filter((m) => m.board) : [];
+    if (Swap.isSwapDrag({ sticky: !!(tile.group && tile.group.sticky), alt: e.altKey, mod: modKey(e), shift: e.shiftKey, memberCount: swapMembers.length })) {
+      e.stopPropagation(); // the grid's pointerdown would otherwise start an Alt-pan too
+      return startSwapDrag(tile, swapMembers, e);
+    }
+    if (e.altKey) return; // Alt-drag anywhere else pans (grid handler)
     const action = Select.onPointerDown({
       inSelection: selection.has(tile), grouped: !!tile.group, sticky: !!(tile.group && tile.group.sticky),
       mod: modKey(e), shift: e.shiftKey,
@@ -1597,6 +1604,73 @@ function attachTileDrag(tile) {
     el.addEventListener('lostpointercapture', onUp); // the embed, or Chromium, took the pointer
     activeInteractions.add(onUp); // a recovery ends this drag properly, listeners and all
   });
+}
+
+// ---------- board: swap two members of a sticky group ----------
+// The dragged tile follows the pointer; the member under the pointer is the target and previews
+// moving into the dragged tile's slot. Release on a target: the two exchange slots (position and
+// size; a tile of another shape sits centred inside its new slot). Anywhere else, or a drag that
+// ends any other way than a release on this tile (lost capture, cancel, recovery): everything
+// goes back. One undo entry.
+function startSwapDrag(tile, members, e) {
+  const el = tile.el;
+  try { el.setPointerCapture(e.pointerId); } catch {}
+  const startC = { x: e.clientX, y: e.clientY };
+  const slots = members.map((m) => ({ id: m, rect: { ...m.board } }));
+  const startRect = { ...tile.board };
+  let moving = false, target = null, undoEntry = null;
+  const place = (m, rect) => { m.board = Swap.fitInto(rect, m.freeAspect ? null : m.aspect); layoutTile(m); if (m.freeAspect) renderTextTile(m); };
+  const restore = (m) => { const s = slots.find((x) => x.id === m); m.board = { ...s.rect }; layoutTile(m); if (m.freeAspect) renderTextTile(m); };
+  const setTarget = (m) => {
+    if (target === m) return;
+    if (target) { target.el.classList.remove('swap-target'); restore(target); }
+    target = m;
+    if (target) { target.el.classList.add('swap-target'); place(target, startRect); }
+  };
+  const onMove = (ev) => {
+    const dx = ev.clientX - startC.x, dy = ev.clientY - startC.y;
+    if (!moving) {
+      if (Math.hypot(dx, dy) < 4) return;
+      moving = true;
+      undoEntry = recordMove(members, 'swap');
+      bringToFront(tile);
+      el.classList.add('swapping');
+      document.body.classList.add('tile-dragging');
+    }
+    tile.board.x = startRect.x + dx / board.zoom; tile.board.y = startRect.y + dy / board.zoom;
+    layoutTile(tile);
+    const p = toCanvas(ev.clientX, ev.clientY);
+    setTarget(Swap.targetAt(p, slots, tile));
+  };
+  let ended = false;
+  const onUp = (ev) => {
+    if (ended) return; // pointerup, lostpointercapture and a recovery can all arrive
+    ended = true;
+    activeInteractions.delete(onUp);
+    el.removeEventListener('pointermove', onMove);
+    el.removeEventListener('pointerup', onUp);
+    el.removeEventListener('pointercancel', onUp);
+    el.removeEventListener('lostpointercapture', onUp);
+    if (!moving) return;
+    // only a real release commits; a cancelled drag puts everything back
+    if (!ev || ev.type !== 'pointerup') setTarget(null);
+    const swapped = target;
+    if (target) target.el.classList.remove('swap-target');
+    for (const s of Swap.apply(slots, tile, target)) {
+      if (swapped && (s.id === tile || s.id === swapped)) place(s.id, s.rect); else restore(s.id);
+    }
+    el.classList.remove('swapping');
+    document.body.classList.remove('tile-dragging');
+    finishRects(undoEntry); // drops the entry when nothing changed (no target)
+    tile.guard.afterDrag();
+    updateTextToolbar();
+    if (swapped) { setStatus('Swapped'); logUi('info', 'swap', { group: tile.group && tile.group.id }); }
+  };
+  el.addEventListener('pointermove', onMove);
+  el.addEventListener('pointerup', onUp);
+  el.addEventListener('pointercancel', onUp);
+  el.addEventListener('lostpointercapture', onUp);
+  activeInteractions.add(onUp);
 }
 
 // ---------- board: pan the view / lasso ----------

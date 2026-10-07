@@ -231,9 +231,12 @@ body.mode-board .tile {
 }
 body.mode-board .tile .overlay .top { cursor: move; }
 body.mode-board .tile.dragging { outline: 2px solid var(--accent); }
+/* Alt-drag inside a sticky group: the lifted tile, and the member it would swap with */
+body.mode-board .tile.swapping { outline: 2px dashed var(--accent); opacity: 0.85; }
+body.mode-board .tile.swap-target { outline: 2px solid var(--accent); }
 body.tile-dragging { user-select: none; cursor: move; }
 body.tile-dragging .tile { pointer-events: none; }
-body.tile-dragging .tile.dragging { pointer-events: auto; }
+body.tile-dragging .tile.dragging, body.tile-dragging .tile.swapping { pointer-events: auto; }
 
 #zoom-label { color: var(--muted); min-width: 46px; font-variant-numeric: tabular-nums; font-size: 12px; }
 #empty .hint { font-size: 12px; max-width: 520px; text-align: center; margin-top: 12px; }
