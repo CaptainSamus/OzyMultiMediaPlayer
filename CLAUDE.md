@@ -22,20 +22,26 @@ sonnet). Mark only needs to talk to fable.
 
 ## Window names
 
-Windows are named `<layout> scott <model> <n>`. The current layout is:
+Windows are named `scott <model> windows <n>` (older layouts used
+`windows scott <model> <n>`). Any window whose name contains both `scott`
+and `windows` belongs to the Ozy projects, whatever its number:
 
-| Role   | Window name              |
-|--------|--------------------------|
-| Hub    | `windows scott fable 1`  |
-| Coder  | `windows scott opus 1`   |
-| Ops    | `windows scott sonnet 1` |
+| Role   | Window name pattern            | Notes                                   |
+|--------|--------------------------------|-----------------------------------------|
+| Hub    | `scott fable windows <n>`      | the one Mark is talking to              |
+| Coder  | `scott opus windows <n>`       | every opus window is a coder; 2+ means  |
+|        |                                | parallel coding tasks                   |
+| Ops    | `scott sonnet windows <n>`     |                                         |
+
+A second or third opus window, or a second fable window, that matches this
+pattern is for this project. Assume it without asking. Spread independent
+tasks across the opus windows; give dependent tasks to the same window.
 
 ## Startup routine (every new fable session on these projects)
 
-1. Ask Mark which window tree we are using this session (the layout name and
-   the window names). Default to the table above if he says nothing changed.
-2. Run `ListAgents` to find the open Claude sessions on this machine and
-   confirm the opus and sonnet windows are present. Use `SendMessage` with the
+1. Run `ListAgents` and take every online window matching `scott … windows`
+   as part of this project's tree. Only ask Mark if none match.
+2. Confirm at least one opus and one sonnet window are present. Use `SendMessage` with the
    exact names listed to hand work to them.
 3. If a named window is missing, tell Mark which one before dispatching work
    to it; do not silently do that window's job in the hub.
