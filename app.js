@@ -1969,14 +1969,15 @@ function addVideo(filePath, state = {}) {
   };
   // Chromium remembers a URL that failed to load for the life of the page, so a copy that had to
   // be made again (same file name) is asked for under a new query; main ignores the query.
-  const tierGen = { half: 0, quarter: 0 };
+  const tierGen = { half: 0, quarter: 0, full: 0 };
   const tierUrl = (q) => window.api.videoUrl(tile.tiers[q]) + (tierGen[q] ? '?v=' + tierGen[q] : '');
+  const proxyUrl = () => window.api.videoUrl(tile.proxy) + (tierGen.full ? '?v=' + tierGen.full : '');
   const loadFull = () => {
     tile.tier = 'full'; showBadge('');
     if (tile.unplayable && !tile.proxy) { // the original can't play here and no playable copy was made: back to that offer
       swapState = null; video.removeAttribute('src'); video.load();
       showError(`${(tile.info && tile.info.codec) || 'This codec'} can't play here.`, true);
-    } else tile.swapSource(window.api.videoUrl(tile.proxy || filePath));
+    } else tile.swapSource(tile.proxy ? proxyUrl() : window.api.videoUrl(filePath));
   };
   // an encode this tile no longer wants is stopped, unless another tile of the same file still wants it
   const dropTierJob = () => {
@@ -2017,7 +2018,17 @@ function addVideo(filePath, state = {}) {
   // must not put its "Cannot play" panel over a video that is about to play.
   const tierRetried = new Set();
   video.addEventListener('error', (e) => {
-    if (tile.tier === 'full') return;
+    const next = ProxyCache.lostCopy({ tier: tile.tier, hasProxy: !!tile.proxy, unplayable: !!tile.unplayable });
+    if (next === 'none') return;
+    if (next !== 'remake-tier') {
+      // The playable copy is gone (the cache was trimmed or cleared while this tile sat idle).
+      logUi('warn', 'playable copy unreadable', { path: filePath });
+      tile.proxy = null; tierGen.full++;
+      if (next === 'offer-playable') return;      // the tile's own handler now offers Make playable again
+      e.stopImmediatePropagation();
+      loadFull();                                 // the original plays here: carry on with it
+      return;
+    }
     e.stopImmediatePropagation();
     const lost = tile.tier;
     tile.tiers[lost] = null;
@@ -2033,7 +2044,7 @@ function addVideo(filePath, state = {}) {
     try {
       const { proxy } = await window.api.makeProxy(filePath);
       tile.proxy = proxy;
-      tile.setSource(window.api.videoUrl(proxy));
+      tile.setSource(proxyUrl());
     } catch (e) {
       // ipcRenderer.invoke wraps main-process errors; show only ffmpeg's own message
       showError(String(e.message).replace(/^Error invoking remote method '[^']*': (Error: )?/, ''), true);
@@ -2643,6 +2654,8 @@ function addWebTile(url, parsed, state = {}, at = null) {
     // does that), so a tile restored paused - every tile, on open and paste - is paused again the
     // moment it reports playing. Once, and only for a few seconds: after that a play is the user's.
     let holdPausedUntil = 0;
+    const ytPlay = yt.play;
+    yt.play = () => { holdPausedUntil = 0; ytPlay(); }; // Play all, the group bar, a synced partner: a wanted play is never undone
     yt.onChange((st, ev) => {
       if (holdPausedUntil && ev === 'onStateChange' && st.state === 1) {
         if (performance.now() < holdPausedUntil) yt.pause();
@@ -3736,7 +3749,7 @@ function collectSession() {
       // image sequence: folder + run description + its look; the decoded-frame cache is found again by key
       type: 'sequence', dir: t.dir, path: t.path, galleryH: Math.round(galleryHOf(t)),
       seq: { name: t.seq.name, sep: t.seq.sep, pad: t.seq.pad, ext: t.seq.ext, start: t.seq.start, end: t.seq.end, count: t.seq.count, missing: t.seq.missing, single: !!t.seq.single, fps: t.fps, exposure: t.exposure, colour: t.colour, layer: t.seq.layer || '', part: t.seq.part || 0 },
-      color: t.hue, loop: !!t.loop, currentTime: t.pb.time, volume: 0, muted: false, playbackRate: t.pb.rate, paused: t.pb.paused, aspect: t.aspect,
+      color: t.hue, loop: !!t.loop, currentTime: t.pb.time, volume: 0, muted: false, playbackRate: t.pb.rate, paused: Session.savedPaused(t.pb.paused, t.autoPaused), aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
       sync: t.sync ? { start: t.sync.start } : null,
@@ -3748,7 +3761,7 @@ function collectSession() {
       // web tile (YouTube / Twitch). Not "!t.video": in Stream / Local mode a web tile has a <video>.
       type: t.type, kind: t.kind, url: t.url, title: t.title, galleryH: Math.round(galleryHOf(t)),
       currentTime: t.pb ? t.pb.time : 0, volume: t.volume, muted: !!t.ownMuted, playbackRate: 1,
-      paused: t.yt ? t.yt.paused : true, aspect: t.aspect,
+      paused: t.yt ? Session.savedPaused(t.yt.paused, t.autoPaused) : true, aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       color: t.hue, loop: !!t.loop, // YouTube only
       webMode: t.webMode || 'stream', webQuality: t.webQuality || 0,
@@ -3766,7 +3779,7 @@ function collectSession() {
       volume: t.volume,
       muted: t.group ? !!t.ownMuted : t.video.muted, // own mute, not the group's
       playbackRate: t.video.playbackRate,
-      paused: t.video.paused,
+      paused: Session.savedPaused(t.video.paused, t.autoPaused), // off screen and auto-paused still counts as playing
       aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
