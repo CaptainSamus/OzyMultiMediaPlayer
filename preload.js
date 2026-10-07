@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('api', {
   onProxyProgress: (cb) => ipcRenderer.on('proxy-progress', (_e, p, frac, tier) => cb(p, frac, tier || 'full')),
   cacheInfo: () => ipcRenderer.invoke('cache-info'),
   pickCacheFolder: () => ipcRenderer.invoke('pick-cache-folder'),
+  loadStats: () => ipcRenderer.invoke('load-stats'),
   clearCache: () => ipcRenderer.invoke('clear-cache'),
   parent: () => ipcRenderer.invoke('twitch-parent'),
   version: () => ipcRenderer.invoke('app-version'),

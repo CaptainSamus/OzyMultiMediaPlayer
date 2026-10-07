@@ -593,6 +593,28 @@ ipcMain.handle('cache-info', () => {
   // the cap covers the video copies only (thumbnails and decoded sequence frames are not trimmed)
   return { bytes, files, proxyBytes: dirUsage(proxyDir()).bytes, capMB: readSettings().cacheCapMB, dir: proxyDir() };
 });
+// ---- load viewer ----
+// Totals only: Ozy's own processes from app.getAppMetrics(), the machine from os. No per-program detail.
+const os = require('os');
+const LoadStats = require('./lib/loadstats');
+let lastCpus = null;
+ipcMain.handle('load-stats', () => {
+  const cpus = os.cpus();
+  const sysCpu = LoadStats.cpuPercent(lastCpus, cpus);
+  lastCpus = cpus;
+  let appCpu = 0, appMemMB = 0, gpuMemMB = 0;
+  for (const m of app.getAppMetrics()) {
+    const mb = (m.memory && m.memory.workingSetSize ? m.memory.workingSetSize : 0) / 1024;
+    appCpu += m.cpu ? m.cpu.percentCPUUsage : 0;
+    if (m.type === 'GPU') gpuMemMB += mb; else appMemMB += mb;
+  }
+  // percentCPUUsage is already a share of the whole machine (Electron divides by the core count),
+  // so the processes just add up. One decimal: on a many-core machine a few videos are 1-2 %.
+  appCpu = Math.round(appCpu * 10) / 10;
+  const totalMemMB = os.totalmem() / 1048576, usedMemMB = (os.totalmem() - os.freemem()) / 1048576;
+  return { appCpu, appMemMB: Math.round(appMemMB + gpuMemMB), gpuMemMB: Math.round(gpuMemMB), sysCpu, usedMemMB: Math.round(usedMemMB), totalMemMB: Math.round(totalMemMB) };
+});
+
 ipcMain.handle('pick-cache-folder', async () => {
   const r = await dialog.showOpenDialog(win, { title: 'Cache folder', properties: ['openDirectory', 'createDirectory'] });
   return r.canceled || !r.filePaths[0] ? null : r.filePaths[0];

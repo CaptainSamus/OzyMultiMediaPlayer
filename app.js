@@ -4624,6 +4624,46 @@ document.getElementById('opt-cache-folder').addEventListener('click', async () =
 });
 document.getElementById('opt-cache-clear').addEventListener('click', () => { optList.hidden = true; document.getElementById('btn-cache').click(); });
 
+// ---------- load viewer ----------
+// Once a second while it is open: Ozy against everything else (totals from main, lib/loadstats.js
+// does the arithmetic) and a row per tile. Reads nothing about other programs.
+const loadPanel = document.getElementById('load-panel');
+const optLoad = document.getElementById('opt-load');
+let loadTimer = null;
+const tileState = (t) => (!t.pb ? (t.type || 'image') : t.autoPaused ? 'auto-paused' : t.pb.paused ? 'paused' : 'playing');
+async function refreshLoad() {
+  if (loadPanel.hidden) return;
+  let raw = null, s = null;
+  try { raw = await window.api.loadStats(); s = LoadStats.split(raw); } catch {}
+  // the first sample has nothing to compare the machine's CPU against yet
+  const pct = (v) => (v < 10 ? Math.round(v * 10) / 10 : Math.round(v)) + '%';
+  const otherCpu = !raw || raw.sysCpu === null ? '…' : pct(s.other.cpu);
+  loadPanel.querySelector('.lp-sum').textContent = s
+    ? `Ozy ${pct(s.ozy.cpu)} CPU · ${s.ozy.memMB} MB (${s.ozy.gpuMemMB} MB GPU) · Everything else ${otherCpu} CPU · ${s.other.memMB} MB · ${s.freeMB} MB free`
+    : 'unavailable';
+  const rows = LoadStats.rows(tiles.map((t) => {
+    const v = t.video;
+    const q = v && typeof v.getVideoPlaybackQuality === 'function' ? v.getVideoPlaybackQuality() : null;
+    return { name: tileName(t), width: v ? v.videoWidth : 0, height: v ? v.videoHeight : 0, tier: t.tier, state: tileState(t), dropped: q ? q.droppedVideoFrames : undefined };
+  }));
+  const body = loadPanel.querySelector('tbody');
+  body.textContent = '';
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    for (const v of [r.name, r.res, r.tier, r.state, r.dropped, r.estMB ? r.estMB.toFixed(0) : '–']) { const td = document.createElement('td'); td.textContent = String(v); tr.appendChild(td); }
+    tr.firstChild.title = r.name;
+    body.appendChild(tr);
+  }
+}
+function setLoadViewer(on) {
+  loadPanel.hidden = !on;
+  optLoad.checked = on;
+  clearInterval(loadTimer); loadTimer = null;
+  if (on) { refreshLoad(); loadTimer = setInterval(refreshLoad, 1000); }
+}
+optLoad.addEventListener('change', () => setLoadViewer(optLoad.checked));
+loadPanel.querySelector('.lp-close').addEventListener('click', () => setLoadViewer(false));
+
 // ---------- copy / paste ----------
 // In-app clipboard: the selected tiles' session records, the same shape a saved file and undo's
 // remove already use, so paste can rebuild every tile type through addFromRecord. Groups are not

@@ -40,6 +40,7 @@
       <button id="btn-optimize" title="Make a heavy scene lighter: pause what is off screen, play at a lower resolution, see what the scene costs">Optimize ▾</button>
       <div class="menu-list" id="opt-list" hidden>
         <label class="menu-check" title="A video scrolled out of view stops decoding and resumes when it comes back"><input type="checkbox" id="opt-offscreen"> Pause offscreen videos</label>
+        <label class="menu-check" title="What this scene costs: Ozy against everything else on the machine, and each video"><input type="checkbox" id="opt-load"> Show load viewer</label>
         <div class="menu-title">Playback quality <small>local videos; each tile's ⚙ can override</small></div>
         <label class="menu-check"><input type="radio" name="opt-quality" value="full"> Full</label>
         <label class="menu-check"><input type="radio" name="opt-quality" value="half"> ½ resolution</label>
@@ -175,6 +176,11 @@
     <button class="gb-ungroup" title="Ungroup (Ctrl+Shift+G)">Ungroup</button>
   </div>
 
+  <div id="load-panel" hidden>
+    <div class="lp-head"><span>Load</span><span class="lp-sum"></span><span class="spacer"></span><button class="lp-close" title="Hide (Optimize ▾ shows it again)">✕</button></div>
+    <table class="lp-table"><thead><tr><th>Video</th><th>Source</th><th>Tier</th><th>State</th><th>Dropped</th><th>≈ MB</th></tr></thead><tbody></tbody></table>
+    <div class="lp-note">Ozy = this app's processes. Everything else = the rest of the machine, as one number. GPU is Ozy's GPU process only. ≈ MB is an estimate from resolution; a paused or offscreen video costs little. A copy of a video costs what the original does while it plays.</div>
+  </div>
   <div id="timeline" hidden>
     <div class="tl-head">
       <button class="tl-grip" title="Expand / collapse (T). Drag the bar up or down to resize.">▴</button>
@@ -427,6 +433,7 @@
   <script src="lib/visibility.js"></script>
   <script src="lib/proxy.js"></script>
   <script src="lib/cachepolicy.js"></script>
+  <script src="lib/loadstats.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
