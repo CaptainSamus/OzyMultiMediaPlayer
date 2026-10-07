@@ -789,6 +789,7 @@ body.mode-board.hand .tile.web .pan-shield, body.mode-board.panning .tile.web .p
 .menu-list .menu-check input { cursor: pointer; }
 .menu-title { padding: 6px 10px 2px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .menu-title small { display: block; }
+#opt-cache-line { white-space: pre-line; max-width: 320px; overflow-wrap: anywhere; }
 .q-badge { flex: 0 0 auto; font-size: 11px; padding: 0 6px; border-radius: 4px; background: rgba(255,255,255,0.15); white-space: nowrap; }
 .q-badge[hidden] { display: none; }
 .menu-list #btn-version { color: var(--muted); cursor: default; }

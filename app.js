@@ -4594,6 +4594,36 @@ function setSceneQuality(q) {
 for (const r of document.querySelectorAll('input[name="opt-quality"]')) r.addEventListener('change', () => { if (r.checked) setSceneQuality(r.value); });
 syncQualityRadios();
 
+// ---------- cache folder and cap ----------
+// The cap covers the video copies (playable + smaller); main trims after each one it makes.
+const optCacheLine = document.getElementById('opt-cache-line');
+const optCacheCap = document.getElementById('opt-cache-cap');
+async function refreshCacheLine() {
+  try {
+    const { bytes, proxyBytes, capMB, dir } = await window.api.cacheInfo();
+    const mb = (b) => (b / 1048576).toFixed(0);
+    optCacheLine.textContent = `Video copies ${mb(proxyBytes)} MB of ${capMB} MB · whole cache ${mb(bytes)} MB\n${dir}`;
+    optCacheLine.title = dir;
+    optCacheCap.value = String(settings.cacheCapMB);
+  } catch { optCacheLine.textContent = 'unavailable'; }
+}
+document.getElementById('btn-optimize').addEventListener('click', refreshCacheLine);
+optCacheCap.addEventListener('keydown', (e) => e.stopPropagation()); // typing a number is not a shortcut
+optCacheCap.addEventListener('change', async () => {
+  settings.cacheCapMB = Math.max(512, Number(optCacheCap.value) || 20480);
+  await window.api.saveSettings(settings); // main reads the cap from the file: write now, not on the debounce
+  refreshCacheLine();
+});
+document.getElementById('opt-cache-folder').addEventListener('click', async () => {
+  const dir = await window.api.pickCacheFolder();
+  if (!dir) return;
+  settings.cacheDir = dir;
+  await window.api.saveSettings(settings); // as above: the next copy must already go to the new folder
+  setStatus('New copies go to ' + dir + ' (existing ones stay where they were)', 8000);
+  refreshCacheLine();
+});
+document.getElementById('opt-cache-clear').addEventListener('click', () => { optList.hidden = true; document.getElementById('btn-cache').click(); });
+
 // ---------- copy / paste ----------
 // In-app clipboard: the selected tiles' session records, the same shape a saved file and undo's
 // remove already use, so paste can rebuild every tile type through addFromRecord. Groups are not

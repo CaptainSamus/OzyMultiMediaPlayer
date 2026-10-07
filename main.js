@@ -121,9 +121,13 @@ function urlToFilePath(url) {
 // Serves localvideo:// — every video, picture and cached frame. It runs on the main process, so a
 // tile whose file sits on a share that no longer answers must not be able to block it: the stat is
 // guarded like every other user-supplied path, and an unreachable file simply 404s.
+// when each cached video copy was last asked for: the cache trim leaves alone what a tile is reading
+const proxyServedAt = new Map();
+const PROXY_FILE = /[\\/][0-9a-f]{40}(-half|-quarter)?\.mp4$/;
 async function handleVideoRequest(request) {
   let filePath;
   try { filePath = urlToFilePath(request.url); } catch { return new Response('Bad URL', { status: 400 }); }
+  if (PROXY_FILE.test(filePath)) proxyServedAt.set(path.normalize(filePath).toLowerCase(), Date.now());
 
   const stat = await guardedStat(filePath);
   if (!stat) return new Response('Not found', { status: 404 });
@@ -436,7 +440,12 @@ const ProxyCache = require('./lib/proxy');
 const Sequence = require('./lib/sequence');
 const ExrHeader = require('./lib/exrheader');
 
+/* DISABLED (2026-10-07): the cache folder can be moved (Optimize ▾ → Change folder…)
 const proxyDir = () => path.join(app.getPath('userData'), 'proxies');
+*/
+// settings.cacheDir (null = the app's own data folder); always a `proxies` folder inside it, so
+// clearing the cache can never remove anything else from a folder the user picked
+const proxyDir = () => { const s = readSettings(); return s.cacheDir ? path.join(s.cacheDir, 'proxies') : path.join(app.getPath('userData'), 'proxies'); };
 function proxyPathFor(filePath, stat, tier = 'full') {
   return path.join(proxyDir(), ProxyCache.name(filePath, stat.size, stat.mtimeMs, tier));
 }
@@ -514,6 +523,7 @@ ipcMain.handle('make-proxy', (e, filePath, tier = 'full') => {
           send(filePath, 1, tier);
           log('info', `${what} made`, { path: filePath, tier, out });
           resolve({ proxy: out });
+          trimProxyCache(out);
         } else {
           try { fs.unlinkSync(tmp); } catch {}
           if (code !== null) logTool(`ffmpeg (${what})`, ProxyCache.args(filePath, tmp, tier), { code }, tail);
@@ -530,6 +540,33 @@ ipcMain.handle('make-proxy', (e, filePath, tier = 'full') => {
     return p;
   });
 });
+
+// After every finished copy: back under settings.cacheCapMB, least recently used first (rules in
+// lib/cachepolicy.js). The copy just made and anything a tile asked for in the last ten minutes
+// are left alone; so is whatever can't be deleted. Windows updates a file's access time lazily, so
+// "used" is the newest of access time, modified time and when we last served it.
+const CachePolicy = require('./lib/cachepolicy');
+const PROXY_BUSY_MS = 10 * 60 * 1000;
+function trimProxyCache(justMade) {
+  try {
+    const dir = proxyDir();
+    const now = Date.now();
+    const keep = justMade ? path.normalize(justMade).toLowerCase() : null;
+    const files = [];
+    for (const n of fs.readdirSync(dir)) {
+      if (!n.endsWith('.mp4') || n.endsWith('.part.mp4')) continue;
+      const p = path.join(dir, n);
+      let st; try { st = fs.statSync(p); } catch { continue; }
+      const k = path.normalize(p).toLowerCase();
+      const served = proxyServedAt.get(k) || 0;
+      files.push({ path: p, size: st.size, atimeMs: Math.max(st.atimeMs, st.mtimeMs, served), busy: k === keep || now - served < PROXY_BUSY_MS });
+    }
+    const cap = readSettings().cacheCapMB * 1048576;
+    for (const p of CachePolicy.evict(files, cap)) {
+      try { fs.unlinkSync(p); proxyServedAt.delete(path.normalize(p).toLowerCase()); log('info', 'cache trimmed', { path: p }); } catch {} // in use: next time
+    }
+  } catch (err) { logError('cache trim', err); }
+}
 
 ipcMain.on('cancel-proxy', (_e, filePath, tier = 'full') => {
   const key = ProxyCache.jobKey(filePath, tier);
@@ -553,7 +590,12 @@ function dirUsage(dir) {
 ipcMain.handle('cache-info', () => {
   let bytes = 0, files = 0;
   for (const dir of [proxyDir(), thumbDir(), framesDir()]) { const u = dirUsage(dir); bytes += u.bytes; files += u.files; }
-  return { bytes, files };
+  // the cap covers the video copies only (thumbnails and decoded sequence frames are not trimmed)
+  return { bytes, files, proxyBytes: dirUsage(proxyDir()).bytes, capMB: readSettings().cacheCapMB, dir: proxyDir() };
+});
+ipcMain.handle('pick-cache-folder', async () => {
+  const r = await dialog.showOpenDialog(win, { title: 'Cache folder', properties: ['openDirectory', 'createDirectory'] });
+  return r.canceled || !r.filePaths[0] ? null : r.filePaths[0];
 });
 ipcMain.handle('clear-cache', () => {
   for (const job of proxyJobs.values()) job.child.kill();

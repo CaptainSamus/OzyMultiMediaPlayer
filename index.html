@@ -44,6 +44,10 @@
         <label class="menu-check"><input type="radio" name="opt-quality" value="full"> Full</label>
         <label class="menu-check"><input type="radio" name="opt-quality" value="half"> ½ resolution</label>
         <label class="menu-check"><input type="radio" name="opt-quality" value="quarter"> ¼ resolution</label>
+        <div class="menu-title">Cache <small id="opt-cache-line">…</small></div>
+        <label class="menu-check" title="Playable and smaller copies are deleted, least recently used first, once they pass this size">Cap <input type="number" id="opt-cache-cap" min="512" step="512" style="width:7em"> MB</label>
+        <button id="opt-cache-folder" title="Where playable and smaller copies are kept. Existing files are not moved.">Change folder…</button>
+        <button id="opt-cache-clear" title="Delete every cached copy, thumbnail and decoded frame">Clear cache…</button>
       </div>
     </div>
     <span class="sep"></span>
@@ -422,6 +426,7 @@
   <script src="lib/dragstate.js"></script>
   <script src="lib/visibility.js"></script>
   <script src="lib/proxy.js"></script>
+  <script src="lib/cachepolicy.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
