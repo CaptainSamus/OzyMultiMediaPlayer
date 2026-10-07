@@ -3706,7 +3706,7 @@ async function applySession(data) {
   let missing = 0;
   const byIndex = new Map(); // index in data.videos -> tile (v3 files and bad entries leave gaps)
   for (const [i, v] of data.videos.entries()) {
-    const r = await addFromRecord(v);
+    const r = await addFromRecord(Session.openRecord(v));
     if (r.missing) missing++;
     if (r.tile) byIndex.set(i, r.tile);
   }
@@ -4437,7 +4437,7 @@ async function pasteClipboard() {
   for (const v of recs) {
     if (!isBoard() && v.type === 'text') { skipped++; continue; } // text has no gallery form
     const wasLoose = !(v.board && isFinite(Number(v.board.x)));
-    const r = await addFromRecord({ ...v, sync: null }); // groups aren't copied, so nor are offsets
+    const r = await addFromRecord(Session.openRecord({ ...v, sync: null })); // groups aren't copied, so nor are offsets; copies start paused
     if (r.missing) missing++;
     if (r.tile) {
       if (isBoard() && wasLoose && !r.tile.board) placeOnBoard([r.tile], loosePoints[loose] || null);
