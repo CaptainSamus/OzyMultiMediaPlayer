@@ -36,6 +36,12 @@
         <button id="btn-version" disabled>Version …</button>
       </div>
     </div>
+    <div class="menu" id="optimize-menu">
+      <button id="btn-optimize" title="Make a heavy scene lighter: pause what is off screen, play at a lower resolution, see what the scene costs">Optimize ▾</button>
+      <div class="menu-list" id="opt-list" hidden>
+        <label class="menu-check" title="A video scrolled out of view stops decoding and resumes when it comes back"><input type="checkbox" id="opt-offscreen"> Pause offscreen videos</label>
+      </div>
+    </div>
     <span class="sep"></span>
     <button id="btn-play-all" title="Play every video (Space)">Play all</button>
     <button id="btn-pause-all" title="Pause every video (Space)">Pause all</button>
@@ -409,6 +415,7 @@
   <script src="lib/hoverplay.js"></script>
   <script src="lib/scrub.js"></script>
   <script src="lib/dragstate.js"></script>
+  <script src="lib/visibility.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

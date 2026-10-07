@@ -334,6 +334,10 @@ function layoutTile(t) {
   }
 }
 
+// offscreen pause (the block after hover play) re-checks shortly after anything moves the view
+let offscreenTimer = null;
+function scheduleOffscreen() { clearTimeout(offscreenTimer); offscreenTimer = setTimeout(applyOffscreen, 50); }
+
 function applyBoardView() {
   canvas.style.transform = `translate(${board.panX}px, ${board.panY}px) scale(${board.zoom})`;
   canvas.style.setProperty('--ui-scale', String(1 / board.zoom)); // controls keep their screen size
@@ -342,6 +346,7 @@ function applyBoardView() {
   grid.style.backgroundPosition = `${board.panX}px ${board.panY}px`;
   updateZoomUI();
   updateTextToolbar(); // it floats over the board in screen space, so pan and zoom move it
+  scheduleOffscreen();
 }
 
 function layoutTiles() {
@@ -353,6 +358,7 @@ function layoutTiles() {
     canvas.style.setProperty('--ui-scale', '1');
     updateZoomUI();
   }
+  scheduleOffscreen();
 }
 
 /* DISABLED (Mark, 2026-09-12): one shared height for every gallery tile; each tile has its own now
@@ -664,13 +670,14 @@ setInterval(() => {
     if (loopEnd !== null && gt >= loopEnd - 0.05) {
       const to = g.loop === 'range' && g.range ? g.range.in : 0;
       seekGroup(g, to);
-      for (const m of ms) if (Groups.memberTime(to, m.start, m.duration) < m.duration && to >= m.start) m.tile.pb.play();
+      for (const m of ms) if (!m.tile.autoPaused && Groups.memberTime(to, m.start, m.duration) < m.duration && to >= m.start) m.tile.pb.play();
       continue;
     }
     syncing = true;
     try {
       for (const m of ms) {
         if (m === lead) continue;
+        if (m.tile.autoPaused) continue; // paused because it is off screen: applyOffscreen re-seeks and resumes it
         const p = m.tile.pb;
         const want = Groups.memberTime(gt, m.start, m.duration);
         const inside = gt >= m.start && gt < m.start + m.duration;
@@ -1011,6 +1018,7 @@ function finishRects(entry) { // call at pointerup; keeps only tiles that actual
   if (!entry.rects.length) return;
   if (entry.kind === 'move') entry.label = `move ${entry.rects.length} video${entry.rects.length === 1 ? '' : 's'}`;
   undoStack.push(entry);
+  scheduleOffscreen();
 }
 /* DISABLED (Mark, 2026-09-12): undo of the one shared gallery height; per-tile and scale-all below
 function recordRowHeight() { return { kind: 'rowHeight', label: 'resize gallery', before: layout.rowHeight, after: null }; }
@@ -1996,7 +2004,7 @@ function addVideo(filePath, state = {}) {
     if (tl._model && tl._model.members.some((m) => m.tile === tile)) renderTimeline(); // extent grows as durations load
   });
   // UI only: a synced member paused by the loop engine must not pause its group
-  const onPlayState = () => { updatePlayBtn(); if (tile.group && tile.group === active) renderGroupBar(); };
+  const onPlayState = () => { if (!video.paused) tile.autoPaused = false; updatePlayBtn(); if (tile.group && tile.group === active) renderGroupBar(); }; // any play, by anyone, ends an offscreen pause
   video.addEventListener('play', onPlayState);
   video.addEventListener('pause', onPlayState);
   video.addEventListener('ended', onPlayState);
@@ -2552,6 +2560,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
         renderMarkers();
         if (tl._model && tl._model.members.some((m) => m.tile === tile)) renderTimeline();
       }
+      if (ev === 'onStateChange' && !yt.paused) tile.autoPaused = false; // any play ends an offscreen pause
       if (ev === 'onStateChange' && tile.group && tile.group === active) renderGroupBar();
     });
     // user actions on the embed; a synced group follows (like a local video's)
@@ -3267,6 +3276,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     draw(); ensureAround(); prefetch();
   };
   const onPlayState = () => {
+    if (playing) tile.autoPaused = false; // any play ends an offscreen pause
     playBtn.textContent = playing ? '❚❚' : '▶';
     el.classList.toggle('paused-badge', !playing);
     if (tile.group && tile.group === active) renderGroupBar();
@@ -4326,6 +4336,7 @@ window.api.getSettings().then((s) => {
   sidebar.setTab(settings.sidebar.tab);
   refreshUpdateMenu(); // the update checkboxes come from the same settings file
   wheelZoomEl.checked = !!settings.wheelZoom;
+  optOffscreen.checked = settings.pauseOffscreen;
   hoverPlayBtn.classList.toggle('toggled', !!settings.hoverPlay); // the mode survives a restart
   renderFolders();
   renderPlaylists(); // from the cache in settings.json, no refetch
@@ -4390,6 +4401,65 @@ function setHoverPlay(on) {
   }
 }
 hoverPlayBtn.addEventListener('click', () => setHoverPlay(!hoverPlayOn()));
+
+// ---------- Optimize menu ----------
+const optMenu = document.getElementById('optimize-menu');
+const optList = document.getElementById('opt-list');
+document.getElementById('btn-optimize').addEventListener('click', (e) => { e.stopPropagation(); optList.hidden = !optList.hidden; });
+window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !optMenu.contains(e.target)) optList.hidden = true; });
+
+// ---------- offscreen pause ----------
+// A playing tile whose element is entirely out of the viewport (plus half a viewport of margin)
+// is paused without touching its group, and resumed when it comes back; a synced member is
+// re-seeked to the group time first so it stays in step. Rules in lib/visibility.js.
+const OFFSCREEN_MARGIN = 0.5; // of the viewport, each side
+const offscreenOn = () => !!(settings && settings.pauseOffscreen) && !hoverPlayOn() && cmp.el.hidden && !document.fullscreenElement;
+// An explicit pause (Pause all, the group bar, a synced partner) of a tile we paused must stick, or
+// it would start playing when it came back. It is already paused, so no media event fires: catch
+// the call itself, once per playback adapter.
+function watchPause(t) {
+  const pb = t.pb;
+  if (pb.offscreenWatched) return;
+  pb.offscreenWatched = true;
+  const pause = pb.pause.bind(pb);
+  pb.pause = () => { t.autoPaused = false; pause(); };
+}
+function offscreenResume(t) {
+  t.autoPaused = false;
+  const g = t.group;
+  if (g && g.sync && t.sync) {
+    const gt = groupTimeOf(g), d = t.pb.duration;
+    t.pb.time = Groups.memberTime(gt, t.sync.start, d);
+    if (!(gt >= t.sync.start && gt < t.sync.start + d)) return; // waiting at 0 or held at its end: the sync engine starts it
+  }
+  t.pb.play();
+}
+function applyOffscreen() {
+  if (!offscreenOn()) return;
+  const r = gridRect();
+  const view = { x: r.left, y: r.top, w: r.width, h: r.height };
+  const items = tiles.filter((t) => t.pb && t.el.isConnected && (isBoard() ? !!t.board : !t.freeAspect)).map((t) => {
+    const b = t.el.getBoundingClientRect();
+    return { id: t, rect: { x: b.left, y: b.top, w: b.width, h: b.height }, playing: !t.pb.paused, autoPaused: !!t.autoPaused };
+  });
+  for (const a of Visibility.decide(items, view, Math.max(r.width, r.height) * OFFSCREEN_MARGIN)) {
+    const t = a.id;
+    if (a.op === 'pause') { watchPause(t); t.pb.pause(); t.autoPaused = true; } // no broadcast: the group keeps playing
+    else offscreenResume(t);
+  }
+}
+setInterval(() => { if (!document.hidden) applyOffscreen(); }, 500);
+grid.addEventListener('scroll', scheduleOffscreen, { passive: true });
+const optOffscreen = document.getElementById('opt-offscreen');
+function setPauseOffscreen(on) {
+  settings.pauseOffscreen = !!on;
+  saveSettings();
+  optOffscreen.checked = settings.pauseOffscreen;
+  if (settings.pauseOffscreen) applyOffscreen();
+  else for (const t of tiles) if (t.autoPaused && t.pb) offscreenResume(t); // give back what we paused
+  setStatus(settings.pauseOffscreen ? 'Offscreen videos pause until they come back into view' : 'Offscreen videos keep playing');
+}
+optOffscreen.addEventListener('change', () => setPauseOffscreen(optOffscreen.checked));
 
 // ---------- copy / paste ----------
 // In-app clipboard: the selected tiles' session records, the same shape a saved file and undo's
