@@ -2639,7 +2639,15 @@ function addWebTile(url, parsed, state = {}, at = null) {
     const yt = tile.yt = ytController(iframe);
     const pb = tile.pb = ytPlayback(yt);
     let first = true, knownDuration = 0, lastState = yt.st.state;
+    // Restoring the saved time on a player that has not started makes YouTube start it (seekTo
+    // does that), so a tile restored paused - every tile, on open and paste - is paused again the
+    // moment it reports playing. Once, and only for a few seconds: after that a play is the user's.
+    let holdPausedUntil = 0;
     yt.onChange((st, ev) => {
+      if (holdPausedUntil && ev === 'onStateChange' && st.state === 1) {
+        if (performance.now() < holdPausedUntil) yt.pause();
+        holdPausedUntil = 0;
+      }
       if (st.title) setWebTitle(st.title);
       // its own loop: YouTube has no loop-one-video flag, so restart when it ends
       if (st.state === 0 && lastState !== 0 && tile.loop && !loopOverridden(tile)) { pb.time = 0; yt.play(); }
@@ -2652,6 +2660,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
         if (tile.group) pb.rate = tile.group.rate;
         if (wantTime > 0) pb.time = wantTime;
         if (wantPlaying) yt.play();
+        else if (wantTime > 0) { holdPausedUntil = performance.now() + 5000; yt.pause(); }
       }
       // markers and the timeline need the duration, which arrives with the first reports
       if (st.duration > 0 && st.duration !== knownDuration) {
@@ -2664,7 +2673,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
     });
     // user actions on the embed; a synced group follows (like a local video's)
     ytSeekTo = (t) => { pb.time = clamp(t, 0, pb.duration || Infinity); tile.tick(); broadcast(tile, 'seek'); };
-    ytTogglePlay = () => { const play = yt.paused; play ? yt.play() : yt.pause(); broadcast(tile, play ? 'play' : 'pause'); };
+    ytTogglePlay = () => { holdPausedUntil = 0; const play = yt.paused; play ? yt.play() : yt.pause(); broadcast(tile, play ? 'play' : 'pause'); };
     const { renderMarkers } = attachBookmarks(tile, el, pb);
     tile.refreshWebMarkers = renderMarkers;
     tile.tick = () => {
