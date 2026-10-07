@@ -4076,6 +4076,8 @@ saveBtn.addEventListener('click', saveSession);
 saveBtn.addEventListener('contextmenu', (e) => { e.preventDefault(); saveSessionAs(); });
 // DISABLED (Mark, 2026-09-11): replaced by Clear board; Save right-click = Save as
 // document.getElementById('btn-save-as').addEventListener('click', saveSessionAs);
+// re-enabled as a visible button 2026-10-07 (Mark); the right-click on Save still works too
+document.getElementById('btn-save-as').addEventListener('click', saveSessionAs);
 document.getElementById('btn-clear').addEventListener('click', () => {
   if (!tiles.length) { setStatus('Board is already empty'); return; }
   if (!confirm(`Remove all ${tiles.length} video${tiles.length === 1 ? '' : 's'} from the board?`)) return;
