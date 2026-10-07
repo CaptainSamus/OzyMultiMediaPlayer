@@ -1446,6 +1446,9 @@ function startResize(tile, corner, e) {
     const fromW = (start.w + dx) / tile.aspect;
     const fromH = start.h + dy;
     let h = Math.abs(fromW - start.h) > Math.abs(fromH - start.h) ? fromW : fromH;
+    // a group scales about its box's far corner: measure the pull from there, so the handle
+    // stays under the pointer whichever member it belongs to
+    if (members) h = Snap.pull({ start, corner, dx, dy, origin: groupOrigin });
     if (onBoard) {
       // snap the size and the moving edges to the other tiles (Alt: free), like a move does
       if (!ev.altKey) {
