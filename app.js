@@ -1437,6 +1437,15 @@ function startResize(tile, corner, e) {
     const fromH = start.h + dy;
     let h = Math.abs(fromW - start.h) > Math.abs(fromH - start.h) ? fromW : fromH;
     if (onBoard) {
+      // snap the size and the moving edges to the other tiles (Alt: free), like a move does
+      if (!ev.altKey) {
+        const others = tiles.filter((t) => t.board && !fixed.has(t)).map((t) => t.board);
+        const s = Snap.resize({ start, corner, h, aspect: tile.aspect, others, th: SNAP_PX / board.zoom, gap: LINK_GAP });
+        h = s.h;
+        hideGuides();
+        if (s.guideX !== null) showGuideV(s.guideX);
+        if (s.guideY !== null) showGuideH(s.guideY);
+      } else hideGuides();
       h = clamp(h, BOARD_MIN_H, BOARD_MAX_H);
       const w = h * tile.aspect;
       const b = tile.board;
@@ -1461,6 +1470,7 @@ function startResize(tile, corner, e) {
     tile.el.classList.remove('resizing');
     document.body.classList.remove('resizing');
     document.body.style.cursor = '';
+    hideGuides();
     if (onBoard) finishRects(undoEntry); else finishGResize(undoEntry);
   };
   handle.addEventListener('pointermove', onMove);
