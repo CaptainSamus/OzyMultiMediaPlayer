@@ -579,6 +579,7 @@ gbQ('.gb-vol').addEventListener('input', () => { active.volume = Number(gbQ('.gb
 gbQ('.gb-rate').addEventListener('change', () => { active.rate = Number(gbQ('.gb-rate').value); applyGroupAudio(active); });
 gbQ('.gb-sync').addEventListener('click', () => setGroupSync(active, !active.sync));
 gbQ('.gb-sticky').addEventListener('click', () => { active.sticky = !active.sticky; renderGroupBar(); });
+gbQ('.gb-tidy').addEventListener('click', () => tidyGroup(active));
 gbQ('.gb-loop').addEventListener('change', () => { active.loop = gbQ('.gb-loop').value; if (active.loop !== 'off' && !active.sync) setGroupSync(active, true); renderGroupBar(); renderTimeline(); });
 gbQ('.gb-name').addEventListener('change', () => renderTimeline());
 gbQ('.gb-ungroup').addEventListener('click', () => dissolveGroup(active));
@@ -1411,12 +1412,22 @@ function startResize(tile, corner, e) {
   const sx = corner.includes('l') ? -1 : 1;
   const sy = corner.includes('t') ? -1 : 1;
   const onBoard = isBoard();
+  // A sticky group's member scales the whole group about its bounding box (Ctrl: just this tile,
+  // mirroring Ctrl-drag). Text members scale their box too and re-wrap.
+  const groupScale = onBoard && !modKey(e) && !tile.freeAspect && tile.group && tile.group.sticky
+    ? [...tile.group.members].filter((m) => m.board) : null;
+  const members = groupScale && groupScale.length > 1 ? groupScale : null;
+  const groupBB = members ? boardBounds(members) : null;
+  const memberStart = members ? new Map(members.map((m) => [m, { ...m.board }])) : null;
+  // the corner of the group's box that stays put: the one opposite the handle
+  const groupOrigin = members ? { x: corner.includes('l') ? groupBB.minX + groupBB.w : groupBB.minX, y: corner.includes('t') ? groupBB.minY + groupBB.h : groupBB.minY } : undefined;
   const start = onBoard ? { ...tile.board } : { w: tile.el.offsetWidth, h: tile.el.offsetHeight };
   if (onBoard) { bringToFront(tile); rememberStart(); }
   // Linked mode can push neighbours, so remember every board rect
   const undoEntry = onBoard ? recordResize(tiles.filter((t) => t.board)) : recordGResize(tile);
-  const fixed = new Set([tile]);
+  const fixed = new Set(members || [tile]);
   tile.el.classList.add('resizing');
+  if (members) for (const m of members) m.el.classList.add('resizing');
   document.body.classList.add('resizing');
   document.body.style.cursor = getComputedStyle(handle).cursor;
 
@@ -1443,14 +1454,32 @@ function startResize(tile, corner, e) {
     const fromW = (start.w + dx) / tile.aspect;
     const fromH = start.h + dy;
     let h = Math.abs(fromW - start.h) > Math.abs(fromH - start.h) ? fromW : fromH;
+    // a group scales about its box's far corner: measure the pull from there, so the handle
+    // stays under the pointer whichever member it belongs to
+    if (members) h = Snap.pull({ start, corner, dx, dy, origin: groupOrigin });
     if (onBoard) {
+      // snap the size and the moving edges to the other tiles (Alt: free), like a move does
+      if (!ev.altKey) {
+        const others = tiles.filter((t) => t.board && !fixed.has(t)).map((t) => t.board);
+        const s = Snap.resize({ start, corner, h, aspect: tile.aspect, others, th: SNAP_PX / board.zoom, gap: LINK_GAP, origin: groupOrigin });
+        h = s.h;
+        hideGuides();
+        if (s.guideX !== null) showGuideV(s.guideX);
+        if (s.guideY !== null) showGuideH(s.guideY);
+      } else hideGuides();
       h = clamp(h, BOARD_MIN_H, BOARD_MAX_H);
-      const w = h * tile.aspect;
-      const b = tile.board;
-      if (corner.includes('l')) b.x = start.x + (start.w - w);
-      if (corner.includes('t')) b.y = start.y + (start.h - h);
-      b.w = w; b.h = h;
-      layoutTile(tile);
+      if (members) {
+        const factor = Arrange.clampFactor([...memberStart.values()], h / start.h, BOARD_MIN_H, BOARD_MAX_H);
+        const rects = Arrange.scaleAbout(members.map((m) => memberStart.get(m)), groupBB, factor, corner);
+        members.forEach((m, i) => { m.board = { ...rects[i] }; layoutTile(m); if (m.freeAspect) renderTextTile(m); });
+      } else {
+        const w = h * tile.aspect;
+        const b = tile.board;
+        if (corner.includes('l')) b.x = start.x + (start.w - w);
+        if (corner.includes('t')) b.y = start.y + (start.h - h);
+        b.w = w; b.h = h;
+        layoutTile(tile);
+      }
       if (board.linked && !ev.altKey) resolveOverlaps(fixed);
     } else {
       setTileGalleryH(tile, h); // gallery: just this tile
@@ -1466,8 +1495,10 @@ function startResize(tile, corner, e) {
     handle.removeEventListener('pointercancel', onUp);
     handle.removeEventListener('lostpointercapture', onUp);
     tile.el.classList.remove('resizing');
+    if (members) for (const m of members) m.el.classList.remove('resizing');
     document.body.classList.remove('resizing');
     document.body.style.cursor = '';
+    hideGuides();
     if (onBoard) finishRects(undoEntry); else finishGResize(undoEntry);
   };
   handle.addEventListener('pointermove', onMove);
@@ -1482,22 +1513,36 @@ function startResize(tile, corner, e) {
 function attachTileDrag(tile) {
   const el = tile.el;
   el.addEventListener('pointerdown', (e) => {
-    if (!isBoard() || e.button !== 0 || !tile.board || e.altKey) return;
+    tile.guard.pointerDown(); // a fresh press: whatever click the last drag was waiting for never came
+    if (!isBoard() || e.button !== 0 || !tile.board) return;
     if (e.target.closest('.handle, input, button, select')) return;
     if (tile.editing && e.target.closest('.text-body')) return; // put the caret, don't drag the tile
-    if (e.shiftKey) {
+    // Alt-drag on a sticky group's member rearranges inside the group (swap two slots)
+    const swapMembers = tile.group ? [...tile.group.members].filter((m) => m.board) : [];
+    if (Swap.isSwapDrag({ sticky: !!(tile.group && tile.group.sticky), alt: e.altKey, mod: modKey(e), shift: e.shiftKey, memberCount: swapMembers.length })) {
+      e.stopPropagation(); // the grid's pointerdown would otherwise start an Alt-pan too
+      return startSwapDrag(tile, swapMembers, e);
+    }
+    if (e.altKey) return; // Alt-drag anywhere else pans (grid handler)
+    const action = Select.onPointerDown({
+      inSelection: selection.has(tile), grouped: !!tile.group, sticky: !!(tile.group && tile.group.sticky),
+      mod: modKey(e), shift: e.shiftKey,
+    });
+    if (action === 'toggle') {
       // shift-click toggles membership without starting a drag
       setSelected(tile, !selection.has(tile));
       selectionStatus();
-      tile.suppressClick = true;
-      setTimeout(() => { tile.suppressClick = false; }, 0);
+      // DISABLED (2026-10-07): cleared by a setTimeout(0) that fired before the click arrived; tile.guard replaces it
+      // tile.suppressClick = true;
+      // setTimeout(() => { tile.suppressClick = false; }, 0);
+      tile.guard.afterDrag(); // a shift-click must not play either
       return;
     }
-    // Ctrl: just this tile, even inside a sticky group. Otherwise clicking a
-    // member selects its whole group (so its settings bar shows).
+    // Ctrl: just this tile, even inside a sticky group. A plain click picks one tile, or a sticky
+    // member's whole group (so its settings bar shows); a click inside the selection keeps it.
     const single = modKey(e);
-    if (single) selectOnly(tile);
-    else if (tile.group && !selection.has(tile)) selectGroupOf(tile);
+    if (action === 'only') selectOnly(tile);
+    else if (action === 'group') selectGroupOf(tile);
     const start = { x: e.clientX, y: e.clientY };
     // Capture from the very first event, not once the drag passes the 4 px threshold: a release
     // over a cross-origin embed is only delivered back here if this element already owns the
@@ -1557,8 +1602,10 @@ function attachTileDrag(tile) {
         finishRects(undoEntry);
         for (const t of group) t.el.classList.remove('dragging');
         document.body.classList.remove('tile-dragging');
-        tile.suppressClick = true;
-        setTimeout(() => { tile.suppressClick = false; }, 0);
+        // DISABLED (2026-10-07): cleared by a setTimeout(0) that fired before the click arrived; tile.guard replaces it
+        // tile.suppressClick = true;
+        // setTimeout(() => { tile.suppressClick = false; }, 0);
+        tile.guard.afterDrag(); // the click this release produces must not toggle play
       }
       updateTextToolbar();
     };
@@ -1568,6 +1615,73 @@ function attachTileDrag(tile) {
     el.addEventListener('lostpointercapture', onUp); // the embed, or Chromium, took the pointer
     activeInteractions.add(onUp); // a recovery ends this drag properly, listeners and all
   });
+}
+
+// ---------- board: swap two members of a sticky group ----------
+// The dragged tile follows the pointer; the member under the pointer is the target and previews
+// moving into the dragged tile's slot. Release on a target: the two exchange slots (position and
+// size; a tile of another shape sits centred inside its new slot). Anywhere else, or a drag that
+// ends any other way than a release on this tile (lost capture, cancel, recovery): everything
+// goes back. One undo entry.
+function startSwapDrag(tile, members, e) {
+  const el = tile.el;
+  try { el.setPointerCapture(e.pointerId); } catch {}
+  const startC = { x: e.clientX, y: e.clientY };
+  const slots = members.map((m) => ({ id: m, rect: { ...m.board } }));
+  const startRect = { ...tile.board };
+  let moving = false, target = null, undoEntry = null;
+  const place = (m, rect) => { m.board = Swap.fitInto(rect, m.freeAspect ? null : m.aspect); layoutTile(m); if (m.freeAspect) renderTextTile(m); };
+  const restore = (m) => { const s = slots.find((x) => x.id === m); m.board = { ...s.rect }; layoutTile(m); if (m.freeAspect) renderTextTile(m); };
+  const setTarget = (m) => {
+    if (target === m) return;
+    if (target) { target.el.classList.remove('swap-target'); restore(target); }
+    target = m;
+    if (target) { target.el.classList.add('swap-target'); place(target, startRect); }
+  };
+  const onMove = (ev) => {
+    const dx = ev.clientX - startC.x, dy = ev.clientY - startC.y;
+    if (!moving) {
+      if (Math.hypot(dx, dy) < 4) return;
+      moving = true;
+      undoEntry = recordMove(members, 'swap');
+      bringToFront(tile);
+      el.classList.add('swapping');
+      document.body.classList.add('tile-dragging');
+    }
+    tile.board.x = startRect.x + dx / board.zoom; tile.board.y = startRect.y + dy / board.zoom;
+    layoutTile(tile);
+    const p = toCanvas(ev.clientX, ev.clientY);
+    setTarget(Swap.targetAt(p, slots, tile));
+  };
+  let ended = false;
+  const onUp = (ev) => {
+    if (ended) return; // pointerup, lostpointercapture and a recovery can all arrive
+    ended = true;
+    activeInteractions.delete(onUp);
+    el.removeEventListener('pointermove', onMove);
+    el.removeEventListener('pointerup', onUp);
+    el.removeEventListener('pointercancel', onUp);
+    el.removeEventListener('lostpointercapture', onUp);
+    if (!moving) return;
+    // only a real release commits; a cancelled drag puts everything back
+    if (!ev || ev.type !== 'pointerup') setTarget(null);
+    const swapped = target;
+    if (target) target.el.classList.remove('swap-target');
+    for (const s of Swap.apply(slots, tile, target)) {
+      if (swapped && (s.id === tile || s.id === swapped)) place(s.id, s.rect); else restore(s.id);
+    }
+    el.classList.remove('swapping');
+    document.body.classList.remove('tile-dragging');
+    finishRects(undoEntry); // drops the entry when nothing changed (no target)
+    tile.guard.afterDrag();
+    updateTextToolbar();
+    if (swapped) { setStatus('Swapped'); logUi('info', 'swap', { group: tile.group && tile.group.id }); }
+  };
+  el.addEventListener('pointermove', onMove);
+  el.addEventListener('pointerup', onUp);
+  el.addEventListener('pointercancel', onUp);
+  el.addEventListener('lostpointercapture', onUp);
+  activeInteractions.add(onUp);
 }
 
 // ---------- board: pan the view / lasso ----------
@@ -1838,7 +1952,8 @@ function addVideo(filePath, state = {}) {
     volume: DEFAULT_VIDEO_VOLUME,
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
     board: null,
-    suppressClick: false,
+    suppressClick: false, // kept for older code paths
+    guard: ClickGuard.create(),
     galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
     bookmarks: parseBookmarks(state.bookmarks),
   };
@@ -2128,11 +2243,14 @@ function addVideo(filePath, state = {}) {
   // click on picture = play/pause; double-click = fullscreen this tile
   video.addEventListener('click', (e) => {
     // Shift-click selects (board: attachTileDrag; gallery: the el click below) and never plays or pauses.
-    // (suppressClick is cleared by a setTimeout(0) that fires before this click arrives, so it can't guard this.)
+    // On the board this handler does not see the click at all: the tile owns the pointer, so the
+    // click goes to the tile element and tileClick() plays it.
     if (e.shiftKey) return;
-    if (!tile.suppressClick) tile.togglePlay();
+    if (!tile.guard.shouldAct()) return; // this click ended a drag
+    tile.togglePlay();
   });
   el.addEventListener('click', (e) => {
+    tileClick(tile, e);
     if (isBoard() || !e.shiftKey || e.target.closest('button, input, select, .bm-panel')) return;
     setSelected(tile, !selection.has(tile));
     selectionStatus();
@@ -2394,7 +2512,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
     path: url, url, type: parsed.type, kind: parsed.kind, el, video: null, seek, time: timeEl, scrubbing: false,
     volume: clamp(Number(state.volume ?? DEFAULT_VIDEO_VOLUME), 0, 1),
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : (parsed.kind === 'short' ? 9 / 16 : 16 / 9),
-    board: null, suppressClick: false, galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
+    board: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
     bookmarks: parsed.type === 'youtube' ? parseBookmarks(state.bookmarks) : [], info: null, proxy: null, fps: null,
     group: null, sync: null, ownMuted: !!state.muted,
     title: typeof state.title === 'string' && state.title ? state.title : WebUrl.label(parsed),
@@ -2638,7 +2756,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
   });
   const onVideoPlayState = () => { if (tile.group && tile.group === active) renderGroupBar(); };
   for (const ev of ['play', 'pause', 'ended']) video.addEventListener(ev, onVideoPlayState);
-  video.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.suppressClick) tile.togglePlay(); });
+  video.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.guard.shouldAct()) return; tile.togglePlay(); });
   video.addEventListener('dblclick', () => { if (cmp.el.hidden) toggleTileFullscreen(el); });
 
   // ----- YouTube controls -----
@@ -2765,6 +2883,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
   el.addEventListener('pointerenter', () => { hoveredTile = tile; hpEnter(tile); });
   el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; hpLeave(tile); });
   el.addEventListener('click', (e) => {
+    tileClick(tile, e); // with EZ play on, the .pan-shield over the embed takes the click and lands here
     if (isBoard() || !e.shiftKey || e.target.closest('button, input, select')) return;
     setSelected(tile, !selection.has(tile));
     selectionStatus();
@@ -2816,7 +2935,7 @@ function addImageTile(filePath, state = {}, at = null) {
   const tile = {
     type: 'image', path: filePath, el, img, video: null, yt: null,
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
-    board: null, bookmarks: [], sync: null, group: null, suppressClick: false, volume: 0, ownMuted: false,
+    board: null, bookmarks: [], sync: null, group: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), volume: 0, ownMuted: false,
     galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
   };
   const sb = state.board;
@@ -2881,7 +3000,7 @@ function addTextTile(record = {}) {
     style: TextTile.normalize(record.style),
     aspect: null, freeAspect: true, editing: false,
     board: { x: Number(b.x), y: Number(b.y), w: Math.max(TEXT_MIN_W, Number(b.w)), h: Number(b.h) > 0 ? Number(b.h) : 40 },
-    bookmarks: [], sync: null, group: null, suppressClick: false, volume: 0, ownMuted: false,
+    bookmarks: [], sync: null, group: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), volume: 0, ownMuted: false,
     galleryH: layout.rowHeight,
   };
   tiles.push(tile);
@@ -3214,7 +3333,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     type: 'sequence', dir, seq, path: joinPath(dir, Sequence.pattern(seq)), title: Sequence.label(seq),
     el, video: null, mediaEl: cv, seek, time: timeEl, scrubbing: false,
     volume: 0, ownMuted: false, aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
-    board: null, suppressClick: false, bookmarks: parseBookmarks(state.bookmarks), group: null, sync: null,
+    board: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), bookmarks: parseBookmarks(state.bookmarks), group: null, sync: null,
     galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
     fps: Number(look.fps) > 0 ? Number(look.fps) : 24,
     exposure: clamp(Number(look.exposure) || 0, -10, 10),
@@ -3471,9 +3590,10 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     if (scrubber.move(frac, performance.now()) !== null) broadcast(tile, 'scrub'); // preview the group
   });
   rateSel.addEventListener('change', () => { pb.rate = Number(rateSel.value); broadcast(tile, 'rate', pb.rate); });
-  cv.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.suppressClick) tile.togglePlay(); });
+  cv.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.guard.shouldAct()) return; tile.togglePlay(); });
   cv.addEventListener('dblclick', () => { if (!cmp.el.hidden) return; toggleTileFullscreen(el); });
   el.addEventListener('click', (e) => {
+    tileClick(tile, e);
     if (isBoard() || !e.shiftKey || e.target.closest('button, input, select, .bm-panel')) return;
     setSelected(tile, !selection.has(tile));
     selectionStatus();
@@ -4094,25 +4214,51 @@ document.getElementById('btn-fit').addEventListener('click', fitAll);
 
 // ---------- Tidy menu (board) ----------
 function boardTilesInOrder() { return tiles.filter((t) => t.board).sort((a, b) => (a.board.y - b.board.y) || (a.board.x - b.board.x)); }
-// Fit to view: every tile the same height, the largest that flow-wraps inside the current view (undo = resize).
+// the tiles a Tidy entry works on: the selection when there is one, else the whole board
+function tidyTargets() {
+  const all = boardTilesInOrder();
+  const sel = all.filter((t) => selection.has(t));
+  return sel.length ? { list: sel, scoped: true } : { list: all, scoped: false };
+}
+// Fit: every tile the same height. Whole board: the largest that flow-wraps inside the view.
+// Selection: the mean of their current heights, wrapped at the selection's own width, so the
+// rest of the board is untouched (undo = resize).
 function tidyFitToView() {
   // text tiles size themselves from their text, so they sit this one out and keep their own box
-  const list = boardTilesInOrder().filter((t) => !t.freeAspect); if (!list.length) return;
+  const { list: targets, scoped } = tidyTargets();
+  const list = targets.filter((t) => !t.freeAspect); if (!list.length) return;
   const entry = recordResize(list);
+  if (scoped) {
+    const bb = boardBounds(list);
+    const height = list.reduce((s, t) => s + t.board.h, 0) / list.length;
+    const rects = Arrange.flowAtHeight(list.map((t) => ({ aspect: t.aspect })), height, bb.w, GAP);
+    list.forEach((t, i) => { t.board = { x: bb.minX + rects[i].x, y: bb.minY + rects[i].y, w: rects[i].w, h: rects[i].h }; layoutTile(t); });
+    finishRects(entry); setStatus(`Tidied ${list.length} selected videos`);
+    return;
+  }
   const r = gridRect(); const W = (r.width - 2 * GAP) / board.zoom, H = (r.height - 2 * GAP) / board.zoom;
   const origin = toCanvas(r.left + GAP, r.top + GAP);
   const { rects } = Arrange.fitToView(list.map((t) => ({ aspect: t.aspect })), W, H, GAP);
   list.forEach((t, i) => { t.board = { x: origin.x + rects[i].x, y: origin.y + rects[i].y, w: rects[i].w, h: rects[i].h }; layoutTile(t); });
   finishRects(entry); setStatus('Arranged to fit the view');
 }
-// Grid: sizes kept, ceil(sqrt(n)) columns edge to edge, then frame them (undo = move).
+// Grid: sizes kept, ceil(sqrt(n)) columns edge to edge from the block's top-left. Whole board:
+// then frame it. Selection: leave the view alone (undo = move).
 function tidyGrid() {
-  const list = boardTilesInOrder(); if (!list.length) return;
+  const { list, scoped } = tidyTargets(); if (!list.length) return;
   const entry = recordMove(list);
   const bb = boardBounds(list);
   const rects = Arrange.grid(list.map((t) => ({ w: t.board.w, h: t.board.h })), 0);
   list.forEach((t, i) => { t.board.x = bb.minX + rects[i].x; t.board.y = bb.minY + rects[i].y; layoutTile(t); });
-  finishRects(entry); fitBoard(); setStatus('Packed into a grid');
+  finishRects(entry);
+  if (scoped) setStatus(`Packed ${list.length} selected videos into a grid`);
+  else { fitBoard(); setStatus('Packed into a grid'); }
+}
+// Group bar: Tidy = select the group and Fit it
+function tidyGroup(g) {
+  if (!g) return;
+  selectGroupOf([...g.members][0]);
+  tidyFitToView();
 }
 // Shift+F: the selected tiles fill the current view (one tile at its aspect, several share it),
 // centred in the viewport; undo = resize.
@@ -4133,7 +4279,13 @@ function maximizeSelectionInView() {
 
 const tidyMenu = document.getElementById('tidy-menu');
 const tidyList = tidyMenu.querySelector('.menu-list');
-document.getElementById('btn-tidy-menu').addEventListener('click', (e) => { e.stopPropagation(); tidyList.hidden = !tidyList.hidden; });
+document.getElementById('btn-tidy-menu').addEventListener('click', (e) => {
+  e.stopPropagation(); tidyList.hidden = !tidyList.hidden;
+  // the entries act on the selection when there is one; say so
+  const scoped = selection.size > 0;
+  document.querySelector('#tidy-fit small').textContent = scoped ? '(selection) same height, wrapped in place' : 'same size, fills the view';
+  document.querySelector('#tidy-grid small').textContent = scoped ? '(selection) keep sizes, no gaps' : 'keep sizes, no gaps';
+});
 window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !tidyMenu.contains(e.target)) tidyList.hidden = true; });
 document.getElementById('tidy-fit').addEventListener('click', () => { tidyList.hidden = true; tidyFitToView(); });
 document.getElementById('tidy-grid').addEventListener('click', () => { tidyList.hidden = true; tidyGrid(); });
@@ -4480,6 +4632,7 @@ window.api.getSettings().then((s) => {
   wheelZoomEl.checked = !!settings.wheelZoom;
   optOffscreen.checked = settings.pauseOffscreen;
   hoverPlayBtn.classList.toggle('toggled', !!settings.hoverPlay); // the mode survives a restart
+  ezPlayBtn.classList.toggle('toggled', !!settings.ezPlay); document.body.classList.toggle('ez-play', !!settings.ezPlay);
   renderFolders();
   renderPlaylists(); // from the cache in settings.json, no refetch
 });
@@ -4685,6 +4838,37 @@ function setLoadViewer(on) {
 }
 optLoad.addEventListener('change', () => setLoadViewer(optLoad.checked));
 loadPanel.querySelector('.lp-close').addEventListener('click', () => setLoadViewer(false));
+
+// ---------- EZ play ----------
+// A click anywhere on a tile that is not a control plays or pauses it. The picture already does
+// this; EZ play extends it to the overlay bars and, for embeds, to a shield over the iframe.
+const ezPlayBtn = document.getElementById('ez-play');
+const ezPlayOn = () => !!(settings && settings.ezPlay);
+function setEzPlay(on) {
+  settings.ezPlay = !!on;
+  saveSettings();
+  ezPlayBtn.classList.toggle('toggled', settings.ezPlay);
+  document.body.classList.toggle('ez-play', settings.ezPlay);
+  setStatus(settings.ezPlay ? 'EZ play on: click anywhere on a video to play or pause it' : 'EZ play off');
+}
+ezPlayBtn.addEventListener('click', () => setEzPlay(!ezPlayOn()));
+// Every click that reaches a tile's element. On the board the tile owns the pointer from
+// pointerdown (attachTileDrag), so Chromium delivers the click here, not to the <video> / canvas
+// under the cursor: e.target is the tile and the picture's own handler never runs. So look up
+// what is really under the pointer and play from here. In the gallery the picture gets its own
+// click and this only adds EZ play (tile chrome, and the shield over an embed).
+function tileClick(tile, e) {
+  if (!tile.pb || (isBoard() && board.hand)) return;
+  const retargeted = e.target === tile.el;
+  const hit = retargeted ? document.elementFromPoint(e.clientX, e.clientY) : e.target;
+  if (!hit || !tile.el.contains(hit)) return;
+  const plays = ClickGuard.clickPlays({
+    shift: e.shiftKey, retargeted, onPicture: hit === tile.mediaEl && hit.tagName !== 'IFRAME',
+    ez: ezPlayOn(), onControl: !ClickGuard.ezTarget((s) => !!hit.closest(s)),
+  });
+  if (!plays || !tile.guard.shouldAct()) return;
+  if (tile.togglePlay) tile.togglePlay(); else if (tile.pb.paused) tile.pb.play(); else tile.pb.pause();
+}
 
 // ---------- copy / paste ----------
 // In-app clipboard: the selected tiles' session records, the same shape a saved file and undo's

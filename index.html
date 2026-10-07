@@ -55,6 +55,7 @@
     <button id="btn-play-all" title="Play every video (Space)">Play all</button>
     <button id="btn-pause-all" title="Pause every video (Space)">Pause all</button>
     <button id="hover-play" title="Hover play: videos play only while the mouse is over them">Hover play</button>
+    <button id="ez-play" title="EZ play: click anywhere on a video to play or pause it (the controls still work). For YouTube tiles the click lands on Ozy, so the embed's own controls are off while this is on.">EZ play</button>
     <!-- DISABLED (Mark, 2026-09-11): Mute all + Unmute all merged into one toggle; Loop all took the freed slot
     <button id="btn-mute-all" title="Mute every video">Mute all</button>
     <button id="btn-unmute-all" title="Unmute every video">Unmute all</button>
@@ -162,7 +163,8 @@
     </select>
     <span class="sep"></span>
     <button class="gb-sync" title="Sync: members share one timeline and play, pause, scrub and step together">⛓ Sync</button>
-    <button class="gb-sticky board-only" title="Sticky: dragging one member moves the whole group (Ctrl-drag moves one)">📌 Sticky</button>
+    <button class="gb-sticky board-only" title="Sticky: dragging one member moves the whole group and a corner scales the whole group (Ctrl-drag or Ctrl-resize: just that one). Alt-drag a member over another member to swap their places.">📌 Sticky</button>
+    <button class="gb-tidy board-only" title="Tidy this group: every member the same height, wrapped where the group sits (Ctrl+Z undoes)">Tidy</button>
     <label class="gb-loop-wrap" title="Loop mode for this group">Loop
       <select class="gb-loop">
         <option value="off">Off</option>
@@ -434,6 +436,10 @@
   <script src="lib/proxy.js"></script>
   <script src="lib/cachepolicy.js"></script>
   <script src="lib/loadstats.js"></script>
+  <script src="lib/select.js"></script>
+  <script src="lib/clickguard.js"></script>
+  <script src="lib/snap.js"></script>
+  <script src="lib/swap.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
