@@ -573,6 +573,7 @@ gbQ('.gb-vol').addEventListener('input', () => { active.volume = Number(gbQ('.gb
 gbQ('.gb-rate').addEventListener('change', () => { active.rate = Number(gbQ('.gb-rate').value); applyGroupAudio(active); });
 gbQ('.gb-sync').addEventListener('click', () => setGroupSync(active, !active.sync));
 gbQ('.gb-sticky').addEventListener('click', () => { active.sticky = !active.sticky; renderGroupBar(); });
+gbQ('.gb-tidy').addEventListener('click', () => tidyGroup(active));
 gbQ('.gb-loop').addEventListener('change', () => { active.loop = gbQ('.gb-loop').value; if (active.loop !== 'off' && !active.sync) setGroupSync(active, true); renderGroupBar(); renderTimeline(); });
 gbQ('.gb-name').addEventListener('change', () => renderTimeline());
 gbQ('.gb-ungroup').addEventListener('click', () => dissolveGroup(active));
@@ -3957,25 +3958,51 @@ document.getElementById('btn-fit').addEventListener('click', fitAll);
 
 // ---------- Tidy menu (board) ----------
 function boardTilesInOrder() { return tiles.filter((t) => t.board).sort((a, b) => (a.board.y - b.board.y) || (a.board.x - b.board.x)); }
-// Fit to view: every tile the same height, the largest that flow-wraps inside the current view (undo = resize).
+// the tiles a Tidy entry works on: the selection when there is one, else the whole board
+function tidyTargets() {
+  const all = boardTilesInOrder();
+  const sel = all.filter((t) => selection.has(t));
+  return sel.length ? { list: sel, scoped: true } : { list: all, scoped: false };
+}
+// Fit: every tile the same height. Whole board: the largest that flow-wraps inside the view.
+// Selection: the mean of their current heights, wrapped at the selection's own width, so the
+// rest of the board is untouched (undo = resize).
 function tidyFitToView() {
   // text tiles size themselves from their text, so they sit this one out and keep their own box
-  const list = boardTilesInOrder().filter((t) => !t.freeAspect); if (!list.length) return;
+  const { list: targets, scoped } = tidyTargets();
+  const list = targets.filter((t) => !t.freeAspect); if (!list.length) return;
   const entry = recordResize(list);
+  if (scoped) {
+    const bb = boardBounds(list);
+    const height = list.reduce((s, t) => s + t.board.h, 0) / list.length;
+    const rects = Arrange.flowAtHeight(list.map((t) => ({ aspect: t.aspect })), height, bb.w, GAP);
+    list.forEach((t, i) => { t.board = { x: bb.minX + rects[i].x, y: bb.minY + rects[i].y, w: rects[i].w, h: rects[i].h }; layoutTile(t); });
+    finishRects(entry); setStatus(`Tidied ${list.length} selected videos`);
+    return;
+  }
   const r = gridRect(); const W = (r.width - 2 * GAP) / board.zoom, H = (r.height - 2 * GAP) / board.zoom;
   const origin = toCanvas(r.left + GAP, r.top + GAP);
   const { rects } = Arrange.fitToView(list.map((t) => ({ aspect: t.aspect })), W, H, GAP);
   list.forEach((t, i) => { t.board = { x: origin.x + rects[i].x, y: origin.y + rects[i].y, w: rects[i].w, h: rects[i].h }; layoutTile(t); });
   finishRects(entry); setStatus('Arranged to fit the view');
 }
-// Grid: sizes kept, ceil(sqrt(n)) columns edge to edge, then frame them (undo = move).
+// Grid: sizes kept, ceil(sqrt(n)) columns edge to edge from the block's top-left. Whole board:
+// then frame it. Selection: leave the view alone (undo = move).
 function tidyGrid() {
-  const list = boardTilesInOrder(); if (!list.length) return;
+  const { list, scoped } = tidyTargets(); if (!list.length) return;
   const entry = recordMove(list);
   const bb = boardBounds(list);
   const rects = Arrange.grid(list.map((t) => ({ w: t.board.w, h: t.board.h })), 0);
   list.forEach((t, i) => { t.board.x = bb.minX + rects[i].x; t.board.y = bb.minY + rects[i].y; layoutTile(t); });
-  finishRects(entry); fitBoard(); setStatus('Packed into a grid');
+  finishRects(entry);
+  if (scoped) setStatus(`Packed ${list.length} selected videos into a grid`);
+  else { fitBoard(); setStatus('Packed into a grid'); }
+}
+// Group bar: Tidy = select the group and Fit it
+function tidyGroup(g) {
+  if (!g) return;
+  selectGroupOf([...g.members][0]);
+  tidyFitToView();
 }
 // Shift+F: the selected tiles fill the current view (one tile at its aspect, several share it),
 // centred in the viewport; undo = resize.
@@ -3996,7 +4023,13 @@ function maximizeSelectionInView() {
 
 const tidyMenu = document.getElementById('tidy-menu');
 const tidyList = tidyMenu.querySelector('.menu-list');
-document.getElementById('btn-tidy-menu').addEventListener('click', (e) => { e.stopPropagation(); tidyList.hidden = !tidyList.hidden; });
+document.getElementById('btn-tidy-menu').addEventListener('click', (e) => {
+  e.stopPropagation(); tidyList.hidden = !tidyList.hidden;
+  // the entries act on the selection when there is one; say so
+  const scoped = selection.size > 0;
+  document.querySelector('#tidy-fit small').textContent = scoped ? '(selection) same height, wrapped in place' : 'same size, fills the view';
+  document.querySelector('#tidy-grid small').textContent = scoped ? '(selection) keep sizes, no gaps' : 'keep sizes, no gaps';
+});
 window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !tidyMenu.contains(e.target)) tidyList.hidden = true; });
 document.getElementById('tidy-fit').addEventListener('click', () => { tidyList.hidden = true; tidyFitToView(); });
 document.getElementById('tidy-grid').addEventListener('click', () => { tidyList.hidden = true; tidyGrid(); });
