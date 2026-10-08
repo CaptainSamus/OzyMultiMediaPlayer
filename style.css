@@ -807,6 +807,7 @@ body.ez-play .tile.web .pan-shield { pointer-events: auto; cursor: pointer; }
 #load-strip .ls-bar span { display: block; height: 100%; width: 0; transition: width 0.3s ease; }
 #load-strip [data-key="ozy"], #load-strip i.ozy { background: var(--accent); }
 #load-strip [data-key="other"], #load-strip i.other { background: #8a8a95; }
+#load-strip [data-key="used"] { background: #8a8a95; } /* GPU: the whole machine, so the "everything else" grey */
 #load-strip [data-key="free"], #load-strip [data-key="idle"], #load-strip i.free { background: #2e2e35; }
 #load-strip .ls-text { width: 300px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 #load-strip .ls-legend { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; color: var(--muted); margin-top: 2px; }

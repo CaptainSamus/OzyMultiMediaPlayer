@@ -86,11 +86,14 @@
     <div class="menu board-only" id="tidy-menu">
       <button id="btn-tidy-menu" title="Arrange the board">Tidy ▾</button>
       <div class="menu-list" hidden>
+        <button id="tidy-pack" title="Close the gaps: every video keeps its place and may grow or shrink a little so neighbours meet edge to edge (Ctrl+Z undoes)">Pack <small>close gaps, sizes within the limit below</small></button>
+        <button id="tidy-justify" title="Keep each row's videos together and scale the row to fill the width edge to edge, within the resize limit (Ctrl+Z undoes)">Justify <small>rows filled edge to edge</small></button>
         <button id="tidy-align" title="Line up edges that are nearly lined up and make gaps even. Nothing changes size and nothing moves far (Ctrl+Z undoes)">Align <small>keep sizes, straighten edges</small></button>
         <button id="tidy-compact" title="Keep every size and the rough arrangement; slide everything up and left until it sits one gap apart (Ctrl+Z undoes)">Compact <small>keep sizes, close the gaps</small></button>
         <button id="tidy-rows" title="Keep every size and sort into rows across the view with even gaps (Ctrl+Z undoes)">Rows <small>keep sizes, sort into rows</small></button>
         <button id="tidy-grid" title="Keep sizes and pack edge to edge into a rough square (Ctrl+Z undoes). Linked spaces them out again on the next drag.">Grid <small>keep sizes, no gaps</small></button>
         <button id="tidy-fit" title="Every tile the same height, as big as fits in the current view (Ctrl+Z undoes)">Fit to view <small>same size, fills the view</small></button>
+        <label class="menu-check" title="How much Pack and Justify may resize a video">Resize up to <select id="tidy-slack"><option value="0">0 %</option><option value="0.1">10 %</option><option value="0.25">25 %</option><option value="0.5">50 %</option></select></label>
       </div>
     </div>
     <button id="btn-link" class="board-only" title="Linked: when you move or resize a video, its neighbours slide out of the way so nothing overlaps (Shift+L). Off: videos can overlap freely.">🔗 Linked</button>
@@ -193,6 +196,7 @@
     <div class="ls-grip" title="Drag to resize"></div>
     <div class="ls-row"><span class="ls-label">Memory</span><div class="ls-bar ls-mem"><span data-key="ozy"></span><span data-key="other"></span><span data-key="free"></span></div><span class="ls-text ls-mem-text">…</span></div>
     <div class="ls-row"><span class="ls-label">CPU</span><div class="ls-bar ls-cpu"><span data-key="ozy"></span><span data-key="other"></span><span data-key="idle"></span></div><span class="ls-text ls-cpu-text">…</span></div>
+    <div class="ls-row" title="The whole machine's graphics card, as its driver reports it (NVIDIA only): how busy it is and how much video memory is in use. Ozy's figure is its own GPU process."><span class="ls-label">GPU</span><div class="ls-bar ls-gpu"><span data-key="used"></span><span data-key="free"></span></div><span class="ls-text ls-gpu-text">…</span></div>
     <div class="ls-legend"><i class="ozy"></i> Ozy <i class="other"></i> Everything else <i class="free"></i> Free <span class="spacer"></span><button class="ls-videos" title="Show each video's cost">Videos ▾</button><button class="ls-close" title="Hide (Load button shows it again)">✕</button></div>
     <div class="ls-table" hidden><table class="lp-table"><thead><tr><th>Video</th><th>Source</th><th>Tier</th><th>State</th><th>Dropped</th><th>≈ Memory</th></tr></thead><tbody></tbody></table></div>
   </div>

@@ -598,7 +598,29 @@ ipcMain.handle('cache-info', () => {
 const os = require('os');
 const LoadStats = require('./lib/loadstats');
 let lastCpus = null;
+// GPU: whole-machine busy % and video memory from the driver's own tool when it exists (NVIDIA
+// only; a read-only query, nothing is ever set). Windows gives no per-process video memory, so
+// Ozy's share is the GPU-process working set shown beside it. The tool runs on its own, at most
+// once a second and never two at a time; the load tick only ever reads the last good sample, so
+// a slow or hung nvidia-smi (killed after 400 ms) cannot hold the tick up.
+const nvidiaSmi = (() => {
+  const cands = process.platform === 'win32' ? [path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'nvidia-smi.exe')] : ['/usr/bin/nvidia-smi'];
+  return cands.find((p) => { try { return fs.existsSync(p); } catch { return false; } }) || null;
+})();
+let gpuLast = null, gpuAt = 0, gpuBusy = false, gpuAsked = 0;
+function sampleGpu() {
+  const now = Date.now();
+  if (!nvidiaSmi || gpuBusy || now - gpuAsked < 900) return;
+  gpuBusy = true; gpuAsked = now;
+  try {
+    execFile(nvidiaSmi, ['--query-gpu=utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'], { windowsHide: true, timeout: 400 }, (err, stdout) => {
+      gpuBusy = false;
+      if (!err) { const g = LoadStats.parseNvidiaSmi(stdout); if (g) { gpuLast = g; gpuAt = Date.now(); } }
+    });
+  } catch { gpuBusy = false; }
+}
 ipcMain.handle('load-stats', () => {
+  sampleGpu(); // fills gpuLast for a later tick
   const cpus = os.cpus();
   const sysCpu = LoadStats.cpuPercent(lastCpus, cpus);
   lastCpus = cpus;
@@ -612,7 +634,7 @@ ipcMain.handle('load-stats', () => {
   // so the processes just add up. One decimal: on a many-core machine a few videos are 1-2 %.
   appCpu = Math.round(appCpu * 10) / 10;
   const totalMemMB = os.totalmem() / 1048576, usedMemMB = (os.totalmem() - os.freemem()) / 1048576;
-  return { appCpu, appMemMB: Math.round(appMemMB + gpuMemMB), gpuMemMB: Math.round(gpuMemMB), sysCpu, usedMemMB: Math.round(usedMemMB), totalMemMB: Math.round(totalMemMB) };
+  return { appCpu, appMemMB: Math.round(appMemMB + gpuMemMB), gpuMemMB: Math.round(gpuMemMB), sysCpu, usedMemMB: Math.round(usedMemMB), totalMemMB: Math.round(totalMemMB), gpu: LoadStats.freshGpu(gpuLast, gpuAt, Date.now()) };
 });
 
 ipcMain.handle('pick-cache-folder', async () => {

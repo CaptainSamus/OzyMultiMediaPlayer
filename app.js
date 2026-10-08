@@ -4295,6 +4295,36 @@ function tidyAlign() {
   setStatus(scoped ? `Lined up ${list.length} selected videos` : 'Lined up the board');
 }
 // Compact: sizes and arrangement kept; tiles settle up and left until one gap apart (undo = move).
+// Pack: close the gaps the way Scott does by hand. Every tile stays about where it is and may grow
+// or shrink by at most settings.tidySlack so neighbours meet edge to edge (Arrange.packBoard has
+// the rules). The block keeps its top-left corner; text tiles sit it out (undo = resize).
+function tidyPack() {
+  const { list: targets, scoped } = tidyTargets();
+  const list = targets.filter((t) => !t.freeAspect); if (!list.length) return;
+  const entry = recordResize(list);
+  const bb = boardBounds(list);
+  const packed = Arrange.packBoard(list.map((t) => ({ ...t.board })), LINK_GAP, settings.tidySlack);
+  list.forEach((t, i) => { const q = packed.rects[i]; t.board = { x: bb.minX + q.x, y: bb.minY + q.y, w: q.w, h: q.h }; layoutTile(t); });
+  finishRects(entry);
+  const pct = Math.round(packed.coverage * 100);
+  if (scoped) setStatus(`Packed ${list.length} selected videos (${pct}% filled)`); else { fitBoard(); setStatus(`Packed the board (${pct}% filled)`); }
+}
+// Justify: the rows stay the rows they are; each is scaled as one piece, within the resize limit,
+// until it is as wide as the widest row, so both edges come out straight. The block keeps its
+// top-left corner; text tiles sit it out (undo = resize).
+function tidyJustify() {
+  const { list: targets, scoped } = tidyTargets();
+  const list = targets.filter((t) => !t.freeAspect); if (!list.length) return;
+  const entry = recordResize(list);
+  const bb = boardBounds(list);
+  const before = list.map((t) => ({ ...t.board }));
+  const rects = Arrange.justify(before, Arrange.packWidth(before, LINK_GAP), LINK_GAP, settings.tidySlack);
+  list.forEach((t, i) => { const q = rects[i]; t.board = { x: bb.minX + q.x, y: bb.minY + q.y, w: q.w, h: q.h }; layoutTile(t); });
+  finishRects(entry);
+  const n = Arrange.rowsOf(before).length;
+  if (!scoped) fitBoard();
+  setStatus(`Justified ${n} row${n === 1 ? '' : 's'}${scoped ? ' of the selection' : ''}`);
+}
 function tidyCompact() {
   const { list, scoped } = tidyTargets(); if (!list.length) return;
   const entry = recordMove(list);
@@ -4346,6 +4376,8 @@ document.getElementById('btn-tidy-menu').addEventListener('click', (e) => {
   // the entries act on the selection when there is one; say so
   const scoped = selection.size > 0;
   document.querySelector('#tidy-align small').textContent = scoped ? '(selection) keep sizes, straighten edges' : 'keep sizes, straighten edges';
+  document.querySelector('#tidy-pack small').textContent = scoped ? '(selection) close gaps, sizes within the limit below' : 'close gaps, sizes within the limit below';
+  document.querySelector('#tidy-justify small').textContent = scoped ? '(selection) rows filled edge to edge' : 'rows filled edge to edge';
   document.querySelector('#tidy-compact small').textContent = scoped ? '(selection) keep sizes, close the gaps' : 'keep sizes, close the gaps';
   document.querySelector('#tidy-rows small').textContent = scoped ? '(selection) keep sizes, sort into rows' : 'keep sizes, sort into rows';
   document.querySelector('#tidy-fit small').textContent = scoped ? '(selection) same height, wrapped in place' : 'same size, fills the view';
@@ -4353,6 +4385,11 @@ document.getElementById('btn-tidy-menu').addEventListener('click', (e) => {
 });
 window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !tidyMenu.contains(e.target)) tidyList.hidden = true; });
 document.getElementById('tidy-align').addEventListener('click', () => { tidyList.hidden = true; tidyAlign(); });
+document.getElementById('tidy-pack').addEventListener('click', () => { tidyList.hidden = true; tidyPack(); });
+// how much Pack (and Justify) may resize a video; remembered
+const tidySlackEl = document.getElementById('tidy-slack');
+tidySlackEl.addEventListener('change', () => { settings.tidySlack = Number(tidySlackEl.value); saveSettings(); });
+document.getElementById('tidy-justify').addEventListener('click', () => { tidyList.hidden = true; tidyJustify(); });
 document.getElementById('tidy-compact').addEventListener('click', () => { tidyList.hidden = true; tidyCompact(); });
 document.getElementById('tidy-rows').addEventListener('click', () => { tidyList.hidden = true; tidyRows(); });
 document.getElementById('tidy-fit').addEventListener('click', () => { tidyList.hidden = true; tidyFitToView(); });
@@ -4700,6 +4737,7 @@ window.api.getSettings().then((s) => {
   wheelZoomEl.checked = !!settings.wheelZoom;
   optOffscreen.checked = settings.pauseOffscreen;
   applyLoadStrip(); // the strip and its height come back as they were left
+  tidySlackEl.value = String(settings.tidySlack);
   hoverPlayBtn.classList.toggle('toggled', !!settings.hoverPlay); // the mode survives a restart
   ezPlayBtn.classList.toggle('toggled', !!settings.ezPlay); document.body.classList.toggle('ez-play', !!settings.ezPlay);
   renderFolders();
@@ -4901,9 +4939,13 @@ async function refreshLoad() {
   // the first sample has nothing to compare the machine's CPU against yet
   const pct = (v) => (v < 10 ? Math.round(v * 10) / 10 : Math.round(v)) + '%';
   const otherCpu = !s || raw.sysCpu === null ? '…' : pct(s.other.cpu);
+  // the whole machine's GPU, from nvidia-smi when the machine has it (null otherwise, or while a
+  // sample is on its way); Ozy's own figure is its GPU process's memory, a different measure
+  const gpu = s && raw.gpu ? raw.gpu : null;
   if (!loadPanel.hidden) {
     loadPanel.querySelector('.lp-sum').textContent = s
       ? `Ozy ${pct(s.ozy.cpu)} CPU · ${LoadStats.fmt(s.ozy.memMB)} (${LoadStats.fmt(s.ozy.gpuMemMB)} GPU) · Everything else ${otherCpu} CPU · ${LoadStats.fmt(s.other.memMB)} · ${LoadStats.fmt(s.freeMB)} free`
+        + (gpu ? ` · GPU ${gpu.busy}% busy, ${LoadStats.fmt(gpu.usedMB)} of ${LoadStats.fmt(gpu.totalMB)}` : '')
       : 'unavailable';
     fillLoadRows(loadPanel.querySelector('tbody'));
   }
@@ -4913,6 +4955,10 @@ async function refreshLoad() {
     for (const seg of b.cpu) loadStrip.querySelector(`.ls-cpu [data-key="${seg.key}"]`).style.width = seg.pct + '%';
     loadStrip.querySelector('.ls-mem-text').textContent = s ? `Ozy ${LoadStats.fmt(s.ozy.memMB)} · else ${LoadStats.fmt(s.other.memMB)} · free ${LoadStats.fmt(s.freeMB)} of ${LoadStats.fmt(raw.totalMemMB)}` : 'unavailable';
     loadStrip.querySelector('.ls-cpu-text').textContent = s ? `Ozy ${pct(s.ozy.cpu)} · else ${otherCpu}` : 'unavailable';
+    for (const seg of LoadStats.gpuBar(gpu)) loadStrip.querySelector(`.ls-gpu [data-key="${seg.key}"]`).style.width = seg.pct + '%';
+    loadStrip.querySelector('.ls-gpu-text').textContent = gpu
+      ? `${gpu.busy}% busy · ${LoadStats.fmt(gpu.usedMB)} of ${LoadStats.fmt(gpu.totalMB)} · Ozy ${LoadStats.fmt(s.ozy.gpuMemMB)}`
+      : (s ? `unavailable here · Ozy ${LoadStats.fmt(s.ozy.gpuMemMB)}` : 'unavailable');
     const tbl = loadStrip.querySelector('.ls-table');
     if (!tbl.hidden) fillLoadRows(tbl.querySelector('tbody'));
   }
