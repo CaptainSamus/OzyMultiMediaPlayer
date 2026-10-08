@@ -2047,6 +2047,10 @@ function addVideo(filePath, state = {}) {
   tile.stepFrame = stepFrame;
   el.querySelector('.fstep-back').addEventListener('click', () => stepFrame(-1));
   el.querySelector('.fstep-fwd').addEventListener('click', () => stepFrame(1));
+  // (gallery; on the board the tile owns the pointer and tileClick() runs tile.timeClick instead)
+  timeEl.addEventListener('click', (e) => { e.stopPropagation(); cycleTimeDisplay(); });
+  tile.timeClick = cycleTimeDisplay;
+  /* DISABLED (2026-10-07): body moved into cycleTimeDisplay() so the board path can share it
   timeEl.addEventListener('click', (e) => {
     e.stopPropagation();
     const modes = ['clock', 'frames', 'timecode'];
@@ -2054,6 +2058,7 @@ function addVideo(filePath, state = {}) {
     for (const t of tiles) t.tick && t.refreshTime && t.refreshTime();
     renderTimeline(); // lane timecodes follow the display mode
   });
+  */
   tile.refreshTime = updateTimeLabel;
 
   // ----- bookmarks (shared with YouTube tiles: attachBookmarks) -----
@@ -2267,10 +2272,12 @@ function addVideo(filePath, state = {}) {
     setSelected(tile, !selection.has(tile));
     selectionStatus();
   });
+  // (gallery; on the board the dblclick goes to the tile element, see tileDblClick)
   video.addEventListener('dblclick', () => {
     if (!cmp.el.hidden) return; // in the compare view the tile is empty
     toggleTileFullscreen(el);
   });
+  el.addEventListener('dblclick', (e) => tileDblClick(tile, e));
 
   playBtn.addEventListener('click', () => tile.togglePlay());
 
@@ -2770,6 +2777,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
   for (const ev of ['play', 'pause', 'ended']) video.addEventListener(ev, onVideoPlayState);
   video.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.guard.shouldAct()) return; tile.togglePlay(); });
   video.addEventListener('dblclick', () => { if (cmp.el.hidden) toggleTileFullscreen(el); });
+  el.addEventListener('dblclick', (e) => tileDblClick(tile, e)); // board: the tile gets it, not the <video>
 
   // ----- YouTube controls -----
   const wantTime = wantTime0;
@@ -2967,6 +2975,7 @@ function addImageTile(filePath, state = {}, at = null) {
   el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
   wireFullscreenButton(el);
   img.addEventListener('dblclick', () => toggleTileFullscreen(el));
+  el.addEventListener('dblclick', (e) => tileDblClick(tile, e)); // board: the tile gets it, not the <img>
   el.addEventListener('pointerenter', () => { hoveredTile = tile; hpEnter(tile); });
   el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; hpLeave(tile); });
   el.addEventListener('click', (e) => {
@@ -3575,6 +3584,10 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
   el.querySelector('.back').addEventListener('click', (e) => tile.seekBy(e.shiftKey ? -30 : -5));
   el.querySelector('.fwd').addEventListener('click', (e) => tile.seekBy(e.shiftKey ? 30 : 5));
   for (const s of ['.play', '.fstep-back', '.fstep-fwd', '.back', '.fwd']) el.querySelector(s).addEventListener('dblclick', (e) => e.stopPropagation());
+  // (gallery; on the board the tile owns the pointer and tileClick() runs tile.timeClick instead)
+  timeEl.addEventListener('click', (e) => { e.stopPropagation(); cycleTimeDisplay(); });
+  tile.timeClick = cycleTimeDisplay;
+  /* DISABLED (2026-10-07): body moved into cycleTimeDisplay() so the board path can share it
   timeEl.addEventListener('click', (e) => {
     e.stopPropagation();
     const modes = ['clock', 'frames', 'timecode'];
@@ -3582,6 +3595,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     for (const t of tiles) t.refreshTime && t.refreshTime();
     renderTimeline();
   });
+  */
   // frames come from the cache, but a synced YouTube member does not: throttle the broadcast
   const scrubber = Scrub.create();
   const beginScrub = () => { tile.scrubbing = true; el.classList.add('scrubbing'); };
@@ -3604,6 +3618,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
   rateSel.addEventListener('change', () => { pb.rate = Number(rateSel.value); broadcast(tile, 'rate', pb.rate); });
   cv.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.guard.shouldAct()) return; tile.togglePlay(); });
   cv.addEventListener('dblclick', () => { if (!cmp.el.hidden) return; toggleTileFullscreen(el); });
+  el.addEventListener('dblclick', (e) => tileDblClick(tile, e)); // board: the tile gets it, not the canvas
   el.addEventListener('click', (e) => {
     tileClick(tile, e);
     if (isBoard() || !e.shiftKey || e.target.closest('button, input, select, .bm-panel')) return;
@@ -4268,6 +4283,39 @@ function tidyGrid() {
   if (scoped) setStatus(`Packed ${list.length} selected videos into a grid`);
   else { fitBoard(); setStatus('Packed into a grid'); }
 }
+// Align: edges that are nearly lined up get lined up, gaps that are nearly a gap become one.
+// Sizes and the arrangement are kept; a tile with nothing within reach stays put (undo = move).
+const ALIGN_PX = 24; // screen px: generous, since a hand-made layout is "nearly" right
+function tidyAlign() {
+  const { list, scoped } = tidyTargets(); if (list.length < 2) { setStatus('Nothing to line up'); return; }
+  const entry = recordMove(list);
+  const rects = Arrange.align(list.map((t) => ({ ...t.board })), ALIGN_PX / board.zoom, LINK_GAP);
+  list.forEach((t, i) => { t.board.x = rects[i].x; t.board.y = rects[i].y; layoutTile(t); });
+  finishRects(entry);
+  setStatus(scoped ? `Lined up ${list.length} selected videos` : 'Lined up the board');
+}
+// Compact: sizes and arrangement kept; tiles settle up and left until one gap apart (undo = move).
+function tidyCompact() {
+  const { list, scoped } = tidyTargets(); if (!list.length) return;
+  const entry = recordMove(list);
+  const rects = Arrange.compact(list.map((t) => ({ ...t.board })), LINK_GAP);
+  list.forEach((t, i) => { t.board.x = rects[i].x; t.board.y = rects[i].y; layoutTile(t); });
+  finishRects(entry);
+  if (scoped) setStatus(`Compacted ${list.length} selected videos`); else { fitBoard(); setStatus('Compacted the board'); }
+}
+// Rows: sizes kept, flowed into rows at the view's width; text tiles sit it out (undo = move).
+function tidyRows() {
+  const { list: targets, scoped } = tidyTargets();
+  const list = targets.filter((t) => !t.freeAspect); if (!list.length) return;
+  const entry = recordMove(list);
+  const r = gridRect(); const W = (r.width - 2 * GAP) / board.zoom;
+  const bb = boardBounds(list);
+  const origin = scoped ? { x: bb.minX, y: bb.minY } : toCanvas(r.left + GAP, r.top + GAP);
+  const rects = Arrange.rows(list.map((t) => ({ w: t.board.w, h: t.board.h })), W, LINK_GAP);
+  list.forEach((t, i) => { t.board.x = origin.x + rects[i].x; t.board.y = origin.y + rects[i].y; layoutTile(t); });
+  finishRects(entry);
+  if (scoped) setStatus(`Sorted ${list.length} selected videos into rows`); else { fitBoard(); setStatus('Sorted into rows'); }
+}
 // Group bar: Tidy = select the group and Fit it
 function tidyGroup(g) {
   if (!g) return;
@@ -4297,10 +4345,16 @@ document.getElementById('btn-tidy-menu').addEventListener('click', (e) => {
   e.stopPropagation(); tidyList.hidden = !tidyList.hidden;
   // the entries act on the selection when there is one; say so
   const scoped = selection.size > 0;
+  document.querySelector('#tidy-align small').textContent = scoped ? '(selection) keep sizes, straighten edges' : 'keep sizes, straighten edges';
+  document.querySelector('#tidy-compact small').textContent = scoped ? '(selection) keep sizes, close the gaps' : 'keep sizes, close the gaps';
+  document.querySelector('#tidy-rows small').textContent = scoped ? '(selection) keep sizes, sort into rows' : 'keep sizes, sort into rows';
   document.querySelector('#tidy-fit small').textContent = scoped ? '(selection) same height, wrapped in place' : 'same size, fills the view';
   document.querySelector('#tidy-grid small').textContent = scoped ? '(selection) keep sizes, no gaps' : 'keep sizes, no gaps';
 });
 window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !tidyMenu.contains(e.target)) tidyList.hidden = true; });
+document.getElementById('tidy-align').addEventListener('click', () => { tidyList.hidden = true; tidyAlign(); });
+document.getElementById('tidy-compact').addEventListener('click', () => { tidyList.hidden = true; tidyCompact(); });
+document.getElementById('tidy-rows').addEventListener('click', () => { tidyList.hidden = true; tidyRows(); });
 document.getElementById('tidy-fit').addEventListener('click', () => { tidyList.hidden = true; tidyFitToView(); });
 document.getElementById('tidy-grid').addEventListener('click', () => { tidyList.hidden = true; tidyGrid(); });
 document.getElementById('btn-link').addEventListener('click', () => setLinked(!board.linked));
@@ -4645,6 +4699,7 @@ window.api.getSettings().then((s) => {
   refreshUpdateMenu(); // the update checkboxes come from the same settings file
   wheelZoomEl.checked = !!settings.wheelZoom;
   optOffscreen.checked = settings.pauseOffscreen;
+  applyLoadStrip(); // the strip and its height come back as they were left
   hoverPlayBtn.classList.toggle('toggled', !!settings.hoverPlay); // the mode survives a restart
   ezPlayBtn.classList.toggle('toggled', !!settings.ezPlay); document.body.classList.toggle('ez-play', !!settings.ezPlay);
   renderFolders();
@@ -4813,45 +4868,109 @@ document.getElementById('opt-cache-folder').addEventListener('click', async () =
 });
 document.getElementById('opt-cache-clear').addEventListener('click', () => { optList.hidden = true; document.getElementById('btn-cache').click(); });
 
-// ---------- load viewer ----------
-// Once a second while it is open: Ozy against everything else (totals from main, lib/loadstats.js
-// does the arithmetic) and a row per tile. Reads nothing about other programs.
+// ---------- load viewer: docked strip (live bars) and the pop-out table ----------
+// Twice a second while either is showing: Ozy against everything else (totals from main,
+// lib/loadstats.js does the arithmetic) and a row per tile. Reads nothing about other programs.
 const loadPanel = document.getElementById('load-panel');
 const optLoad = document.getElementById('opt-load');
+const loadStrip = document.getElementById('load-strip');
+const loadBtn = document.getElementById('btn-load');
+const LS_MIN_H = 56, LS_MAX_H = 400, LS_TABLE_H = 220;
 let loadTimer = null;
 const tileState = (t) => (!t.pb ? (t.type || 'image') : t.autoPaused ? 'auto-paused' : t.pb.paused ? 'paused' : 'playing');
-async function refreshLoad() {
-  if (loadPanel.hidden) return;
-  let raw = null, s = null;
-  try { raw = await window.api.loadStats(); s = LoadStats.split(raw); } catch {}
-  // the first sample has nothing to compare the machine's CPU against yet
-  const pct = (v) => (v < 10 ? Math.round(v * 10) / 10 : Math.round(v)) + '%';
-  const otherCpu = !raw || raw.sysCpu === null ? '…' : pct(s.other.cpu);
-  loadPanel.querySelector('.lp-sum').textContent = s
-    ? `Ozy ${pct(s.ozy.cpu)} CPU · ${s.ozy.memMB} MB (${s.ozy.gpuMemMB} MB GPU) · Everything else ${otherCpu} CPU · ${s.other.memMB} MB · ${s.freeMB} MB free`
-    : 'unavailable';
+const loadShowing = () => !loadPanel.hidden || !loadStrip.hidden;
+function fillLoadRows(tbody) {
   const rows = LoadStats.rows(tiles.map((t) => {
     const v = t.video;
     const q = v && typeof v.getVideoPlaybackQuality === 'function' ? v.getVideoPlaybackQuality() : null;
     return { name: tileName(t), width: v ? v.videoWidth : 0, height: v ? v.videoHeight : 0, tier: t.tier, state: tileState(t), dropped: q ? q.droppedVideoFrames : undefined };
   }));
-  const body = loadPanel.querySelector('tbody');
-  body.textContent = '';
+  tbody.textContent = '';
   for (const r of rows) {
     const tr = document.createElement('tr');
-    for (const v of [r.name, r.res, r.tier, r.state, r.dropped, r.estMB ? r.estMB.toFixed(0) : '–']) { const td = document.createElement('td'); td.textContent = String(v); tr.appendChild(td); }
+    for (const v of [r.name, r.res, r.tier, r.state, r.dropped, r.estMB ? LoadStats.fmt(r.estMB) : '–']) { const td = document.createElement('td'); td.textContent = String(v); tr.appendChild(td); }
     tr.firstChild.title = r.name;
-    body.appendChild(tr);
+    tbody.appendChild(tr);
   }
 }
-function setLoadViewer(on) {
+async function refreshLoad() {
+  if (!loadShowing()) return;
+  // a failed read (IPC error) leaves s null: both views say "unavailable", nothing throws in the timer
+  let raw = null, s = null;
+  try { raw = await window.api.loadStats(); s = LoadStats.split(raw); } catch { raw = null; s = null; }
+  // the first sample has nothing to compare the machine's CPU against yet
+  const pct = (v) => (v < 10 ? Math.round(v * 10) / 10 : Math.round(v)) + '%';
+  const otherCpu = !s || raw.sysCpu === null ? '…' : pct(s.other.cpu);
+  if (!loadPanel.hidden) {
+    loadPanel.querySelector('.lp-sum').textContent = s
+      ? `Ozy ${pct(s.ozy.cpu)} CPU · ${LoadStats.fmt(s.ozy.memMB)} (${LoadStats.fmt(s.ozy.gpuMemMB)} GPU) · Everything else ${otherCpu} CPU · ${LoadStats.fmt(s.other.memMB)} · ${LoadStats.fmt(s.freeMB)} free`
+      : 'unavailable';
+    fillLoadRows(loadPanel.querySelector('tbody'));
+  }
+  if (!loadStrip.hidden) {
+    const b = LoadStats.bars(s, s ? raw.totalMemMB : 0);
+    for (const seg of b.mem) loadStrip.querySelector(`.ls-mem [data-key="${seg.key}"]`).style.width = seg.pct + '%';
+    for (const seg of b.cpu) loadStrip.querySelector(`.ls-cpu [data-key="${seg.key}"]`).style.width = seg.pct + '%';
+    loadStrip.querySelector('.ls-mem-text').textContent = s ? `Ozy ${LoadStats.fmt(s.ozy.memMB)} · else ${LoadStats.fmt(s.other.memMB)} · free ${LoadStats.fmt(s.freeMB)} of ${LoadStats.fmt(raw.totalMemMB)}` : 'unavailable';
+    loadStrip.querySelector('.ls-cpu-text').textContent = s ? `Ozy ${pct(s.ozy.cpu)} · else ${otherCpu}` : 'unavailable';
+    const tbl = loadStrip.querySelector('.ls-table');
+    if (!tbl.hidden) fillLoadRows(tbl.querySelector('tbody'));
+  }
+}
+function syncLoadTimer() {
+  clearInterval(loadTimer); loadTimer = null;
+  if (loadShowing()) { refreshLoad(); loadTimer = setInterval(refreshLoad, 500); }
+}
+function setLoadViewer(on) {            // the pop-out, from Optimize ▾
   loadPanel.hidden = !on;
   optLoad.checked = on;
-  clearInterval(loadTimer); loadTimer = null;
-  if (on) { refreshLoad(); loadTimer = setInterval(refreshLoad, 1000); }
+  syncLoadTimer();
+}
+// show the strip the way settings say (startup, and after every change); does not save
+function applyLoadStrip() {
+  loadStrip.hidden = !settings.loadStrip;
+  loadBtn.classList.toggle('toggled', !!settings.loadStrip);
+  loadStrip.style.setProperty('--ls-h', settings.loadStripH + 'px');
+  syncLoadTimer();
+  layoutTiles(); // the board / gallery viewport changed height
+}
+function setLoadStrip(on) {             // the docked strip, from the Load button; remembered
+  settings.loadStrip = !!on;
+  saveSettings();
+  applyLoadStrip();
 }
 optLoad.addEventListener('change', () => setLoadViewer(optLoad.checked));
 loadPanel.querySelector('.lp-close').addEventListener('click', () => setLoadViewer(false));
+loadBtn.addEventListener('click', () => setLoadStrip(!settings.loadStrip));
+loadStrip.querySelector('.ls-close').addEventListener('click', () => setLoadStrip(false));
+loadStrip.querySelector('.ls-videos').addEventListener('click', (e) => {
+  const tbl = loadStrip.querySelector('.ls-table');
+  tbl.hidden = !tbl.hidden;
+  e.currentTarget.textContent = tbl.hidden ? 'Videos ▾' : 'Videos ▴';
+  // the table needs room: grow a short strip so its rows can be seen
+  if (!tbl.hidden && settings.loadStripH < 200) { settings.loadStripH = LS_TABLE_H; saveSettings(); loadStrip.style.setProperty('--ls-h', LS_TABLE_H + 'px'); layoutTiles(); }
+  refreshLoad();
+});
+// drag the top edge to resize, same idea as the timeline's head
+loadStrip.querySelector('.ls-grip').addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const grip = e.currentTarget;
+  try { grip.setPointerCapture(e.pointerId); } catch {}
+  const y0 = e.clientY, h0 = settings.loadStripH;
+  const onMove = (ev) => {
+    settings.loadStripH = Math.round(clamp(h0 + (y0 - ev.clientY), LS_MIN_H, LS_MAX_H));
+    loadStrip.style.setProperty('--ls-h', settings.loadStripH + 'px');
+  };
+  let ended = false;
+  const onUp = () => {
+    if (ended) return;
+    ended = true;
+    grip.removeEventListener('pointermove', onMove); grip.removeEventListener('pointerup', onUp); grip.removeEventListener('pointercancel', onUp); grip.removeEventListener('lostpointercapture', onUp);
+    saveSettings(); layoutTiles();
+  };
+  grip.addEventListener('pointermove', onMove); grip.addEventListener('pointerup', onUp); grip.addEventListener('pointercancel', onUp); grip.addEventListener('lostpointercapture', onUp);
+});
 
 // ---------- EZ play ----------
 // A click anywhere on a tile that is not a control plays or pauses it. The picture already does
@@ -4876,12 +4995,34 @@ function tileClick(tile, e) {
   const retargeted = e.target === tile.el;
   const hit = retargeted ? document.elementFromPoint(e.clientX, e.clientY) : e.target;
   if (!hit || !tile.el.contains(hit)) return;
-  const plays = ClickGuard.clickPlays({
-    shift: e.shiftKey, retargeted, onPicture: hit === tile.mediaEl && hit.tagName !== 'IFRAME',
-    ez: ezPlayOn(), onControl: !ClickGuard.ezTarget((s) => !!hit.closest(s)),
-  });
+  const closest = (s) => !!hit.closest(s);
+  const onPicture = hit === tile.mediaEl && hit.tagName !== 'IFRAME';
+  const target = ClickGuard.clickTarget({ closest, onPicture, ez: ezPlayOn() });
+  // The time readout's own click handler is starved the same way the picture's is. (A bookmark
+  // marker is not: it stops the pointerdown, so the tile never captures and its click arrives.)
+  if (target === 'time') { if (retargeted && tile.timeClick && tile.guard.shouldAct()) tile.timeClick(); return; }
+  if (target !== 'picture') return;
+  const plays = ClickGuard.clickPlays({ shift: e.shiftKey, retargeted, onPicture, ez: ezPlayOn(), onControl: !ClickGuard.ezTarget(closest) });
   if (!plays || !tile.guard.shouldAct()) return;
   if (tile.togglePlay) tile.togglePlay(); else if (tile.pb.paused) tile.pb.play(); else tile.pb.pause();
+}
+// Double-click on the picture = fullscreen. On the board the dblclick is delivered to the tile
+// element for the same reason the click is, so the picture's own dblclick handler never runs
+// there; in the gallery it does, and this stays out of its way (not retargeted).
+function tileDblClick(tile, e) {
+  const retargeted = e.target === tile.el;
+  const hit = retargeted ? document.elementFromPoint(e.clientX, e.clientY) : e.target;
+  if (!hit || !tile.el.contains(hit)) return;
+  // the picture: the tile's video / canvas (not an embed's iframe), or an image tile's <img>
+  const onPicture = (hit === tile.mediaEl && hit.tagName !== 'IFRAME') || (hit.tagName === 'IMG' && hit.parentElement === tile.el);
+  if (ClickGuard.dblClickFullscreens({ retargeted, onPicture, compareOpen: !cmp.el.hidden })) toggleTileFullscreen(tile.el);
+}
+// the time readout cycles clock -> frames -> timecode, for every tile at once
+function cycleTimeDisplay() {
+  const modes = ['clock', 'frames', 'timecode'];
+  layout.timeDisplay = modes[(modes.indexOf(layout.timeDisplay) + 1) % modes.length];
+  for (const t of tiles) t.refreshTime && t.refreshTime();
+  renderTimeline(); // lane timecodes follow the display mode
 }
 
 // ---------- copy / paste ----------
