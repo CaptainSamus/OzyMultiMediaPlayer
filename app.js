@@ -4267,6 +4267,15 @@ function tidyAlign() {
   finishRects(entry);
   setStatus(scoped ? `Lined up ${list.length} selected videos` : 'Lined up the board');
 }
+// Compact: sizes and arrangement kept; tiles settle up and left until one gap apart (undo = move).
+function tidyCompact() {
+  const { list, scoped } = tidyTargets(); if (!list.length) return;
+  const entry = recordMove(list);
+  const rects = Arrange.compact(list.map((t) => ({ ...t.board })), LINK_GAP);
+  list.forEach((t, i) => { t.board.x = rects[i].x; t.board.y = rects[i].y; layoutTile(t); });
+  finishRects(entry);
+  if (scoped) setStatus(`Compacted ${list.length} selected videos`); else { fitBoard(); setStatus('Compacted the board'); }
+}
 // Group bar: Tidy = select the group and Fit it
 function tidyGroup(g) {
   if (!g) return;
@@ -4297,11 +4306,13 @@ document.getElementById('btn-tidy-menu').addEventListener('click', (e) => {
   // the entries act on the selection when there is one; say so
   const scoped = selection.size > 0;
   document.querySelector('#tidy-align small').textContent = scoped ? '(selection) keep sizes, straighten edges' : 'keep sizes, straighten edges';
+  document.querySelector('#tidy-compact small').textContent = scoped ? '(selection) keep sizes, close the gaps' : 'keep sizes, close the gaps';
   document.querySelector('#tidy-fit small').textContent = scoped ? '(selection) same height, wrapped in place' : 'same size, fills the view';
   document.querySelector('#tidy-grid small').textContent = scoped ? '(selection) keep sizes, no gaps' : 'keep sizes, no gaps';
 });
 window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !tidyMenu.contains(e.target)) tidyList.hidden = true; });
 document.getElementById('tidy-align').addEventListener('click', () => { tidyList.hidden = true; tidyAlign(); });
+document.getElementById('tidy-compact').addEventListener('click', () => { tidyList.hidden = true; tidyCompact(); });
 document.getElementById('tidy-fit').addEventListener('click', () => { tidyList.hidden = true; tidyFitToView(); });
 document.getElementById('tidy-grid').addEventListener('click', () => { tidyList.hidden = true; tidyGrid(); });
 document.getElementById('btn-link').addEventListener('click', () => setLinked(!board.linked));
