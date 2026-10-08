@@ -2035,6 +2035,10 @@ function addVideo(filePath, state = {}) {
   tile.stepFrame = stepFrame;
   el.querySelector('.fstep-back').addEventListener('click', () => stepFrame(-1));
   el.querySelector('.fstep-fwd').addEventListener('click', () => stepFrame(1));
+  // (gallery; on the board the tile owns the pointer and tileClick() runs tile.timeClick instead)
+  timeEl.addEventListener('click', (e) => { e.stopPropagation(); cycleTimeDisplay(); });
+  tile.timeClick = cycleTimeDisplay;
+  /* DISABLED (2026-10-07): body moved into cycleTimeDisplay() so the board path can share it
   timeEl.addEventListener('click', (e) => {
     e.stopPropagation();
     const modes = ['clock', 'frames', 'timecode'];
@@ -2042,6 +2046,7 @@ function addVideo(filePath, state = {}) {
     for (const t of tiles) t.tick && t.refreshTime && t.refreshTime();
     renderTimeline(); // lane timecodes follow the display mode
   });
+  */
   tile.refreshTime = updateTimeLabel;
 
   // ----- bookmarks (shared with YouTube tiles: attachBookmarks) -----
@@ -2255,10 +2260,12 @@ function addVideo(filePath, state = {}) {
     setSelected(tile, !selection.has(tile));
     selectionStatus();
   });
+  // (gallery; on the board the dblclick goes to the tile element, see tileDblClick)
   video.addEventListener('dblclick', () => {
     if (!cmp.el.hidden) return; // in the compare view the tile is empty
     toggleTileFullscreen(el);
   });
+  el.addEventListener('dblclick', (e) => tileDblClick(tile, e));
 
   playBtn.addEventListener('click', () => tile.togglePlay());
 
@@ -2758,6 +2765,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
   for (const ev of ['play', 'pause', 'ended']) video.addEventListener(ev, onVideoPlayState);
   video.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.guard.shouldAct()) return; tile.togglePlay(); });
   video.addEventListener('dblclick', () => { if (cmp.el.hidden) toggleTileFullscreen(el); });
+  el.addEventListener('dblclick', (e) => tileDblClick(tile, e)); // board: the tile gets it, not the <video>
 
   // ----- YouTube controls -----
   const wantTime = wantTime0;
@@ -2955,6 +2963,7 @@ function addImageTile(filePath, state = {}, at = null) {
   el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
   wireFullscreenButton(el);
   img.addEventListener('dblclick', () => toggleTileFullscreen(el));
+  el.addEventListener('dblclick', (e) => tileDblClick(tile, e)); // board: the tile gets it, not the <img>
   el.addEventListener('pointerenter', () => { hoveredTile = tile; hpEnter(tile); });
   el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; hpLeave(tile); });
   el.addEventListener('click', (e) => {
@@ -3563,6 +3572,10 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
   el.querySelector('.back').addEventListener('click', (e) => tile.seekBy(e.shiftKey ? -30 : -5));
   el.querySelector('.fwd').addEventListener('click', (e) => tile.seekBy(e.shiftKey ? 30 : 5));
   for (const s of ['.play', '.fstep-back', '.fstep-fwd', '.back', '.fwd']) el.querySelector(s).addEventListener('dblclick', (e) => e.stopPropagation());
+  // (gallery; on the board the tile owns the pointer and tileClick() runs tile.timeClick instead)
+  timeEl.addEventListener('click', (e) => { e.stopPropagation(); cycleTimeDisplay(); });
+  tile.timeClick = cycleTimeDisplay;
+  /* DISABLED (2026-10-07): body moved into cycleTimeDisplay() so the board path can share it
   timeEl.addEventListener('click', (e) => {
     e.stopPropagation();
     const modes = ['clock', 'frames', 'timecode'];
@@ -3570,6 +3583,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     for (const t of tiles) t.refreshTime && t.refreshTime();
     renderTimeline();
   });
+  */
   // frames come from the cache, but a synced YouTube member does not: throttle the broadcast
   const scrubber = Scrub.create();
   const beginScrub = () => { tile.scrubbing = true; el.classList.add('scrubbing'); };
@@ -3592,6 +3606,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
   rateSel.addEventListener('change', () => { pb.rate = Number(rateSel.value); broadcast(tile, 'rate', pb.rate); });
   cv.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.guard.shouldAct()) return; tile.togglePlay(); });
   cv.addEventListener('dblclick', () => { if (!cmp.el.hidden) return; toggleTileFullscreen(el); });
+  el.addEventListener('dblclick', (e) => tileDblClick(tile, e)); // board: the tile gets it, not the canvas
   el.addEventListener('click', (e) => {
     tileClick(tile, e);
     if (isBoard() || !e.shiftKey || e.target.closest('button, input, select, .bm-panel')) return;
@@ -4968,12 +4983,34 @@ function tileClick(tile, e) {
   const retargeted = e.target === tile.el;
   const hit = retargeted ? document.elementFromPoint(e.clientX, e.clientY) : e.target;
   if (!hit || !tile.el.contains(hit)) return;
-  const plays = ClickGuard.clickPlays({
-    shift: e.shiftKey, retargeted, onPicture: hit === tile.mediaEl && hit.tagName !== 'IFRAME',
-    ez: ezPlayOn(), onControl: !ClickGuard.ezTarget((s) => !!hit.closest(s)),
-  });
+  const closest = (s) => !!hit.closest(s);
+  const onPicture = hit === tile.mediaEl && hit.tagName !== 'IFRAME';
+  const target = ClickGuard.clickTarget({ closest, onPicture, ez: ezPlayOn() });
+  // The time readout's own click handler is starved the same way the picture's is. (A bookmark
+  // marker is not: it stops the pointerdown, so the tile never captures and its click arrives.)
+  if (target === 'time') { if (retargeted && tile.timeClick && tile.guard.shouldAct()) tile.timeClick(); return; }
+  if (target !== 'picture') return;
+  const plays = ClickGuard.clickPlays({ shift: e.shiftKey, retargeted, onPicture, ez: ezPlayOn(), onControl: !ClickGuard.ezTarget(closest) });
   if (!plays || !tile.guard.shouldAct()) return;
   if (tile.togglePlay) tile.togglePlay(); else if (tile.pb.paused) tile.pb.play(); else tile.pb.pause();
+}
+// Double-click on the picture = fullscreen. On the board the dblclick is delivered to the tile
+// element for the same reason the click is, so the picture's own dblclick handler never runs
+// there; in the gallery it does, and this stays out of its way (not retargeted).
+function tileDblClick(tile, e) {
+  const retargeted = e.target === tile.el;
+  const hit = retargeted ? document.elementFromPoint(e.clientX, e.clientY) : e.target;
+  if (!hit || !tile.el.contains(hit)) return;
+  // the picture: the tile's video / canvas (not an embed's iframe), or an image tile's <img>
+  const onPicture = (hit === tile.mediaEl && hit.tagName !== 'IFRAME') || (hit.tagName === 'IMG' && hit.parentElement === tile.el);
+  if (ClickGuard.dblClickFullscreens({ retargeted, onPicture, compareOpen: !cmp.el.hidden })) toggleTileFullscreen(tile.el);
+}
+// the time readout cycles clock -> frames -> timecode, for every tile at once
+function cycleTimeDisplay() {
+  const modes = ['clock', 'frames', 'timecode'];
+  layout.timeDisplay = modes[(modes.indexOf(layout.timeDisplay) + 1) % modes.length];
+  for (const t of tiles) t.refreshTime && t.refreshTime();
+  renderTimeline(); // lane timecodes follow the display mode
 }
 
 // ---------- copy / paste ----------
