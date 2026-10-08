@@ -4295,6 +4295,20 @@ function tidyAlign() {
   setStatus(scoped ? `Lined up ${list.length} selected videos` : 'Lined up the board');
 }
 // Compact: sizes and arrangement kept; tiles settle up and left until one gap apart (undo = move).
+// Pack: close the gaps the way Scott does by hand. Every tile stays about where it is and may grow
+// or shrink by at most settings.tidySlack so neighbours meet edge to edge (Arrange.packBoard has
+// the rules). The block keeps its top-left corner; text tiles sit it out (undo = resize).
+function tidyPack() {
+  const { list: targets, scoped } = tidyTargets();
+  const list = targets.filter((t) => !t.freeAspect); if (!list.length) return;
+  const entry = recordResize(list);
+  const bb = boardBounds(list);
+  const packed = Arrange.packBoard(list.map((t) => ({ ...t.board })), LINK_GAP, settings.tidySlack);
+  list.forEach((t, i) => { const q = packed.rects[i]; t.board = { x: bb.minX + q.x, y: bb.minY + q.y, w: q.w, h: q.h }; layoutTile(t); });
+  finishRects(entry);
+  const pct = Math.round(packed.coverage * 100);
+  if (scoped) setStatus(`Packed ${list.length} selected videos (${pct}% filled)`); else { fitBoard(); setStatus(`Packed the board (${pct}% filled)`); }
+}
 function tidyCompact() {
   const { list, scoped } = tidyTargets(); if (!list.length) return;
   const entry = recordMove(list);
@@ -4346,6 +4360,7 @@ document.getElementById('btn-tidy-menu').addEventListener('click', (e) => {
   // the entries act on the selection when there is one; say so
   const scoped = selection.size > 0;
   document.querySelector('#tidy-align small').textContent = scoped ? '(selection) keep sizes, straighten edges' : 'keep sizes, straighten edges';
+  document.querySelector('#tidy-pack small').textContent = scoped ? '(selection) close gaps, sizes within the limit below' : 'close gaps, sizes within the limit below';
   document.querySelector('#tidy-compact small').textContent = scoped ? '(selection) keep sizes, close the gaps' : 'keep sizes, close the gaps';
   document.querySelector('#tidy-rows small').textContent = scoped ? '(selection) keep sizes, sort into rows' : 'keep sizes, sort into rows';
   document.querySelector('#tidy-fit small').textContent = scoped ? '(selection) same height, wrapped in place' : 'same size, fills the view';
@@ -4353,6 +4368,10 @@ document.getElementById('btn-tidy-menu').addEventListener('click', (e) => {
 });
 window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !tidyMenu.contains(e.target)) tidyList.hidden = true; });
 document.getElementById('tidy-align').addEventListener('click', () => { tidyList.hidden = true; tidyAlign(); });
+document.getElementById('tidy-pack').addEventListener('click', () => { tidyList.hidden = true; tidyPack(); });
+// how much Pack (and Justify) may resize a video; remembered
+const tidySlackEl = document.getElementById('tidy-slack');
+tidySlackEl.addEventListener('change', () => { settings.tidySlack = Number(tidySlackEl.value); saveSettings(); });
 document.getElementById('tidy-compact').addEventListener('click', () => { tidyList.hidden = true; tidyCompact(); });
 document.getElementById('tidy-rows').addEventListener('click', () => { tidyList.hidden = true; tidyRows(); });
 document.getElementById('tidy-fit').addEventListener('click', () => { tidyList.hidden = true; tidyFitToView(); });
@@ -4700,6 +4719,7 @@ window.api.getSettings().then((s) => {
   wheelZoomEl.checked = !!settings.wheelZoom;
   optOffscreen.checked = settings.pauseOffscreen;
   applyLoadStrip(); // the strip and its height come back as they were left
+  tidySlackEl.value = String(settings.tidySlack);
   hoverPlayBtn.classList.toggle('toggled', !!settings.hoverPlay); // the mode survives a restart
   ezPlayBtn.classList.toggle('toggled', !!settings.ezPlay); document.body.classList.toggle('ez-play', !!settings.ezPlay);
   renderFolders();
