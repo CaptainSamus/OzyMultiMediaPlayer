@@ -1421,7 +1421,7 @@ function startResize(tile, corner, e) {
   // Ctrl-drag). A sticky group scales whole even with nothing selected. Unlike a move, selected
   // members of a non-sticky group come too. Text members scale their box and re-wrap; a text
   // tile's own handle only ever sets its width. Rule in lib/select.js.
-  const groupScale = onBoard && !tile.freeAspect ? Select.dragSet(tile, [...selection], modKey(e), { keepSelected: true }) : null;
+  const groupScale = onBoard && !tile.freeAspect ? Select.dragSet(tile, [...selection], modKey(e), Select.RESIZE) : null;
   const members = groupScale && groupScale.length > 1 ? groupScale : null;
   const groupBB = members ? boardBounds(members) : null;
   const memberStart = members ? new Map(members.map((m) => [m, { ...m.board }])) : null;
@@ -1574,8 +1574,10 @@ function attachTileDrag(tile) {
           group = [...set];
         }
         */
-        // members of non-sticky groups move on their own; sticky groups move whole
-        group = Select.dragSet(tile, [...selection], single);
+        // DISABLED (2026-10-07): selected members of a non-sticky group used to be left behind by a move
+        // group = Select.dragSet(tile, [...selection], single);
+        // everything selected moves together, non-sticky group or not; a sticky group moves whole
+        group = Select.dragSet(tile, [...selection], single, Select.MOVE);
         movingSet = new Set(group);
         rememberStart();
         undoEntry = recordMove(tiles.filter((t) => t.board)); // all board tiles: Linked mode can push neighbours
