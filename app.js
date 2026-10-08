@@ -1412,10 +1412,16 @@ function startResize(tile, corner, e) {
   const sx = corner.includes('l') ? -1 : 1;
   const sy = corner.includes('t') ? -1 : 1;
   const onBoard = isBoard();
-  // A sticky group's member scales the whole group about its bounding box (Ctrl: just this tile,
-  // mirroring Ctrl-drag). Text members scale their box too and re-wrap.
+  /* DISABLED (2026-10-07): only a sticky group scaled together; a lassoed selection resized one tile
   const groupScale = onBoard && !modKey(e) && !tile.freeAspect && tile.group && tile.group.sticky
     ? [...tile.group.members].filter((m) => m.board) : null;
+  */
+  // Pulling a corner scales everything that is selected with this tile, and the whole of any
+  // sticky group involved, as one object about their bounding box (Ctrl: just this tile, mirroring
+  // Ctrl-drag). A sticky group scales whole even with nothing selected. Unlike a move, selected
+  // members of a non-sticky group come too. Text members scale their box and re-wrap; a text
+  // tile's own handle only ever sets its width. Rule in lib/select.js.
+  const groupScale = onBoard && !tile.freeAspect ? Select.dragSet(tile, [...selection], modKey(e), { keepSelected: true }) : null;
   const members = groupScale && groupScale.length > 1 ? groupScale : null;
   const groupBB = members ? boardBounds(members) : null;
   const memberStart = members ? new Map(members.map((m) => [m, { ...m.board }])) : null;
@@ -1559,6 +1565,7 @@ function attachTileDrag(tile) {
         moving = true;
         // dragging something outside the selection makes it the selection
         if (!selection.has(tile)) selectOnly(tile);
+        /* DISABLED (2026-10-07): the rule now lives in lib/select.js (Select.dragSet), shared with corner resize
         if (single) group = [tile];
         else {
           // members of non-sticky groups move on their own; sticky groups move whole
@@ -1566,6 +1573,9 @@ function attachTileDrag(tile) {
           for (const t of [...set]) if (t.group && t.group.sticky) for (const m of t.group.members) if (m.board) set.add(m);
           group = [...set];
         }
+        */
+        // members of non-sticky groups move on their own; sticky groups move whole
+        group = Select.dragSet(tile, [...selection], single);
         movingSet = new Set(group);
         rememberStart();
         undoEntry = recordMove(tiles.filter((t) => t.board)); // all board tiles: Linked mode can push neighbours
