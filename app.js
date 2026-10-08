@@ -4276,6 +4276,19 @@ function tidyCompact() {
   finishRects(entry);
   if (scoped) setStatus(`Compacted ${list.length} selected videos`); else { fitBoard(); setStatus('Compacted the board'); }
 }
+// Rows: sizes kept, flowed into rows at the view's width; text tiles sit it out (undo = move).
+function tidyRows() {
+  const { list: targets, scoped } = tidyTargets();
+  const list = targets.filter((t) => !t.freeAspect); if (!list.length) return;
+  const entry = recordMove(list);
+  const r = gridRect(); const W = (r.width - 2 * GAP) / board.zoom;
+  const bb = boardBounds(list);
+  const origin = scoped ? { x: bb.minX, y: bb.minY } : toCanvas(r.left + GAP, r.top + GAP);
+  const rects = Arrange.rows(list.map((t) => ({ w: t.board.w, h: t.board.h })), W, LINK_GAP);
+  list.forEach((t, i) => { t.board.x = origin.x + rects[i].x; t.board.y = origin.y + rects[i].y; layoutTile(t); });
+  finishRects(entry);
+  if (scoped) setStatus(`Sorted ${list.length} selected videos into rows`); else { fitBoard(); setStatus('Sorted into rows'); }
+}
 // Group bar: Tidy = select the group and Fit it
 function tidyGroup(g) {
   if (!g) return;
@@ -4307,12 +4320,14 @@ document.getElementById('btn-tidy-menu').addEventListener('click', (e) => {
   const scoped = selection.size > 0;
   document.querySelector('#tidy-align small').textContent = scoped ? '(selection) keep sizes, straighten edges' : 'keep sizes, straighten edges';
   document.querySelector('#tidy-compact small').textContent = scoped ? '(selection) keep sizes, close the gaps' : 'keep sizes, close the gaps';
+  document.querySelector('#tidy-rows small').textContent = scoped ? '(selection) keep sizes, sort into rows' : 'keep sizes, sort into rows';
   document.querySelector('#tidy-fit small').textContent = scoped ? '(selection) same height, wrapped in place' : 'same size, fills the view';
   document.querySelector('#tidy-grid small').textContent = scoped ? '(selection) keep sizes, no gaps' : 'keep sizes, no gaps';
 });
 window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !tidyMenu.contains(e.target)) tidyList.hidden = true; });
 document.getElementById('tidy-align').addEventListener('click', () => { tidyList.hidden = true; tidyAlign(); });
 document.getElementById('tidy-compact').addEventListener('click', () => { tidyList.hidden = true; tidyCompact(); });
+document.getElementById('tidy-rows').addEventListener('click', () => { tidyList.hidden = true; tidyRows(); });
 document.getElementById('tidy-fit').addEventListener('click', () => { tidyList.hidden = true; tidyFitToView(); });
 document.getElementById('tidy-grid').addEventListener('click', () => { tidyList.hidden = true; tidyGrid(); });
 document.getElementById('btn-link').addEventListener('click', () => setLinked(!board.linked));
