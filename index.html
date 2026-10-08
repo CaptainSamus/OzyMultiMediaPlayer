@@ -20,7 +20,9 @@
     <button id="btn-sidebar" title="Sources sidebar: folders and playlists to drag from (`)">☰ Sources</button>
     <button id="btn-open" title="Open a saved .mvp session (Ctrl+O)">Open session</button>
     <button id="btn-save" title="Save session (Ctrl+S). Right-click: Save as… (Ctrl+Shift+S)">Save</button>
+    <button id="btn-save-as" title="Save this board as a new file, leaving the current one untouched (Ctrl+Shift+S)">Save as…</button>
     <!-- DISABLED (Mark, 2026-09-11): replaced by Clear board; Save right-click = Save as
+         (re-enabled as a visible button 2026-10-07 (Mark), see the button above)
     <button id="btn-save-as" title="Save session to a new file (Ctrl+Shift+S)">Save as…</button>
     -->
     <button id="btn-clear" title="Remove every video from the board (asks first)">Clear board</button>
@@ -36,10 +38,27 @@
         <button id="btn-version" disabled>Version …</button>
       </div>
     </div>
+    <div class="menu" id="optimize-menu">
+      <button id="btn-optimize" title="Make a heavy scene lighter: pause what is off screen, play at a lower resolution, see what the scene costs">Optimize ▾</button>
+      <div class="menu-list" id="opt-list" hidden>
+        <label class="menu-check" title="A video scrolled out of view stops decoding and resumes when it comes back"><input type="checkbox" id="opt-offscreen"> Pause offscreen videos</label>
+        <label class="menu-check" title="What this scene costs: Ozy against everything else on the machine, and each video"><input type="checkbox" id="opt-load"> Show load viewer (pop-out)</label>
+        <div class="menu-title">Playback quality <small>local videos; each tile's ⚙ can override</small></div>
+        <label class="menu-check"><input type="radio" name="opt-quality" value="full"> Full</label>
+        <label class="menu-check"><input type="radio" name="opt-quality" value="half"> ½ resolution</label>
+        <label class="menu-check"><input type="radio" name="opt-quality" value="quarter"> ¼ resolution</label>
+        <div class="menu-title">Cache <small id="opt-cache-line">…</small></div>
+        <label class="menu-check" title="Playable and smaller copies are deleted, least recently used first, once they pass this size">Cap <input type="number" id="opt-cache-cap" min="512" step="512" style="width:7em"> MB</label>
+        <button id="opt-cache-folder" title="Where playable and smaller copies are kept. Existing files are not moved.">Change folder…</button>
+        <button id="opt-cache-clear" title="Delete every cached copy, thumbnail and decoded frame">Clear cache…</button>
+      </div>
+    </div>
+    <button id="btn-load" title="Load strip: live bars for memory and CPU, Ozy against everything else (resize by dragging its top edge)">Load</button>
     <span class="sep"></span>
     <button id="btn-play-all" title="Play every video (Space)">Play all</button>
     <button id="btn-pause-all" title="Pause every video (Space)">Pause all</button>
     <button id="hover-play" title="Hover play: videos play only while the mouse is over them">Hover play</button>
+    <button id="ez-play" title="EZ play: click anywhere on a video to play or pause it (the controls still work). For YouTube tiles the click lands on Ozy, so the embed's own controls are off while this is on.">EZ play</button>
     <!-- DISABLED (Mark, 2026-09-11): Mute all + Unmute all merged into one toggle; Loop all took the freed slot
     <button id="btn-mute-all" title="Mute every video">Mute all</button>
     <button id="btn-unmute-all" title="Unmute every video">Unmute all</button>
@@ -67,8 +86,14 @@
     <div class="menu board-only" id="tidy-menu">
       <button id="btn-tidy-menu" title="Arrange the board">Tidy ▾</button>
       <div class="menu-list" hidden>
-        <button id="tidy-fit" title="Every tile the same height, as big as fits in the current view (Ctrl+Z undoes)">Fit to view <small>same size, fills the view</small></button>
+        <button id="tidy-pack" title="Close the gaps: every video keeps its place and may grow or shrink a little so neighbours meet edge to edge (Ctrl+Z undoes)">Pack <small>close gaps, sizes within the limit below</small></button>
+        <button id="tidy-justify" title="Keep each row's videos together and scale the row to fill the width edge to edge, within the resize limit (Ctrl+Z undoes)">Justify <small>rows filled edge to edge</small></button>
+        <button id="tidy-align" title="Line up edges that are nearly lined up and make gaps even. Nothing changes size and nothing moves far (Ctrl+Z undoes)">Align <small>keep sizes, straighten edges</small></button>
+        <button id="tidy-compact" title="Keep every size and the rough arrangement; slide everything up and left until it sits one gap apart (Ctrl+Z undoes)">Compact <small>keep sizes, close the gaps</small></button>
+        <button id="tidy-rows" title="Keep every size and sort into rows across the view with even gaps (Ctrl+Z undoes)">Rows <small>keep sizes, sort into rows</small></button>
         <button id="tidy-grid" title="Keep sizes and pack edge to edge into a rough square (Ctrl+Z undoes). Linked spaces them out again on the next drag.">Grid <small>keep sizes, no gaps</small></button>
+        <button id="tidy-fit" title="Every tile the same height, as big as fits in the current view (Ctrl+Z undoes)">Fit to view <small>same size, fills the view</small></button>
+        <label class="menu-check" title="How much Pack and Justify may resize a video">Resize up to <select id="tidy-slack"><option value="0">0 %</option><option value="0.1">10 %</option><option value="0.25">25 %</option><option value="0.5">50 %</option></select></label>
       </div>
     </div>
     <button id="btn-link" class="board-only" title="Linked: when you move or resize a video, its neighbours slide out of the way so nothing overlaps (Shift+L). Off: videos can overlap freely.">🔗 Linked</button>
@@ -147,7 +172,8 @@
     </select>
     <span class="sep"></span>
     <button class="gb-sync" title="Sync: members share one timeline and play, pause, scrub and step together">⛓ Sync</button>
-    <button class="gb-sticky board-only" title="Sticky: dragging one member moves the whole group (Ctrl-drag moves one)">📌 Sticky</button>
+    <button class="gb-sticky board-only" title="Sticky: grabbing one member moves or scales the whole group even when nothing is selected (Ctrl: just that one). A lasso selection always moves and scales together. Alt-drag a member over another member to swap their places.">📌 Sticky</button>
+    <button class="gb-tidy board-only" title="Tidy this group: every member the same height, wrapped where the group sits (Ctrl+Z undoes)">Tidy</button>
     <label class="gb-loop-wrap" title="Loop mode for this group">Loop
       <select class="gb-loop">
         <option value="off">Off</option>
@@ -161,6 +187,19 @@
     <button class="gb-ungroup" title="Ungroup (Ctrl+Shift+G)">Ungroup</button>
   </div>
 
+  <div id="load-panel" hidden>
+    <div class="lp-head"><span>Load</span><span class="lp-sum"></span><span class="spacer"></span><button class="lp-close" title="Hide the pop-out (Optimize ▾ shows it again)">✕</button></div>
+    <table class="lp-table"><thead><tr><th>Video</th><th>Source</th><th>Tier</th><th>State</th><th>Dropped</th><th>≈ Memory</th></tr></thead><tbody></tbody></table>
+    <div class="lp-note">Ozy = this app's processes. Everything else = the rest of the machine, as one number. GPU is Ozy's GPU process only. ≈ MB is an estimate from resolution; a paused or offscreen video costs little. A copy of a video costs what the original does while it plays.</div>
+  </div>
+  <div id="load-strip" hidden>
+    <div class="ls-grip" title="Drag to resize"></div>
+    <div class="ls-row"><span class="ls-label">Memory</span><div class="ls-bar ls-mem"><span data-key="ozy"></span><span data-key="other"></span><span data-key="free"></span></div><span class="ls-text ls-mem-text">…</span></div>
+    <div class="ls-row"><span class="ls-label">CPU</span><div class="ls-bar ls-cpu"><span data-key="ozy"></span><span data-key="other"></span><span data-key="idle"></span></div><span class="ls-text ls-cpu-text">…</span></div>
+    <div class="ls-row" title="The whole machine's graphics card, as its driver reports it (NVIDIA only): how busy it is and how much video memory is in use. Ozy's figure is its own GPU process."><span class="ls-label">GPU</span><div class="ls-bar ls-gpu"><span data-key="used"></span><span data-key="free"></span></div><span class="ls-text ls-gpu-text">…</span></div>
+    <div class="ls-legend"><i class="ozy"></i> Ozy <i class="other"></i> Everything else <i class="free"></i> Free <span class="spacer"></span><button class="ls-videos" title="Show each video's cost">Videos ▾</button><button class="ls-close" title="Hide (Load button shows it again)">✕</button></div>
+    <div class="ls-table" hidden><table class="lp-table"><thead><tr><th>Video</th><th>Source</th><th>Tier</th><th>State</th><th>Dropped</th><th>≈ Memory</th></tr></thead><tbody></tbody></table></div>
+  </div>
   <div id="timeline" hidden>
     <div class="tl-head">
       <button class="tl-grip" title="Expand / collapse (T). Drag the bar up or down to resize.">▴</button>
@@ -230,6 +269,7 @@
           <button class="remove" title="Remove this video">✕</button>
           <span class="group-swatch" hidden></span>
           <span class="name"></span>
+          <span class="q-badge" hidden title="Playback quality (⚙ to change)"></span>
           <button class="fullscreen" title="Fullscreen (double-click the picture also works; Esc leaves)">⛶</button>
         </div>
         <div class="vol-zone" title="Volume: click or drag anywhere on the bar. Mouse wheel and ↑/↓ work too.">
@@ -409,6 +449,14 @@
   <script src="lib/hoverplay.js"></script>
   <script src="lib/scrub.js"></script>
   <script src="lib/dragstate.js"></script>
+  <script src="lib/visibility.js"></script>
+  <script src="lib/proxy.js"></script>
+  <script src="lib/cachepolicy.js"></script>
+  <script src="lib/loadstats.js"></script>
+  <script src="lib/select.js"></script>
+  <script src="lib/clickguard.js"></script>
+  <script src="lib/snap.js"></script>
+  <script src="lib/swap.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

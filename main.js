@@ -121,9 +121,13 @@ function urlToFilePath(url) {
 // Serves localvideo:// — every video, picture and cached frame. It runs on the main process, so a
 // tile whose file sits on a share that no longer answers must not be able to block it: the stat is
 // guarded like every other user-supplied path, and an unreachable file simply 404s.
+// when each cached video copy was last asked for: the cache trim leaves alone what a tile is reading
+const proxyServedAt = new Map();
+const PROXY_FILE = /[\\/][0-9a-f]{40}(-half|-quarter)?\.mp4$/;
 async function handleVideoRequest(request) {
   let filePath;
   try { filePath = urlToFilePath(request.url); } catch { return new Response('Bad URL', { status: 400 }); }
+  if (PROXY_FILE.test(filePath)) proxyServedAt.set(path.normalize(filePath).toLowerCase(), Date.now());
 
   const stat = await guardedStat(filePath);
   if (!stat) return new Response('Not found', { status: 404 });
@@ -436,9 +440,14 @@ const ProxyCache = require('./lib/proxy');
 const Sequence = require('./lib/sequence');
 const ExrHeader = require('./lib/exrheader');
 
+/* DISABLED (2026-10-07): the cache folder can be moved (Optimize ▾ → Change folder…)
 const proxyDir = () => path.join(app.getPath('userData'), 'proxies');
-function proxyPathFor(filePath, stat) {
-  return path.join(proxyDir(), ProxyCache.name(filePath, stat.size, stat.mtimeMs));
+*/
+// settings.cacheDir (null = the app's own data folder); always a `proxies` folder inside it, so
+// clearing the cache can never remove anything else from a folder the user picked
+const proxyDir = () => { const s = readSettings(); return s.cacheDir ? path.join(s.cacheDir, 'proxies') : path.join(app.getPath('userData'), 'proxies'); };
+function proxyPathFor(filePath, stat, tier = 'full') {
+  return path.join(proxyDir(), ProxyCache.name(filePath, stat.size, stat.mtimeMs, tier));
 }
 let toolsAvailable = null;
 function checkTools() {
@@ -450,11 +459,13 @@ function checkTools() {
 }
 
 ipcMain.handle('probe', async (_e, filePath) => {
-  const base = { codec: null, width: null, height: null, fps: null, duration: null, mime: null, proxy: null, available: checkTools() };
+  const base = { codec: null, width: null, height: null, fps: null, duration: null, mime: null, proxy: null, tiers: { half: null, quarter: null }, available: checkTools() };
   const stat = await guardedStat(filePath); // may be on a share that no longer answers
   if (!stat) return base;
   const proxy = proxyPathFor(filePath, stat);
   if (fs.existsSync(proxy)) base.proxy = proxy; // the proxy cache is ours, always local
+  // smaller copies already made for the playback tiers (Optimize menu / a tile's own quality)
+  for (const tier of ['half', 'quarter']) { const p = proxyPathFor(filePath, stat, tier); if (fs.existsSync(p)) base.tiers[tier] = p; }
   if (!base.available) return base;
   const json = await new Promise((resolve) => {
     execFile(binPath('ffprobe'), [
@@ -470,57 +481,98 @@ ipcMain.handle('probe', async (_e, filePath) => {
   return { ...base, ...Codecs.parseProbe(json, path.extname(filePath).toLowerCase()) };
 });
 
-// One ffmpeg at a time; others wait their turn.
-const proxyJobs = new Map(); // filePath -> { child, reject }
+// One ffmpeg at a time; others wait their turn. A job is one file at one tier ('full' is the
+// playable copy; 'half' / 'quarter' the smaller playback copies).
+const proxyJobs = new Map(); // `${filePath}|${tier}` -> { child, reject }: the one that is running
+const proxyPending = new Map(); // same key -> its promise, waiting or running; asking again joins it
+const proxyCancelled = new Set(); // keys cancelled while still waiting their turn
 let proxyQueue = Promise.resolve();
 
-ipcMain.handle('make-proxy', (e, filePath) => {
+ipcMain.handle('make-proxy', (e, filePath, tier = 'full') => {
+  tier = ProxyCache.divisor(tier) === 1 ? 'full' : tier;
+  const key = ProxyCache.jobKey(filePath, tier);
+  const what = tier === 'full' ? 'playable copy' : `${tier}-resolution copy`;
+  proxyCancelled.delete(key); // wanted again before its turn came
   const send = (...args) => { if (!e.sender.isDestroyed()) e.sender.send('proxy-progress', ...args); };
   // The checks run before the promise is made: an async executor would swallow a throw (mkdirSync
   // can fail) and the job would never settle, wedging the queue behind it.
   const run = async () => {
+    if (proxyCancelled.delete(key)) throw new Error('Cancelled');
     if (!checkTools()) throw new Error('ffmpeg not found');
     const stat = await guardedStat(filePath);
     if (!stat) throw new Error('File not found');
     fs.mkdirSync(proxyDir(), { recursive: true });
-    const out = proxyPathFor(filePath, stat);
+    const out = proxyPathFor(filePath, stat, tier);
     if (fs.existsSync(out)) return { proxy: out };
     const tmp = out + '.part.mp4';
     return new Promise((resolve, reject) => {
-      const child = spawn(binPath('ffmpeg'), ProxyCache.args(filePath, tmp), { windowsHide: true });
-      proxyJobs.set(filePath, { child, reject });
+      const child = spawn(binPath('ffmpeg'), ProxyCache.args(filePath, tmp, tier), { windowsHide: true });
+      proxyJobs.set(key, { child, reject });
       let duration = 0, tail = '';
       child.stderr.on('data', (buf) => {
         const s = buf.toString();
         tail = (tail + s).slice(-2000);
         if (!duration) { const m = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(s); if (m) duration = +m[1] * 3600 + +m[2] * 60 + +m[3]; }
         const t = ProxyCache.parseTime(s);
-        if (t !== null && duration) send(filePath, Math.min(0.99, t / duration));
+        if (t !== null && duration) send(filePath, Math.min(0.99, t / duration), tier);
       });
       child.on('close', (code) => {
-        proxyJobs.delete(filePath);
+        proxyJobs.delete(key);
         if (code === 0) {
-          try { fs.renameSync(tmp, out); } catch (err) { logError('proxy rename', err, { tmp, out }); return reject(new Error('Could not save playable copy: ' + err.message)); }
-          send(filePath, 1);
-          log('info', 'playable copy made', { path: filePath, out });
+          try { fs.renameSync(tmp, out); } catch (err) { logError('proxy rename', err, { tmp, out }); return reject(new Error(`Could not save ${what}: ` + err.message)); }
+          send(filePath, 1, tier);
+          log('info', `${what} made`, { path: filePath, tier, out });
           resolve({ proxy: out });
+          trimProxyCache(out);
         } else {
           try { fs.unlinkSync(tmp); } catch {}
-          if (code !== null) logTool('ffmpeg (playable copy)', ProxyCache.args(filePath, tmp), { code }, tail);
-          else log('info', 'playable copy cancelled', { path: filePath });
+          if (code !== null) logTool(`ffmpeg (${what})`, ProxyCache.args(filePath, tmp, tier), { code }, tail);
+          else log('info', `${what} cancelled`, { path: filePath, tier });
           reject(new Error(code === null ? 'Cancelled' : 'ffmpeg failed:\n' + tail.split('\n').slice(-4).join('\n')));
         }
       });
     });
   };
-  const p = proxyQueue.then(run, run);
-  proxyQueue = p.catch(() => {});
-  return p;
+  // asked again while this file and tier is waiting or encoding: the same job, never a second ffmpeg
+  return ProxyCache.once(proxyPending, key, () => {
+    const p = proxyQueue.then(run, run);
+    proxyQueue = p.catch(() => {});
+    return p;
+  });
 });
 
-ipcMain.on('cancel-proxy', (_e, filePath) => {
-  const job = proxyJobs.get(filePath);
+// After every finished copy: back under settings.cacheCapMB, least recently used first (rules in
+// lib/cachepolicy.js). The copy just made and anything a tile asked for in the last ten minutes
+// are left alone; so is whatever can't be deleted. Windows updates a file's access time lazily, so
+// "used" is the newest of access time, modified time and when we last served it.
+const CachePolicy = require('./lib/cachepolicy');
+const PROXY_BUSY_MS = 10 * 60 * 1000;
+function trimProxyCache(justMade) {
+  try {
+    const dir = proxyDir();
+    const now = Date.now();
+    const keep = justMade ? path.normalize(justMade).toLowerCase() : null;
+    const files = [];
+    for (const n of fs.readdirSync(dir)) {
+      if (!n.endsWith('.mp4') || n.endsWith('.part.mp4')) continue;
+      const p = path.join(dir, n);
+      let st; try { st = fs.statSync(p); } catch { continue; }
+      const k = path.normalize(p).toLowerCase();
+      const served = proxyServedAt.get(k) || 0;
+      files.push({ path: p, size: st.size, atimeMs: Math.max(st.atimeMs, st.mtimeMs, served), busy: k === keep || now - served < PROXY_BUSY_MS });
+    }
+    const cap = readSettings().cacheCapMB * 1048576;
+    for (const p of CachePolicy.evict(files, cap)) {
+      try { fs.unlinkSync(p); proxyServedAt.delete(path.normalize(p).toLowerCase()); log('info', 'cache trimmed', { path: p }); } catch {} // in use: next time
+    }
+  } catch (err) { logError('cache trim', err); }
+}
+
+ipcMain.on('cancel-proxy', (_e, filePath, tier = 'full') => {
+  const key = ProxyCache.jobKey(filePath, tier);
+  const job = proxyJobs.get(key);
   if (job) job.child.kill();
+  else if (proxyPending.has(key)) proxyCancelled.add(key); // still waiting its turn: dropped when it gets there
 });
 
 // Cache = playable copies + thumbnails + decoded sequence frames (frames/ has a folder per sequence look).
@@ -538,10 +590,60 @@ function dirUsage(dir) {
 ipcMain.handle('cache-info', () => {
   let bytes = 0, files = 0;
   for (const dir of [proxyDir(), thumbDir(), framesDir()]) { const u = dirUsage(dir); bytes += u.bytes; files += u.files; }
-  return { bytes, files };
+  // the cap covers the video copies only (thumbnails and decoded sequence frames are not trimmed)
+  return { bytes, files, proxyBytes: dirUsage(proxyDir()).bytes, capMB: readSettings().cacheCapMB, dir: proxyDir() };
+});
+// ---- load viewer ----
+// Totals only: Ozy's own processes from app.getAppMetrics(), the machine from os. No per-program detail.
+const os = require('os');
+const LoadStats = require('./lib/loadstats');
+let lastCpus = null;
+// GPU: whole-machine busy % and video memory from the driver's own tool when it exists (NVIDIA
+// only; a read-only query, nothing is ever set). Windows gives no per-process video memory, so
+// Ozy's share is the GPU-process working set shown beside it. The tool runs on its own, at most
+// once a second and never two at a time; the load tick only ever reads the last good sample, so
+// a slow or hung nvidia-smi (killed after 400 ms) cannot hold the tick up.
+const nvidiaSmi = (() => {
+  const cands = process.platform === 'win32' ? [path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'nvidia-smi.exe')] : ['/usr/bin/nvidia-smi'];
+  return cands.find((p) => { try { return fs.existsSync(p); } catch { return false; } }) || null;
+})();
+let gpuLast = null, gpuAt = 0, gpuBusy = false, gpuAsked = 0;
+function sampleGpu() {
+  const now = Date.now();
+  if (!nvidiaSmi || gpuBusy || now - gpuAsked < 900) return;
+  gpuBusy = true; gpuAsked = now;
+  try {
+    execFile(nvidiaSmi, ['--query-gpu=utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'], { windowsHide: true, timeout: 400 }, (err, stdout) => {
+      gpuBusy = false;
+      if (!err) { const g = LoadStats.parseNvidiaSmi(stdout); if (g) { gpuLast = g; gpuAt = Date.now(); } }
+    });
+  } catch { gpuBusy = false; }
+}
+ipcMain.handle('load-stats', () => {
+  sampleGpu(); // fills gpuLast for a later tick
+  const cpus = os.cpus();
+  const sysCpu = LoadStats.cpuPercent(lastCpus, cpus);
+  lastCpus = cpus;
+  let appCpu = 0, appMemMB = 0, gpuMemMB = 0;
+  for (const m of app.getAppMetrics()) {
+    const mb = (m.memory && m.memory.workingSetSize ? m.memory.workingSetSize : 0) / 1024;
+    appCpu += m.cpu ? m.cpu.percentCPUUsage : 0;
+    if (m.type === 'GPU') gpuMemMB += mb; else appMemMB += mb;
+  }
+  // percentCPUUsage is already a share of the whole machine (Electron divides by the core count),
+  // so the processes just add up. One decimal: on a many-core machine a few videos are 1-2 %.
+  appCpu = Math.round(appCpu * 10) / 10;
+  const totalMemMB = os.totalmem() / 1048576, usedMemMB = (os.totalmem() - os.freemem()) / 1048576;
+  return { appCpu, appMemMB: Math.round(appMemMB + gpuMemMB), gpuMemMB: Math.round(gpuMemMB), sysCpu, usedMemMB: Math.round(usedMemMB), totalMemMB: Math.round(totalMemMB), gpu: LoadStats.freshGpu(gpuLast, gpuAt, Date.now()) };
+});
+
+ipcMain.handle('pick-cache-folder', async () => {
+  const r = await dialog.showOpenDialog(win, { title: 'Cache folder', properties: ['openDirectory', 'createDirectory'] });
+  return r.canceled || !r.filePaths[0] ? null : r.filePaths[0];
 });
 ipcMain.handle('clear-cache', () => {
   for (const job of proxyJobs.values()) job.child.kill();
+  for (const key of proxyPending.keys()) if (!proxyJobs.has(key)) proxyCancelled.add(key); // and the ones still waiting
   cancelAllFrames();
   for (const dir of [proxyDir(), thumbDir(), framesDir()]) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
 });
