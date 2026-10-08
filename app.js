@@ -4939,9 +4939,13 @@ async function refreshLoad() {
   // the first sample has nothing to compare the machine's CPU against yet
   const pct = (v) => (v < 10 ? Math.round(v * 10) / 10 : Math.round(v)) + '%';
   const otherCpu = !s || raw.sysCpu === null ? '…' : pct(s.other.cpu);
+  // the whole machine's GPU, from nvidia-smi when the machine has it (null otherwise, or while a
+  // sample is on its way); Ozy's own figure is its GPU process's memory, a different measure
+  const gpu = s && raw.gpu ? raw.gpu : null;
   if (!loadPanel.hidden) {
     loadPanel.querySelector('.lp-sum').textContent = s
       ? `Ozy ${pct(s.ozy.cpu)} CPU · ${LoadStats.fmt(s.ozy.memMB)} (${LoadStats.fmt(s.ozy.gpuMemMB)} GPU) · Everything else ${otherCpu} CPU · ${LoadStats.fmt(s.other.memMB)} · ${LoadStats.fmt(s.freeMB)} free`
+        + (gpu ? ` · GPU ${gpu.busy}% busy, ${LoadStats.fmt(gpu.usedMB)} of ${LoadStats.fmt(gpu.totalMB)}` : '')
       : 'unavailable';
     fillLoadRows(loadPanel.querySelector('tbody'));
   }
@@ -4951,6 +4955,10 @@ async function refreshLoad() {
     for (const seg of b.cpu) loadStrip.querySelector(`.ls-cpu [data-key="${seg.key}"]`).style.width = seg.pct + '%';
     loadStrip.querySelector('.ls-mem-text').textContent = s ? `Ozy ${LoadStats.fmt(s.ozy.memMB)} · else ${LoadStats.fmt(s.other.memMB)} · free ${LoadStats.fmt(s.freeMB)} of ${LoadStats.fmt(raw.totalMemMB)}` : 'unavailable';
     loadStrip.querySelector('.ls-cpu-text').textContent = s ? `Ozy ${pct(s.ozy.cpu)} · else ${otherCpu}` : 'unavailable';
+    for (const seg of LoadStats.gpuBar(gpu)) loadStrip.querySelector(`.ls-gpu [data-key="${seg.key}"]`).style.width = seg.pct + '%';
+    loadStrip.querySelector('.ls-gpu-text').textContent = gpu
+      ? `${gpu.busy}% busy · ${LoadStats.fmt(gpu.usedMB)} of ${LoadStats.fmt(gpu.totalMB)} · Ozy ${LoadStats.fmt(s.ozy.gpuMemMB)}`
+      : (s ? `unavailable here · Ozy ${LoadStats.fmt(s.ozy.gpuMemMB)}` : 'unavailable');
     const tbl = loadStrip.querySelector('.ls-table');
     if (!tbl.hidden) fillLoadRows(tbl.querySelector('tbody'));
   }
