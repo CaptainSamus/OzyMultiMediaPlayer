@@ -254,6 +254,19 @@ body.tile-dragging .tile.dragging, body.tile-dragging .tile.swapping { pointer-e
 }
 #empty .big { font-size: 26px; color: var(--text); }
 #empty.hidden { display: none; }
+/* the hint lets drops through; its recent-session links still take clicks */
+#empty-recent { pointer-events: auto; font-size: 13px; }
+#empty-recent a { color: var(--text); }
+#empty-recent[hidden] { display: none; }
+.split { display: inline-flex; }
+.split button:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.split button:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 6px; margin-left: -1px; }
+#recent-list { min-width: 240px; }
+#recent-list .recent-row { display: flex; align-items: center; gap: 6px; }
+#recent-list .recent-row .recent-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#recent-list .recent-row.missing .recent-name { color: var(--muted); text-decoration: line-through; }
+#toolbar #recent-list .recent-forget { flex: 0 0 auto; color: var(--muted); padding: 2px 6px; }
+#recent-list .menu-note { padding: 5px 10px; color: var(--muted); font-size: 12px; }
 
 #drop-hint {
   position: absolute;

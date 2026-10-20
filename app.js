@@ -135,6 +135,7 @@ let appVersion = ''; // e.g. 0.2.0.3, or 0.2.0.3-dev from source
 window.api.version().then((v) => { appVersion = v || ''; updateChrome(); });
 function updateChrome() {
   emptyEl.classList.toggle('hidden', tiles.length > 0);
+  renderEmptyRecent(); // the empty-board hint lists the latest sessions
   countEl.textContent = tiles.length ? `${tiles.length} video${tiles.length === 1 ? '' : 's'}` : '';
   const name = sessionPath ? basename(sessionPath) : 'Unsaved session';
   document.title = `${name} – Ozy Multi Media Player${appVersion ? ' ' + appVersion : ''}`;
@@ -4037,12 +4038,13 @@ async function applySession(data) {
 async function saveSessionAs() {
   if (!tiles.length) { setStatus('Nothing to save – add some videos first.'); return; }
   const p = await window.api.saveSessionAs(collectSession());
-  if (p) { sessionPath = p; updateChrome(); logUi('info', 'session saved as', { path: p, tiles: tiles.length }); setStatus(`Saved ${p}`); }
+  if (p) { sessionPath = p; rememberSession(p); updateChrome(); logUi('info', 'session saved as', { path: p, tiles: tiles.length }); setStatus(`Saved ${p}`); }
 }
 
 async function saveSession() {
   if (!sessionPath) return saveSessionAs();
   await window.api.saveSessionTo(sessionPath, collectSession());
+  rememberSession(sessionPath);
   logUi('info', 'session saved', { path: sessionPath, tiles: tiles.length });
   setStatus(`Saved ${sessionPath}`);
 }
@@ -4059,12 +4061,74 @@ async function openSession(filePath) {
   try {
     const { loaded, missing } = await applySession(r.data);
     sessionPath = r.filePath;
+    rememberSession(r.filePath);
     updateChrome();
     setStatus(missing ? `Opened ${loaded} videos – ${missing} file(s) missing` : `Opened ${loaded} videos`, missing ? 10000 : 4000);
   } catch (e) {
     setStatus(`Could not open session: ${e.message}`, 8000);
   }
 }
+
+// ---------- recent sessions ----------
+// settings.recentSessions, newest first (rules in lib/recent.js): updated on open, save and save
+// as; listed under Open session ▾ and, three of them, on the empty board. A view window
+// (window.OZY_VIEW set) can't open sessions, so it shows neither.
+const RECENT_CI = navigator.platform.startsWith('Win'); // Windows paths are case-insensitive
+function rememberSession(p) {
+  if (!p || !settings) return;
+  settings.recentSessions = Recent.push(settings.recentSessions, p, Date.now(), { max: 10, caseInsensitive: RECENT_CI });
+  saveSettings();
+  renderEmptyRecent();
+}
+function forgetRecent(p) {
+  settings.recentSessions = Recent.remove(settings.recentSessions, p);
+  saveSettings();
+  renderEmptyRecent();
+}
+const recentMenu = document.getElementById('open-menu');
+const recentList = document.getElementById('recent-list');
+async function renderRecentMenu() {
+  const items = (settings && settings.recentSessions) || [];
+  // missing files are checked each time the menu opens (a share may have come back)
+  const exists = await Promise.all(items.map((e) => window.api.fileExists(e.path).catch(() => false)));
+  recentList.textContent = '';
+  if (!items.length) { const d = document.createElement('div'); d.className = 'menu-note'; d.textContent = 'No recent sessions'; recentList.appendChild(d); return; }
+  items.forEach((e, i) => {
+    const row = document.createElement('div'); row.className = 'recent-row' + (exists[i] ? '' : ' missing');
+    const b = document.createElement('button'); b.className = 'recent-name'; b.textContent = basename(e.path); b.title = e.path + (exists[i] ? '' : '\n(not found)');
+    b.addEventListener('click', () => { recentList.hidden = true; openRecent(e.path); });
+    const x = document.createElement('button'); x.className = 'recent-forget'; x.textContent = '✕'; x.title = 'Forget this one';
+    x.addEventListener('click', (ev) => { ev.stopPropagation(); forgetRecent(e.path); renderRecentMenu(); });
+    row.append(b, x); recentList.appendChild(row);
+  });
+  const clear = document.createElement('button'); clear.textContent = 'Clear list';
+  clear.addEventListener('click', () => { settings.recentSessions = []; saveSettings(); recentList.hidden = true; renderEmptyRecent(); });
+  recentList.appendChild(clear);
+}
+async function openRecent(p) {
+  if (!(await window.api.fileExists(p).catch(() => false))) { setStatus(`Not found: ${p} (✕ in Open session ▾ forgets it)`, 8000); return; }
+  await openSession(p);
+}
+function renderEmptyRecent() {
+  const el = document.getElementById('empty-recent');
+  if (!el) return;
+  let items = [];
+  // updateChrome can run before the settings binding further down exists (temporal dead zone)
+  try { items = !window.OZY_VIEW && settings && Array.isArray(settings.recentSessions) ? settings.recentSessions.slice(0, 3) : []; } catch { return; }
+  el.hidden = !items.length; el.textContent = '';
+  if (!items.length) return;
+  el.append('Recent: ');
+  items.forEach((e, i) => {
+    const a = document.createElement('a'); a.href = '#'; a.textContent = basename(e.path); a.title = e.path;
+    a.addEventListener('click', (ev) => { ev.preventDefault(); openRecent(e.path); });
+    el.appendChild(a);
+    if (i < items.length - 1) el.append(' · ');
+  });
+}
+if (!window.OZY_VIEW) {
+  document.getElementById('btn-open-recent').addEventListener('click', (e) => { e.stopPropagation(); recentList.hidden = !recentList.hidden; if (!recentList.hidden) renderRecentMenu(); });
+  window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !recentMenu.contains(e.target)) recentList.hidden = true; });
+} else document.getElementById('btn-open-recent').hidden = true;
 
 // ---------- toolbar ----------
 
@@ -4742,6 +4806,7 @@ window.api.getSettings().then((s) => {
   ezPlayBtn.classList.toggle('toggled', !!settings.ezPlay); document.body.classList.toggle('ez-play', !!settings.ezPlay);
   renderFolders();
   renderPlaylists(); // from the cache in settings.json, no refetch
+  renderEmptyRecent();
 });
 window.api.ytdlpAvailable().then((ok) => {
   document.getElementById('sb-add-playlist').disabled = !ok;

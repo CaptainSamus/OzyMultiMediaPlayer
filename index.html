@@ -18,7 +18,10 @@
     </div>
     <button id="add-text" title="Text (or double-click the board)">T</button>
     <button id="btn-sidebar" title="Sources sidebar: folders and playlists to drag from (`)">☰ Sources</button>
-    <button id="btn-open" title="Open a saved .mvp session (Ctrl+O)">Open session</button>
+    <div class="menu" id="open-menu">
+      <span class="split"><button id="btn-open" title="Open a saved .mvp session (Ctrl+O)">Open session</button><button id="btn-open-recent" title="Recent sessions">▾</button></span>
+      <div class="menu-list" id="recent-list" hidden></div>
+    </div>
     <button id="btn-save" title="Save session (Ctrl+S). Right-click: Save as… (Ctrl+Shift+S)">Save</button>
     <button id="btn-save-as" title="Save this board as a new file, leaving the current one untouched (Ctrl+Shift+S)">Save as…</button>
     <!-- DISABLED (Mark, 2026-09-11): replaced by Clear board; Save right-click = Save as
@@ -227,6 +230,7 @@
     <div class="big">Drop video files here</div>
     <div>or click <b>+ Add videos</b>. Drop a <b>.mvp</b> file to restore a saved session.</div>
     <div class="hint">Gallery keeps videos attached in rows. Board is an infinite canvas: drag videos anywhere, resize each one, lasso several to move them together, pan and zoom.</div>
+    <div id="empty-recent" hidden></div>
   </div>
 
   <div id="drop-hint">Release to add</div>
