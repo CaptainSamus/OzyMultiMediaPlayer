@@ -199,9 +199,10 @@ function refreshToolbarToggles() {
 }
 // Play state across local <video>, sequence and YouTube tiles (Twitch has no API: skipped).
 /* DISABLED (Mark, 2026-09-11): replaced by the playback adapter versions below, which also cover sequence tiles
-function playTile(t) { if (t.video) t.video.play().catch(() => {}); else if (t.yt) t.yt.play(); }
-function pauseTile(t) { if (t.video) t.video.pause(); else if (t.yt) t.yt.pause(); }
-function isPlaying(t) { return t.video ? !t.video.paused : !!(t.yt && !t.yt.paused); }
+// (a local video under the live budget goes through its tile.pb, which knows when it is a still)
+function playTile(t) { if (t.release) t.pb.play(); else if (t.video) t.video.play().catch(() => {}); else if (t.yt) t.yt.play(); }
+function pauseTile(t) { if (t.release) t.pb.pause(); else if (t.video) t.video.pause(); else if (t.yt) t.yt.pause(); }
+function isPlaying(t) { return t.release ? !t.pb.paused : t.video ? !t.video.paused : !!(t.yt && !t.yt.paused); }
 */
 function playTile(t) { if (t.pb) t.pb.play(); }
 function pauseTile(t) { if (t.pb) t.pb.pause(); }
@@ -227,6 +228,35 @@ function videoPlayback(video) {
     get paused() { return video.paused; },
     play() { video.play().catch(() => {}); }, pause() { video.pause(); },
     get rate() { return video.playbackRate; }, set rate(r) { video.playbackRate = r; },
+  };
+}
+// A local video under the live budget (lib/lod.js): while it is a still its <video> has no source,
+// so time, play state, rate and length come from `tile.shadow`, a clock that keeps running as
+// though it were playing. Everything else in the app reads tile.pb, so a still stays on the
+// board's time and restores where it should. Live, every call goes straight to the element.
+// (a still released before its metadata came in takes its length from the probe)
+const shadowDuration = (tile) => tile.shadow.duration || (tile.info && tile.info.duration) || 0;
+function shadowNow(tile) {
+  const s = tile.shadow, d = shadowDuration(tile);
+  let t = s.time + (s.playing ? (performance.now() - s.at) / 1000 * s.rate : 0);
+  if (d > 0) t = tile.loop ? t % d : Math.min(t, d);
+  return t;
+}
+// a still that has played to the end of a file that does not loop has stopped, as the video would
+const shadowEnded = (tile) => !tile.loop && shadowDuration(tile) > 0 && shadowNow(tile) >= shadowDuration(tile);
+function budgetedPlayback(tile, inner) {
+  const touch = () => { const s = tile.shadow; s.time = shadowNow(tile); s.at = performance.now(); };
+  return {
+    web: false, kind: 'video', settling: false, budgeted: true,
+    get time() { return tile.shadow ? shadowNow(tile) : inner.time; },
+    set time(t) { if (tile.shadow) { tile.shadow.time = t; tile.shadow.at = performance.now(); } else inner.time = t; },
+    scrub(t) { if (tile.shadow) { tile.shadow.time = t; tile.shadow.at = performance.now(); } else inner.scrub(t); },
+    get duration() { return tile.shadow ? shadowDuration(tile) : inner.duration; },
+    get paused() { return tile.shadow ? !tile.shadow.playing || shadowEnded(tile) : inner.paused; },
+    play() { if (tile.shadow) { if (shadowEnded(tile)) tile.shadow.time = 0; touch(); tile.shadow.playing = true; if (tile.onShadow) tile.onShadow(); } else inner.play(); },
+    pause() { if (tile.shadow) { touch(); tile.shadow.playing = false; if (tile.onShadow) tile.onShadow(); } else inner.pause(); },
+    get rate() { return tile.shadow ? tile.shadow.rate : inner.rate; },
+    set rate(r) { if (tile.shadow) { touch(); tile.shadow.rate = r; } else inner.rate = r; },
   };
 }
 // YouTube reports its time about 4x a second; between reports the time is extrapolated while
@@ -346,7 +376,7 @@ function layoutTile(t) {
 
 // offscreen pause (the block after hover play) re-checks shortly after anything moves the view
 let offscreenTimer = null;
-function scheduleOffscreen() { clearTimeout(offscreenTimer); offscreenTimer = setTimeout(applyOffscreen, 50); }
+function scheduleOffscreen() { clearTimeout(offscreenTimer); offscreenTimer = setTimeout(() => { applyLiveBudget(); applyOffscreen(); }, 50); }
 
 function applyBoardView() {
   canvas.style.transform = `translate(${board.panX}px, ${board.panY}px) scale(${board.zoom})`;
@@ -917,6 +947,7 @@ const cmpQ = (s) => cmp.el.querySelector(s);
 function openCompare(a, b) {
   hpReset(); // the compare view owns playback while it is open
   cmp.a = a; cmp.b = b; cmp.mode = 'wipe'; cmp.wipe = 50;
+  setTimeout(applyLiveBudget, 0); // what the compare view shows must be live (stills come back)
   cmp.el.classList.remove('flip', 'show-a');
   cmp.el.style.setProperty('--wipe', '50%');
   for (const x of cmpQ('.cmp-mode').querySelectorAll('button')) x.classList.toggle('active', x.dataset.cmp === 'wipe');
@@ -1985,6 +2016,7 @@ function addVideo(filePath, state = {}) {
     tile.board = { x: Number(sb.x), y: Number(sb.y), w: Number(sb.w), h: Number(sb.h) };
   }
   tiles.push(tile);
+  tile.pb = budgetedPlayback(tile, tile.pb); // reads the still's clock while the source is released
   tile.info = null; tile.proxy = null; tile.fps = null;
   tile.fpsOverride = Number(state.fpsOverride) > 0 ? Number(state.fpsOverride) : null; // ⚙: frame step / timecode only
   tile.quality = Session.tileQuality(state);      // 'scene' | 'full' | 'half' | 'quarter'
@@ -2011,12 +2043,13 @@ function addVideo(filePath, state = {}) {
   const wantTime = Number(state.currentTime) > 0 ? Number(state.currentTime) : 0;
   const wantPlaying = state.paused === false;
 
+  // (through tile.pb: a still has no source, its time and length live in tile.shadow)
   const updateTimeLabel = () => {
-    timeEl.textContent = Frames.format(video.currentTime, video.duration, effectiveFps(tile), layout.timeDisplay);
+    timeEl.textContent = Frames.format(tile.pb.time, tile.pb.duration, effectiveFps(tile), layout.timeDisplay);
   };
   const updateSeek = () => {
-    if (tile.scrubbing || !video.duration) return;
-    const frac = video.currentTime / video.duration;
+    if (tile.scrubbing || !tile.pb.duration) return;
+    const frac = tile.pb.time / tile.pb.duration;
     const v = Math.round(frac * 10000);
     if (Number(seek.value) !== v) {
       seek.value = String(v);
@@ -2024,8 +2057,9 @@ function addVideo(filePath, state = {}) {
     }
   };
   const updatePlayBtn = () => {
-    playBtn.textContent = video.paused ? '▶' : '❚❚';
-    el.classList.toggle('paused-badge', video.paused);
+    playBtn.textContent = tile.pb.paused ? '▶' : '❚❚';
+    el.classList.toggle('paused-badge', tile.pb.paused);
+    el.classList.toggle('playing-still', !tile.live && !tile.pb.paused);
   };
   const updateMuteBtn = () => {
     muteBtn.textContent = video.muted || tile.volume === 0 ? '🔇' : '🔊';
@@ -2054,7 +2088,11 @@ function addVideo(filePath, state = {}) {
     seekTo(Frames.step(video.currentTime, effectiveFps(tile) || Frames.DEFAULT_FPS, dir));
   };
   // play/pause from the user (picture click, ▶ button, K); synced members follow
+  // through tile.pb so a still (or one on its way back) plays on its own clock until it is live
+  tile.togglePlay = () => { if (tile.pb.paused) tile.pb.play(); else tile.pb.pause(); broadcast(tile, tile.pb.paused ? 'pause' : 'play'); };
+  /* DISABLED (2026-10-20): read the <video>, which has no source while the tile is a still
   tile.togglePlay = () => { togglePlay(video); broadcast(tile, video.paused ? 'pause' : 'play'); };
+  */
   tile.stepFrame = stepFrame;
   el.querySelector('.fstep-back').addEventListener('click', () => stepFrame(-1));
   el.querySelector('.fstep-fwd').addEventListener('click', () => stepFrame(1));
@@ -2110,6 +2148,67 @@ function addVideo(filePath, state = {}) {
     if (!swapState && (video.readyState > 0 || video.error)) swapState = { time: video.currentTime, paused: video.paused, rate: video.playbackRate };
     tile.setSource(url);
   };
+
+  // ----- live budget: a still is the last frame on a canvas, the <video> drops its source -----
+  // applyLiveBudget() decides which tiles a window decodes (lib/lod.js). Releasing copies the frame
+  // to a canvas, starts the shadow clock (tile.pb reads it) and frees the decoder. Restoring loads
+  // the source again and lands at the shadow's time and play state through the same swap restore
+  // a quality change uses; the still stays up until the video can draw. A source that changes
+  // while the tile is a still (a tier or a playable copy that just became ready) is remembered.
+  const still = el.querySelector('canvas.still');
+  tile.live = true;
+  tile.shadow = null;
+  tile.releasedSrc = null;
+  const setSourceNow = tile.setSource;
+  tile.setSource = (url) => { if (!tile.live) { tile.releasedSrc = url; return; } setSourceNow(url); };
+  tile.onShadow = () => { updatePlayBtn(); updateTimeLabel(); updateSeek(); if (tile.group && tile.group === active) renderGroupBar(); };
+  tile.release = () => {
+    if (!tile.live) return;
+    const src = video.getAttribute('src');
+    if (!src || video.error) return; // nothing loaded (an unplayable file waiting for a copy): nothing to free
+    if (!tile.shadow) {
+      try {
+        if (video.videoWidth && video.readyState >= 2) { still.width = video.videoWidth; still.height = video.videoHeight; still.getContext('2d').drawImage(video, 0, 0); }
+      } catch {}
+      tile.shadow = { time: video.currentTime || 0, rate: video.playbackRate || 1, playing: !video.paused, duration: video.duration || 0, at: performance.now() };
+    }
+    tile.releasedSrc = src;
+    tile.live = false;
+    swapState = null; // a quality swap that had not landed yet: the shadow has the state now
+    video.pause(); video.removeAttribute('src'); video.load();
+    still.hidden = false; el.classList.add('still');
+    updatePlayBtn();
+  };
+  tile.restore = () => {
+    if (tile.live) return;
+    tile.live = true;
+    if (!tile.releasedSrc) { tile.shadow = null; still.hidden = true; el.classList.remove('still', 'playing-still'); return; }
+    const url = tile.releasedSrc; tile.releasedSrc = null;
+    // Until the metadata is in, tile.pb keeps answering from the shadow (a play or a seek made
+    // meanwhile lands there); then the element takes over at the shadow's time, rate and play
+    // state. This listener is added after the first-load and swap restores, so it has the last
+    // word. The still stays up until the video has a frame to draw.
+    const landed = () => {
+      video.removeEventListener('loadedmetadata', landed);
+      if (!tile.live || !tile.shadow) return; // released again before it got here
+      const s = tile.shadow, at = shadowNow(tile), playing = s.playing && !shadowEnded(tile);
+      tile.shadow = null;
+      video.currentTime = isFinite(video.duration) ? Math.min(at, video.duration) : at;
+      video.playbackRate = s.rate;
+      if (playing) video.play().catch(() => {}); else video.pause();
+      updatePlayBtn(); updateTimeLabel(); updateSeek();
+    };
+    const shown = () => {
+      video.removeEventListener('loadeddata', shown);
+      if (!tile.live) return;
+      still.hidden = true; el.classList.remove('still', 'playing-still');
+    };
+    video.addEventListener('loadedmetadata', landed);
+    video.addEventListener('loadeddata', shown);
+    setSourceNow(url);
+  };
+  // touching a still (its buttons, a click, a scrub) asks for it to be live for a while
+  el.addEventListener('pointerdown', () => { if (!tile.live) { tile.wantedAt = performance.now(); scheduleOffscreen(); } }, true);
   // Chromium remembers a URL that failed to load for the life of the page, so a copy that had to
   // be made again (same file name) is asked for under a new query; main ignores the query.
   const tierGen = { half: 0, quarter: 0, full: 0 };
@@ -2412,6 +2511,7 @@ function wireFullscreenButton(el) {
   b.addEventListener('click', (e) => { e.stopPropagation(); toggleTileFullscreen(el); });
   for (const ev of ['pointerdown', 'dblclick']) b.addEventListener(ev, (e) => e.stopPropagation()); // never a board drag
 }
+document.addEventListener('fullscreenchange', () => scheduleOffscreen()); // a fullscreen still comes back live
 document.addEventListener('fullscreenchange', () => {
   if (document.fullscreenElement) hpReset(); // a fullscreen tile owns playback; hovering resumes on exit
   for (const t of tiles) {
@@ -3935,11 +4035,12 @@ function collectSession() {
       loop: !!t.loop,
       fpsOverride: t.fpsOverride || null,
       quality: t.quality || 'scene', // v6: its own playback resolution, or follow the scene
-      currentTime: isFinite(t.video.currentTime) ? t.video.currentTime : 0,
+      // through tile.pb: a still's time and play state are its shadow clock, not the empty <video>
+      currentTime: isFinite(t.pb.time) ? t.pb.time : 0,
       volume: t.volume,
       muted: t.group ? !!t.ownMuted : t.video.muted, // own mute, not the group's
-      playbackRate: t.video.playbackRate,
-      paused: Session.savedPaused(t.video.paused, t.autoPaused), // off screen and auto-paused still counts as playing
+      playbackRate: t.pb.rate,
+      paused: Session.savedPaused(t.pb.paused, t.autoPaused), // off screen and auto-paused still counts as playing
       aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
@@ -4750,6 +4851,7 @@ window.api.getSettings().then((s) => {
   wheelZoomEl.checked = !!settings.wheelZoom;
   optOffscreen.checked = settings.pauseOffscreen;
   applyLoadStrip(); // the strip and its height come back as they were left
+  optLiveCap.value = String(settings.viewLiveCap);
   tidySlackEl.value = String(settings.tidySlack);
   hoverPlayBtn.classList.toggle('toggled', !!settings.hoverPlay); // the mode survives a restart
   ezPlayBtn.classList.toggle('toggled', !!settings.ezPlay); document.body.classList.toggle('ez-play', !!settings.ezPlay);
@@ -4857,13 +4959,42 @@ function applyOffscreen() {
     const b = t.el.getBoundingClientRect();
     return { id: t, rect: { x: b.left, y: b.top, w: b.width, h: b.height }, playing: !t.pb.paused, autoPaused: !!t.autoPaused };
   });
-  for (const a of Visibility.decide(items, view, Math.max(r.width, r.height) * OFFSCREEN_MARGIN)) {
+  // local videos are not paused off screen any more: the live budget turns them into stills
+  for (const a of Visibility.decide(items.filter((i) => !i.id.release), view, Math.max(r.width, r.height) * OFFSCREEN_MARGIN)) {
     const t = a.id;
     if (a.op === 'pause') { watchPause(t); t.pb.pause(); t.autoPaused = true; } // no broadcast: the group keeps playing
     else offscreenResume(t);
   }
 }
-setInterval(() => { if (!document.hidden) applyOffscreen(); }, 500);
+// ---------- live budget ----------
+// Tiles off screen or smaller than LIVE_MIN_PX on screen are stills in every window (motion is
+// invisible at that size). An extra view window also decodes at most settings.viewLiveCap local
+// videos, the surplus furthest from its middle being stills; the main window has no cap (Scott,
+// 2026-10-20). What the compare view or fullscreen shows, and a still that was just touched, are
+// always live (lib/lod.js).
+const LIVE_MIN_PX = 96;
+const LIVE_WANTED_MS = 5000;
+const liveCapHere = () => (window.OZY_VIEW > 0 ? settings.viewLiveCap : Infinity);
+function applyLiveBudget() {
+  if (!settings) return;
+  const r = gridRect();
+  const view = { x: r.left, y: r.top, w: r.width, h: r.height };
+  const fsEl = document.fullscreenElement, now = performance.now();
+  const forced = (t) => (!cmp.el.hidden && (t === cmp.a || t === cmp.b)) || (fsEl && fsEl === t.el) || (t.wantedAt && now - t.wantedAt < LIVE_WANTED_MS);
+  const items = tiles.filter((t) => (t.release || t.pb) && !t.freeAspect).map((t) => {
+    const shown = t.el.isConnected && !t.el.hidden && (isBoard() ? !!t.board : true);
+    const b = shown ? t.el.getBoundingClientRect() : { left: -1e6, top: -1e6, width: 0, height: 0 };
+    return { id: t, rect: { x: b.left, y: b.top, w: b.width, h: b.height }, playing: !!(t.pb && !t.pb.paused), budgeted: !!t.release, forced: !!(t.release && forced(t)) };
+  });
+  const live = Lod.choose(items, view, { minPx: LIVE_MIN_PX, cap: liveCapHere() });
+  for (const t of tiles) {
+    if (!t.release) continue;
+    if (live.has(t)) { if (!t.live) t.restore(); }
+    else if (t.live) t.release();
+    else t.onShadow(); // a still's clock keeps moving: keep its time and seek bar honest
+  }
+}
+setInterval(() => { if (!document.hidden) { applyLiveBudget(); applyOffscreen(); } }, 500);
 grid.addEventListener('scroll', scheduleOffscreen, { passive: true });
 const optOffscreen = document.getElementById('opt-offscreen');
 function setPauseOffscreen(on) {
@@ -4875,6 +5006,17 @@ function setPauseOffscreen(on) {
   setStatus(settings.pauseOffscreen ? 'Offscreen videos pause until they come back into view' : 'Offscreen videos keep playing');
 }
 optOffscreen.addEventListener('change', () => setPauseOffscreen(optOffscreen.checked));
+// how many local videos each extra view window decodes at once (the main window has no cap)
+const optLiveCap = document.getElementById('opt-livecap');
+optLiveCap.addEventListener('change', () => {
+  settings.viewLiveCap = Settings.merge({ viewLiveCap: Number(optLiveCap.value) }).viewLiveCap;
+  optLiveCap.value = String(settings.viewLiveCap);
+  saveSettings();
+  applyLiveBudget();
+  if (window.api.bus) window.api.bus({ type: 'settings', viewLiveCap: settings.viewLiveCap }); // open views follow at once
+  setStatus(`Extra views play at most ${settings.viewLiveCap} videos live; the rest show a still`);
+});
+optLiveCap.addEventListener('keydown', (e) => e.stopPropagation()); // digits are not shortcuts here
 
 // ---------- playback quality (scene) ----------
 // layout.quality is the scene's tier; a tile's own ⚙ quality overrides it. Each video tile's
@@ -4928,7 +5070,7 @@ const loadStrip = document.getElementById('load-strip');
 const loadBtn = document.getElementById('btn-load');
 const LS_MIN_H = 56, LS_MAX_H = 400, LS_TABLE_H = 220;
 let loadTimer = null;
-const tileState = (t) => (!t.pb ? (t.type || 'image') : t.autoPaused ? 'auto-paused' : t.pb.paused ? 'paused' : 'playing');
+const tileState = (t) => (!t.pb ? (t.type || 'image') : t.release && !t.live ? (t.pb.paused ? 'still' : 'still, playing') : t.autoPaused ? 'auto-paused' : t.pb.paused ? 'paused' : 'playing');
 const loadShowing = () => !loadPanel.hidden || !loadStrip.hidden;
 function fillLoadRows(tbody) {
   const rows = LoadStats.rows(tiles.map((t) => {

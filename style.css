@@ -889,3 +889,9 @@ body:not(.mode-board) .text-tile { display: none; }
 }
 .color-pop button { width: 22px; height: 22px; border-radius: 50%; border: 1px solid #555; padding: 0; cursor: pointer; }
 .color-pop input[type=color] { grid-column: 1 / -1; width: 100%; height: 24px; padding: 0; border: 1px solid #333338; background: none; cursor: pointer; }
+
+/* live budget: a still is the last frame on a canvas over the (empty) <video> */
+.tile canvas.still { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; pointer-events: none; }
+.tile canvas.still[hidden] { display: none; }
+.tile.still video { visibility: hidden; }
+.tile.still.playing-still::before { content: "▶"; position: absolute; left: 8px; bottom: 8px; z-index: 1; color: #fff; opacity: 0.6; font-size: 14px; pointer-events: none; zoom: var(--ui-scale, 1); }
