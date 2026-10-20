@@ -16,6 +16,16 @@ const SESSION_VERSION = 6;
 
 /** @type {Array<{path:string, el:HTMLElement, video:HTMLVideoElement, seek:HTMLInputElement, time:HTMLElement, scrubbing:boolean, volume:number, aspect:number, board?:{x:number,y:number,w:number,h:number}, tick?:Function}>} */
 const tiles = [];
+// Every tile has a stable id: the same tile in every window (views), and across save and open.
+// A record's id is kept unless another tile in this window already has it (a paste, a duplicate).
+const tileIds = new Set();
+function newTileId(wanted) {
+  const fresh = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID() : 't' + Date.now().toString(36) + Math.random().toString(36).slice(2));
+  const id = wanted && !tileIds.has(wanted) ? wanted : fresh();
+  tileIds.add(id);
+  return id;
+}
+function tileById(id) { return tiles.find((t) => t.id === id) || null; }
 let sessionPath = null;
 let statusTimer = null;
 let hoveredTile = null; // tile under the mouse, for per-video keyboard shortcuts
@@ -1966,6 +1976,7 @@ function addVideo(filePath, state = {}) {
     board: null,
     suppressClick: false, // kept for older code paths
     guard: ClickGuard.create(),
+    id: newTileId(Session.tileId(state)),
     galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
     bookmarks: parseBookmarks(state.bookmarks),
   };
@@ -2421,6 +2432,7 @@ function removeTile(tile, { record = true } = {}) {
   if (record && tiles.includes(tile)) recordRemove(tile); // before it leaves `tiles`, so the index is right
   const i = tiles.indexOf(tile);
   if (i >= 0) tiles.splice(i, 1);
+  tileIds.delete(tile.id);
   if (tile.group) removeFromGroup(tile.group, tile);
   selection.delete(tile);
   syncActiveFromSelection();
@@ -2531,7 +2543,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
     path: url, url, type: parsed.type, kind: parsed.kind, el, video: null, seek, time: timeEl, scrubbing: false,
     volume: clamp(Number(state.volume ?? DEFAULT_VIDEO_VOLUME), 0, 1),
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : (parsed.kind === 'short' ? 9 / 16 : 16 / 9),
-    board: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
+    board: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), id: newTileId(Session.tileId(state)), galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
     bookmarks: parsed.type === 'youtube' ? parseBookmarks(state.bookmarks) : [], info: null, proxy: null, fps: null,
     group: null, sync: null, ownMuted: !!state.muted,
     title: typeof state.title === 'string' && state.title ? state.title : WebUrl.label(parsed),
@@ -2955,7 +2967,7 @@ function addImageTile(filePath, state = {}, at = null) {
   const tile = {
     type: 'image', path: filePath, el, img, video: null, yt: null,
     aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
-    board: null, bookmarks: [], sync: null, group: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), volume: 0, ownMuted: false,
+    board: null, bookmarks: [], sync: null, group: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), id: newTileId(Session.tileId(state)), volume: 0, ownMuted: false,
     galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
   };
   const sb = state.board;
@@ -3021,7 +3033,7 @@ function addTextTile(record = {}) {
     style: TextTile.normalize(record.style),
     aspect: null, freeAspect: true, editing: false,
     board: { x: Number(b.x), y: Number(b.y), w: Math.max(TEXT_MIN_W, Number(b.w)), h: Number(b.h) > 0 ? Number(b.h) : 40 },
-    bookmarks: [], sync: null, group: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), volume: 0, ownMuted: false,
+    bookmarks: [], sync: null, group: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), id: newTileId(Session.tileId(record)), volume: 0, ownMuted: false,
     galleryH: layout.rowHeight,
   };
   tiles.push(tile);
@@ -3354,7 +3366,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
     type: 'sequence', dir, seq, path: joinPath(dir, Sequence.pattern(seq)), title: Sequence.label(seq),
     el, video: null, mediaEl: cv, seek, time: timeEl, scrubbing: false,
     volume: 0, ownMuted: false, aspect: Number(state.aspect) > 0 ? Number(state.aspect) : DEFAULT_ASPECT,
-    board: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), bookmarks: parseBookmarks(state.bookmarks), group: null, sync: null,
+    board: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), id: newTileId(Session.tileId(state)), bookmarks: parseBookmarks(state.bookmarks), group: null, sync: null,
     galleryH: Number(state.galleryH) > 0 ? clamp(Number(state.galleryH), MIN_H, MAX_H) : layout.rowHeight,
     fps: Number(look.fps) > 0 ? Number(look.fps) : 24,
     exposure: clamp(Number(look.exposure) || 0, -10, 10),
@@ -3888,7 +3900,8 @@ function collectSession() {
       quality: layout.quality, // v6: the scene's playback resolution
     },
     masterVolume,
-    videos: tiles.map((t) => (t.type === 'text' ? {
+    // every record leads with the tile's stable id (v6, additive: older builds ignore it)
+    videos: tiles.map((t) => ({ id: t.id, ...(t.type === 'text' ? {
       // a text tile is only its words, its look and its box; older builds skip it (no path)
       type: 'text', text: t.text, style: { ...t.style },
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
@@ -3931,7 +3944,7 @@ function collectSession() {
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
       sync: t.sync ? { start: t.sync.start } : null,
-    })),
+    }) })),
     groups: groups.map((g) => ({
       id: g.id, name: g.name, color: g.color,
       members: [...g.members].map((t) => tiles.indexOf(t)).filter((i) => i >= 0),
@@ -5117,7 +5130,8 @@ async function pasteClipboard() {
   for (const v of recs) {
     if (!isBoard() && v.type === 'text') { skipped++; continue; } // text has no gallery form
     const wasLoose = !(v.board && isFinite(Number(v.board.x)));
-    const r = await addFromRecord(Session.openRecord({ ...v, sync: null })); // groups aren't copied, so nor are offsets; copies start paused
+    // groups aren't copied, so nor are offsets; copies start paused and are new tiles (new ids)
+    const r = await addFromRecord(Session.openRecord({ ...v, sync: null, id: undefined }));
     if (r.missing) missing++;
     if (r.tile) {
       if (isBoard() && wasLoose && !r.tile.board) placeOnBoard([r.tile], loosePoints[loose] || null);
