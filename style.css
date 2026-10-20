@@ -895,3 +895,16 @@ body:not(.mode-board) .text-tile { display: none; }
 .tile canvas.still[hidden] { display: none; }
 .tile.still video { visibility: hidden; }
 .tile.still.playing-still::before { content: "▶"; position: absolute; left: 8px; bottom: 8px; z-index: 1; color: #fff; opacity: 0.6; font-size: 14px; pointer-events: none; zoom: var(--ui-scale, 1); }
+
+/* an extra view window (index.html?view=N): a camera on the main window's board. Everything that
+   edits the board is gone; looking and playing stay. */
+body.view #add-menu, body.view #add-text, body.view #btn-sidebar, body.view #sidebar,
+body.view #btn-open, body.view #btn-save, body.view #btn-save-as, body.view #btn-clear,
+body.view #app-menu, body.view #window-menu, body.view #mode, body.view #btn-group, body.view #btn-ungroup,
+body.view #btn-ab, body.view #tidy-menu, body.view #btn-link, body.view .master,
+body.view #opt-list .menu-title, body.view #opt-list input[name="opt-quality"], body.view #opt-cache-cap,
+body.view #opt-cache-folder, body.view #opt-cache-clear,
+body.view .tile .remove, body.view .tile .settings, body.view .tile .handle, body.view .tile .bm-add,
+body.view #groupbar .gb-swatch, body.view #groupbar .gb-name, body.view #groupbar .gb-sync, body.view #groupbar .gb-sticky,
+body.view #groupbar .gb-tidy, body.view #groupbar .gb-loop-wrap, body.view #groupbar .gb-ungroup { display: none !important; }
+body.view #opt-list label.menu-check:has(input[name="opt-quality"]), body.view #opt-list label.menu-check:has(#opt-cache-cap) { display: none !important; }

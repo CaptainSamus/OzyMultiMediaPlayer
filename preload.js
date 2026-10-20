@@ -32,6 +32,11 @@ contextBridge.exposeInMainWorld('api', {
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   onUpdateEvent: (cb) => ipcRenderer.on('update-event', (_e, msg) => cb(msg)),
   webThumb: (id) => ipcRenderer.invoke('web-thumb', id),
+  // extra views: the message bus between Ozy windows, and which window this is (0 = main)
+  bus: (msg) => ipcRenderer.send('bus', msg),
+  onBus: (cb) => ipcRenderer.on('bus', (_e, m) => cb(m)),
+  openView: (n, bounds) => ipcRenderer.invoke('open-view', n, bounds),
+  viewNumber: () => Number(new URLSearchParams(location.search).get('view') || 0),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (s) => ipcRenderer.invoke('save-settings', s),
   pickFolder: () => ipcRenderer.invoke('pick-folder'),

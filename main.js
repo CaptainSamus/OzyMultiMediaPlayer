@@ -248,8 +248,62 @@ function createWindow() {
     }, 10000);
   });
 
-  win.on('closed', () => { win = null; });
+  // the views are cameras on this window's board: they go when it goes
+  win.on('closed', () => {
+    win = null;
+    for (const v of views.values()) if (!v.isDestroyed()) v.close();
+  });
 }
+
+// ---- extra views ----
+// Up to two more windows on the same board (index.html?view=N): own pan and zoom, playback
+// mirrored, no editing. The renderers talk over the bus below; the main window is the authority
+// for the layout and answers a new view's snapshot-request with the whole board.
+const views = new Map(); // n -> BrowserWindow
+const ozyWindows = () => [win, ...views.values()].filter((w) => w && !w.isDestroyed());
+function openView(n, bounds) {
+  if (n !== 1 && n !== 2) return false;
+  const open = views.get(n);
+  if (open && !open.isDestroyed()) { if (open.isMinimized()) open.restore(); open.focus(); return true; }
+  const b = bounds && typeof bounds === 'object' ? bounds : {};
+  const num = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : undefined);
+  const v = new BrowserWindow({
+    width: num(b.w) > 300 ? num(b.w) : 1100,
+    height: num(b.h) > 200 ? num(b.h) : 700,
+    x: num(b.x), y: num(b.y),
+    minWidth: 500, minHeight: 320,
+    backgroundColor: '#0f0f10',
+    autoHideMenuBar: true,
+    title: `Ozy view ${n}`,
+    icon: path.join(__dirname, 'build', 'icon.png'),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      spellcheck: false,
+      webSecurity: true,
+    },
+  });
+  v.loadURL(`http://127.0.0.1:${uiPort}/index.html?view=${n}`);
+  views.set(n, v);
+  v.on('closed', () => {
+    if (views.get(n) === v) views.delete(n);
+    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('bus', { type: 'view-closed', n });
+  });
+  return true;
+}
+ipcMain.handle('open-view', (_e, n, bounds) => openView(Number(n), bounds));
+// The bus: whatever one Ozy window sends goes to every other one, untouched. A new view's
+// snapshot-request goes to the main window only. A window that is closing is skipped.
+ipcMain.on('bus', (e, msg) => {
+  if (!msg || typeof msg !== 'object') return;
+  const targets = msg.type === 'snapshot-request' ? [win] : ozyWindows();
+  for (const w of targets) {
+    if (!w || w.isDestroyed() || w.webContents.isDestroyed() || w.webContents === e.sender) continue;
+    try { w.webContents.send('bus', msg); } catch {}
+  }
+});
 
 // macOS: double-clicking a .mvp in Finder (or dropping it on the dock icon) arrives as open-file,
 // often before the window exists; keep it until the page has loaded.

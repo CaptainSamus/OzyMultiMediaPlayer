@@ -1,6 +1,17 @@
 // Multi Video Player - renderer logic. Runs with no Node access; everything
 // that touches disk goes through the small `window.api` bridge in preload.js.
 
+// Which window this is: 0 the main window, 1 or 2 an extra view (index.html?view=N), a camera on
+// the main window's board that can pan, zoom, select and play but never edits the layout.
+window.OZY_VIEW = window.api && window.api.viewNumber ? window.api.viewNumber() : 0;
+const IS_VIEW = window.OZY_VIEW > 0;
+if (IS_VIEW) document.body.classList.add('view');
+// true while a view applies a snapshot from the main window: the only time a view adds, removes
+// or regroups tiles
+let snapshotApplying = false;
+const viewMayEdit = () => !IS_VIEW || snapshotApplying;
+let viewSessionName = ''; // a view's title names the main window's session
+
 const grid = document.getElementById('grid');
 const canvas = document.getElementById('canvas');
 const emptyEl = document.getElementById('empty');
@@ -147,7 +158,8 @@ function updateChrome() {
   emptyEl.classList.toggle('hidden', tiles.length > 0);
   countEl.textContent = tiles.length ? `${tiles.length} video${tiles.length === 1 ? '' : 's'}` : '';
   const name = sessionPath ? basename(sessionPath) : 'Unsaved session';
-  document.title = `${name} – Ozy Multi Media Player${appVersion ? ' ' + appVersion : ''}`;
+  if (IS_VIEW) document.title = `Ozy view ${window.OZY_VIEW} – ${viewSessionName || 'Unsaved session'}`;
+  else document.title = `${name} – Ozy Multi Media Player${appVersion ? ' ' + appVersion : ''}`;
   refreshToolbarToggles();
 }
 
@@ -156,7 +168,8 @@ const isBoard = () => layout.mode === 'board';
 // ---------- volume ----------
 
 function applyTileVolume(tile) {
-  const v = clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1);
+  // a view is silent: the main window plays the sound, two windows would only echo it
+  const v = IS_VIEW ? 0 : clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1);
   if (tile.video) tile.video.volume = v;
   else if (tile.yt) tile.yt.volume(v); // Twitch embeds expose no volume control
 }
@@ -535,6 +548,7 @@ function captureStarts(g) {
   ms.forEach((t, i) => { t.sync = { start: starts[i] }; });
 }
 function createGroup(list, opts = {}) {
+  if (!viewMayEdit()) return null;
   for (const t of list) if (t.group) removeFromGroup(t.group, t);
   const g = {
     id: nextGroupId++, name: opts.name || `Group ${nextGroupId - 1}`,
@@ -562,6 +576,7 @@ function removeFromGroup(g, t) {
   else if (active === g) renderGroupBar();
 }
 function dissolveGroup(g) {
+  if (!viewMayEdit()) return;
   logUi('info', 'group dissolved', { id: g.id, members: g.members.size });
   for (const t of [...g.members]) releaseTile(t);
   g.members.clear();
@@ -1171,8 +1186,8 @@ function applyEntry(entry, dir) {
     updateTextToolbar();
   }
 }
-function undo() { const e = undoStack.undo(); if (!e) { setStatus('Nothing to undo'); return; } applyEntry(e, 'before'); logUi('info', 'undo', { what: e.label }); setStatus('Undo: ' + e.label); }
-function redo() { const e = undoStack.redo(); if (!e) { setStatus('Nothing to redo'); return; } applyEntry(e, 'after'); logUi('info', 'redo', { what: e.label }); setStatus('Redo: ' + e.label); }
+function undo() { if (IS_VIEW) return; const e = undoStack.undo(); if (!e) { setStatus('Nothing to undo'); return; } applyEntry(e, 'before'); logUi('info', 'undo', { what: e.label }); setStatus('Undo: ' + e.label); }
+function redo() { if (IS_VIEW) return; const e = undoStack.redo(); if (!e) { setStatus('Nothing to redo'); return; } applyEntry(e, 'after'); logUi('info', 'redo', { what: e.label }); setStatus('Redo: ' + e.label); }
 
 function setLinked(on) {
   board.linked = !!on;
@@ -1443,6 +1458,7 @@ function scheduleFit() {
 // Only the tile you drag changes, in both modes. Board: anchored on the
 // opposite corner so the far edge stays put.
 function startResize(tile, corner, e) {
+  if (IS_VIEW) return; // a view never edits the layout
   if (e.button !== 0) return;
   e.preventDefault();
   e.stopPropagation();
@@ -1566,7 +1582,7 @@ function attachTileDrag(tile) {
     if (tile.editing && e.target.closest('.text-body')) return; // put the caret, don't drag the tile
     // Alt-drag on a sticky group's member rearranges inside the group (swap two slots)
     const swapMembers = tile.group ? [...tile.group.members].filter((m) => m.board) : [];
-    if (Swap.isSwapDrag({ sticky: !!(tile.group && tile.group.sticky), alt: e.altKey, mod: modKey(e), shift: e.shiftKey, memberCount: swapMembers.length })) {
+    if (!IS_VIEW && Swap.isSwapDrag({ sticky: !!(tile.group && tile.group.sticky), alt: e.altKey, mod: modKey(e), shift: e.shiftKey, memberCount: swapMembers.length })) {
       e.stopPropagation(); // the grid's pointerdown would otherwise start an Alt-pan too
       return startSwapDrag(tile, swapMembers, e);
     }
@@ -1590,6 +1606,7 @@ function attachTileDrag(tile) {
     const single = modKey(e);
     if (action === 'only') selectOnly(tile);
     else if (action === 'group') selectGroupOf(tile);
+    if (IS_VIEW) return; // a view selects but never drags (no capture: the picture gets its own click)
     const start = { x: e.clientX, y: e.clientY };
     // Capture from the very first event, not once the drag passes the 4 px threshold: a release
     // over a cross-origin embed is only delivered back here if this element already owns the
@@ -2529,6 +2546,7 @@ function togglePlay(video) {
 }
 
 function removeTile(tile, { record = true } = {}) {
+  if (!viewMayEdit()) return;
   if (record && tiles.includes(tile)) recordRemove(tile); // before it leaves `tiles`, so the index is right
   const i = tiles.indexOf(tile);
   if (i >= 0) tiles.splice(i, 1);
@@ -3207,6 +3225,7 @@ function applyTextStyleToEl(tile) {
 }
 
 function beginTextEdit(tile) {
+  if (IS_VIEW) return;
   if (!isBoard() || tile.editing) return;
   for (const t of tiles) if (t !== tile && t.editing) endTextEdit(t); // only one at a time
   tile.editing = true;
@@ -3261,7 +3280,7 @@ document.getElementById('add-text').addEventListener('click', () => {
 });
 // double-click empty board space makes a note there
 grid.addEventListener('dblclick', (e) => {
-  if (!isBoard()) return;
+  if (!isBoard() || IS_VIEW) return;
   if (e.target !== grid && e.target !== canvas) return; // not on a tile
   e.preventDefault();
   createTextTileAt(toCanvas(e.clientX, e.clientY));
@@ -3379,7 +3398,7 @@ function positionTextToolbar() {
 
 function updateTextToolbar() {
   const list = selectedTextTiles();
-  if (!list.length || !isBoard()) {
+  if (!list.length || !isBoard() || IS_VIEW) {
     if (textToolbar) textToolbar.el.hidden = true;
     closeColorPop();
     return;
@@ -3914,6 +3933,7 @@ function clearAll() {
 }
 
 function addVideos(paths, at = null) {
+  if (!viewMayEdit()) return;
   const wasEmpty = tiles.length === 0;
   // images become image tiles, a lone exr / tif / dpx a one-frame sequence; everything else a video tile
   const added = paths.map((p) => {
@@ -3931,6 +3951,7 @@ function addVideos(paths, at = null) {
 // sequence (once per run, however many of its frames were picked). No: png / jpg frames become
 // image tiles and an exr / tif / dpx frame a one-frame sequence.
 async function addPaths(paths, at = null) {
+  if (!viewMayEdit()) return;
   const plain = [], runs = [], asked = new Map();
   for (const p of paths) {
     const name = basename(p);
@@ -4199,6 +4220,7 @@ document.getElementById('add-local').addEventListener('click', async () => {
 document.getElementById('add-url').addEventListener('click', () => { menuList.hidden = true; urlBar.hidden = false; urlInput.focus(); });
 document.getElementById('url-cancel').addEventListener('click', closeUrlBar);
 function submitUrl() {
+  if (!viewMayEdit()) return;
   const parsed = WebUrl.parse(urlInput.value);
   if (!parsed) { setStatus('That is not a YouTube or Twitch link I understand'); return; }
   if (parsed.kind === 'playlist') { sidebar.addPlaylist(urlInput.value.trim()); closeUrlBar(); return; }
@@ -4547,7 +4569,14 @@ const sbEl = document.getElementById('sidebar');
 const sbLists = { folders: sbEl.querySelector('[data-section="folders"] .sb-list'), playlists: sbEl.querySelector('[data-section="playlists"] .sb-list') };
 const sbSelected = new Set(); // selected .sb-item elements
 let sbSaveTimer = null;
-function saveSettings() { clearTimeout(sbSaveTimer); sbSaveTimer = setTimeout(() => window.api.saveSettings(settings), 300); }
+// Every Ozy window keeps its own copy of the settings; after a save the others re-read the file so
+// none of them later writes back a stale copy over what this one changed.
+function saveSettings() {
+  clearTimeout(sbSaveTimer);
+  sbSaveTimer = setTimeout(() => {
+    Promise.resolve(window.api.saveSettings(settings)).then(() => { if (window.api.bus) window.api.bus({ type: 'settings-changed' }); }).catch(() => {});
+  }, 300);
+}
 
 const sidebar = {
   open() { settings.sidebar.open = true; sbEl.hidden = false; saveSettings(); layoutTiles(); },
@@ -4754,6 +4783,7 @@ function itemPayload(it) {
 // routes by extension), SEQ rows sequence tiles, playlist rows YouTube tiles (cascaded 24 px when
 // dropped at a point)
 function addItemsToBoard(items, at) {
+  if (!viewMayEdit()) return;
   const files = items.filter((i) => i.type === 'file' || i.type === 'image' || i.type === 'frame').map((i) => i.path);
   if (files.length) addVideos(files, at);
   const wasEmpty = tiles.length === 0;
@@ -5256,6 +5286,7 @@ function copySelection() {
 }
 
 async function pasteClipboard() {
+  if (!viewMayEdit()) return;
   if (!clipboard || !clipboard.records.length) { setStatus('Nothing to paste'); return; }
   let target = null;
   if (isBoard() && pointerOverBoard && lastPointer) {
@@ -5451,6 +5482,7 @@ for (const ev of ['dragend', 'pointerup', 'mouseup', 'blur']) window.addEventLis
 document.addEventListener('visibilitychange', () => { if (document.hidden) applyDropState(dropState.end()); });
 window.addEventListener('drop', async (e) => {
   e.preventDefault();
+  if (IS_VIEW) return; // nothing is added from a view
   applyDropState(dropState.drop());
   const at = isBoard() && tiles.length ? toCanvas(e.clientX, e.clientY) : null; // on the board, drop where the cursor is
   const raw = e.dataTransfer.getData('application/x-ozy-items');
@@ -5473,3 +5505,114 @@ layout.rowHeight = 240; // the size new gallery tiles start at
 setLinked(true);
 setHand(false);
 setMasterVolume(DEFAULT_MASTER_VOLUME);
+
+// ---------- extra views ----------
+// Window ▾ opens up to two more windows on this board (main.js). The main window is the
+// authority: while a view is open it sends a snapshot (collectSession() plus each tile's stable
+// id) whenever the board changes, and each view applies it by diff (lib/snapshot.js). A view
+// pans, zooms, selects and plays on its own; it never changes the layout.
+const viewsOpen = new Set();          // main: the views that asked for snapshots
+let snapSeq = 0, lastSnapKey = '';    // main: sequence number, and what the last snapshot said
+let lastSeq = 0, lastGroups = [];     // view: the last snapshot applied, and its groups
+let viewFitted = false;               // view: framed the board once, after the first tiles came in
+// what a snapshot says about the board, minus what moves on its own (time, play state, speed, sound)
+const SNAP_SKIP = new Set(['currentTime', 'paused', 'playbackRate', 'volume', 'muted', 'savedAt']);
+function snapshotNow(force) {
+  if (IS_VIEW || !viewsOpen.size) return;
+  const s = collectSession();
+  const body = { videos: s.videos, groups: s.groups, layout: { mode: layout.mode, quality: layout.quality, timeDisplay: layout.timeDisplay }, name: sessionPath ? basename(sessionPath) : '' };
+  const key = JSON.stringify(body, (k, v) => (SNAP_SKIP.has(k) ? undefined : v));
+  if (!force && key === lastSnapKey) return;
+  lastSnapKey = key;
+  window.api.bus({ type: 'snapshot', seq: ++snapSeq, ...body });
+}
+// Five times a second while a view is open: cheaper and surer than hooking every place that can
+// change the board (a drag, a tidy, an undo, a paste, a metadata-corrected aspect, a text edit).
+if (!IS_VIEW) setInterval(() => { if (viewsOpen.size && !document.hidden) snapshotNow(false); }, 200);
+
+function applySnapshot(msg) {
+  if (!Snapshot.accept(lastSeq, msg.seq)) return; // older than one already applied
+  lastSeq = msg.seq;
+  viewSessionName = msg.name || '';
+  const wasEmpty = tiles.length === 0;
+  snapshotApplying = true;
+  try {
+    const lay = msg.layout || {};
+    if (lay.mode && lay.mode !== layout.mode) setMode(lay.mode);
+    if (lay.timeDisplay && lay.timeDisplay !== layout.timeDisplay) { layout.timeDisplay = lay.timeDisplay; for (const t of tiles) if (t.refreshTime) t.refreshTime(); }
+    if (lay.quality && lay.quality !== layout.quality) { layout.quality = lay.quality; syncQualityRadios(); for (const t of tiles) if (t.applyQuality) t.applyQuality(); }
+    const current = tiles.map((t) => ({ id: t.id, board: t.board ? { ...t.board } : null, galleryH: t.galleryH, sig: t.snapSig }));
+    const d = Snapshot.diff(current, msg, lastGroups);
+    for (const id of [...d.remove, ...d.rebuild.map((r) => r.id)]) { const t = tileById(id); if (t) removeTile(t, { record: false }); }
+    for (const rec of [...d.rebuild, ...d.add]) {
+      const t = buildFromRecord(rec); // built as the main window has it: at its time, playing or not
+      if (t) t.snapSig = Snapshot.sig(rec);
+    }
+    for (const m of d.move) {
+      const t = tileById(m.id);
+      if (!t) continue;
+      t.board = m.board ? { ...m.board } : t.board;
+      if (m.galleryH > 0) t.galleryH = m.galleryH;
+      layoutTile(t);
+    }
+    // a removed or rebuilt member took its group apart here: put the groups back as main has them
+    const regroup = d.regroup || (d.remove.length || d.rebuild.length ? Snapshot.groupsOf(msg) : null);
+    if (regroup) {
+      for (const g of [...groups]) dissolveGroup(g);
+      for (const g of regroup) { const list = g.members.map(tileById).filter(Boolean); if (list.length > 1) createGroup(list, g.opts); }
+      lastGroups = regroup;
+    }
+    // the board's stacking order is the main window's
+    const order = new Map(((msg.videos) || []).map((r, i) => [r && r.id, i]));
+    tiles.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  } finally { snapshotApplying = false; }
+  layoutTiles(); markOnBoard(); renderTimeline(); updateChrome();
+  if (tiles.length && (wasEmpty || !viewFitted)) { viewFitted = true; fitAll(); }
+  scheduleOffscreen(); // the live budget for what is now on screen here
+}
+
+if (window.api.onBus) window.api.onBus((msg) => {
+  if (!msg || typeof msg !== 'object') return;
+  if (msg.type === 'snapshot-request' && !IS_VIEW) { if (msg.n) viewsOpen.add(msg.n); snapshotNow(true); return; }
+  if (msg.type === 'view-closed' && !IS_VIEW) { viewsOpen.delete(msg.n); return; }
+  if (msg.type === 'snapshot' && IS_VIEW) { applySnapshot(msg); return; }
+  // the main window (re)started: its snapshot numbers start again, so ask afresh
+  if (msg.type === 'main-hello' && IS_VIEW) { lastSeq = 0; window.api.bus({ type: 'snapshot-request', n: window.OZY_VIEW }); return; }
+  if (msg.type === 'settings' && msg.viewLiveCap) {
+    settings.viewLiveCap = msg.viewLiveCap; optLiveCap.value = String(settings.viewLiveCap); applyLiveBudget(); return;
+  }
+  if (msg.type === 'settings-changed') {
+    // another window saved: take the file's settings so this window never writes back a stale copy
+    window.api.getSettings().then((s) => { if (!s) return; settings = s; optLiveCap.value = String(settings.viewLiveCap); applyLiveBudget(); });
+  }
+});
+
+// Window ▾ (main window only)
+const winMenu = document.getElementById('window-menu');
+if (winMenu) {
+  const winList = winMenu.querySelector('.menu-list');
+  document.getElementById('btn-window').addEventListener('click', (e) => { e.stopPropagation(); winList.hidden = !winList.hidden; });
+  window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !winMenu.contains(e.target)) winList.hidden = true; });
+  for (const n of [1, 2]) {
+    document.getElementById(`win-view-${n}`).addEventListener('click', () => {
+      winList.hidden = true;
+      window.api.openView(n);
+      setStatus(`View ${n}: another camera on this board (pan, zoom and play there; edit here)`);
+    });
+  }
+}
+
+// In a view only the keys that look and play do anything: no adding, removing, grouping, undo,
+// opening or saving, no tile settings. (Caught before every other handler.)
+if (IS_VIEW) {
+  const VIEW_KEYS = new Set([' ', 'arrowleft', 'arrowright', 'k', ',', '.', '[', ']', 'escape', 'h', 'f', 't', 'tab', 'shift', 'control', 'alt', 'meta']);
+  window.addEventListener('keydown', (e) => {
+    const tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return; // the controls a view keeps
+    const key = e.key.toLowerCase(), ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl ? key === 'c' || key === 'a' : VIEW_KEYS.has(key)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, true);
+  window.api.bus({ type: 'snapshot-request', n: window.OZY_VIEW });
+} else if (window.api.bus) window.api.bus({ type: 'main-hello' }); // views left open from before ask again

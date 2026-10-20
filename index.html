@@ -38,6 +38,13 @@
         <button id="btn-version" disabled>Version …</button>
       </div>
     </div>
+    <div class="menu" id="window-menu">
+      <button id="btn-window" title="Another window on this same board: its own pan and zoom, the same videos playing in step. Edit in this window; look and play in the views.">Window ▾</button>
+      <div class="menu-list" hidden>
+        <button id="win-view-1">New view 1</button>
+        <button id="win-view-2">New view 2</button>
+      </div>
+    </div>
     <div class="menu" id="optimize-menu">
       <button id="btn-optimize" title="Make a heavy scene lighter: pause what is off screen, play at a lower resolution, see what the scene costs">Optimize ▾</button>
       <div class="menu-list" id="opt-list" hidden>
@@ -452,6 +459,7 @@
   <script src="lib/scrub.js"></script>
   <script src="lib/dragstate.js"></script>
   <script src="lib/lod.js"></script>
+  <script src="lib/snapshot.js"></script>
   <script src="lib/visibility.js"></script>
   <script src="lib/proxy.js"></script>
   <script src="lib/cachepolicy.js"></script>
