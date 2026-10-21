@@ -248,8 +248,74 @@ function createWindow() {
     }, 10000);
   });
 
-  win.on('closed', () => { win = null; });
+  // the views are cameras on this window's board: they go when it goes
+  win.on('closed', () => {
+    win = null;
+    for (const v of views.values()) if (!v.isDestroyed()) v.close();
+  });
 }
+
+// ---- extra views ----
+// Up to two more windows on the same board (index.html?view=N): own pan and zoom, playback
+// mirrored, no editing. The renderers talk over the bus below; the main window is the authority
+// for the layout and answers a new view's snapshot-request with the whole board.
+const views = new Map(); // n -> BrowserWindow
+const ozyWindows = () => [win, ...views.values()].filter((w) => w && !w.isDestroyed());
+function openView(n, bounds) {
+  if (n !== 1 && n !== 2) return false;
+  const open = views.get(n);
+  if (open && !open.isDestroyed()) { if (open.isMinimized()) open.restore(); open.focus(); return true; }
+  const b = bounds && typeof bounds === 'object' ? { ...bounds } : {};
+  const num = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : undefined);
+  // a saved place on a monitor that is not there any more: let the system place the window
+  if (num(b.x) !== undefined && num(b.y) !== undefined) {
+    const { screen } = require('electron');
+    const r = { x: num(b.x), y: num(b.y), width: num(b.w) || 1100, height: num(b.h) || 700 };
+    const onScreen = screen.getAllDisplays().some((d) => { const a = d.workArea; return r.x < a.x + a.width - 40 && r.x + r.width > a.x + 40 && r.y < a.y + a.height - 40 && r.y + r.height > a.y; });
+    if (!onScreen) { delete b.x; delete b.y; }
+  }
+  const v = new BrowserWindow({
+    width: num(b.w) > 300 ? num(b.w) : 1100,
+    height: num(b.h) > 200 ? num(b.h) : 700,
+    x: num(b.x), y: num(b.y),
+    minWidth: 500, minHeight: 320,
+    backgroundColor: '#0f0f10',
+    autoHideMenuBar: true,
+    title: `Ozy view ${n}`,
+    icon: path.join(__dirname, 'build', 'icon.png'),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      spellcheck: false,
+      webSecurity: true,
+      // A view is silent (the main window has the sound), and Chromium pauses a silent video in a
+      // window it thinks is hidden - a view behind the main window, or on a monitor it thinks is
+      // covered. A view has to keep playing in step whatever is in front of it.
+      backgroundThrottling: false,
+    },
+  });
+  v.loadURL(`http://127.0.0.1:${uiPort}/index.html?view=${n}`);
+  views.set(n, v);
+  v.on('closed', () => {
+    if (views.get(n) === v) views.delete(n);
+    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('bus', { type: 'view-closed', n });
+  });
+  return true;
+}
+ipcMain.handle('open-view', (_e, n, bounds) => openView(Number(n), bounds));
+ipcMain.handle('view-bounds', (e) => { const w = BrowserWindow.fromWebContents(e.sender); return w && !w.isDestroyed() ? w.getBounds() : null; });
+// The bus: whatever one Ozy window sends goes to every other one, untouched. A new view's
+// snapshot-request goes to the main window only. A window that is closing is skipped.
+ipcMain.on('bus', (e, msg) => {
+  if (!msg || typeof msg !== 'object') return;
+  const targets = msg.type === 'snapshot-request' ? [win] : ozyWindows();
+  for (const w of targets) {
+    if (!w || w.isDestroyed() || w.webContents.isDestroyed() || w.webContents === e.sender) continue;
+    try { w.webContents.send('bus', msg); } catch {}
+  }
+});
 
 // macOS: double-clicking a .mvp in Finder (or dropping it on the dock icon) arrives as open-file,
 // often before the window exists; keep it until the page has loaded.
