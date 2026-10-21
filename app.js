@@ -208,19 +208,61 @@ const isBoard = () => layout.mode === 'board';
 
 // ---------- volume ----------
 
+// Which windows decode which tiles (window 0 is main). A tile is heard from exactly one of them,
+// Lod.audioOwner's pick: main if it decodes it, else the lowest-numbered view that does. The others
+// keep its element at volume 0, since two windows would only echo it. (Scott, 2026-10-20: a view
+// on the other monitor must have sound even when main is looking elsewhere.)
+const liveSets = new Map();
+let lastLiveKey = '';
+const liveHere = (t) => !!t.id && (t.live || !t.release); // web tiles are always live
+// This window's own part is read from its tiles as they are now, not from the set it last told the
+// others: a tile is heard here as soon as it is live here (when no lower window has it), never
+// once it is a still.
+function isAudioOwner(tile) {
+  if (!liveHere(tile)) return false;
+  const sets = new Map(liveSets);
+  sets.set(window.OZY_VIEW, [tile.id]);
+  return Lod.audioOwner(tile.id, sets) === window.OZY_VIEW;
+}
 function applyTileVolume(tile) {
   // a view is silent: the main window plays the sound, two windows would only echo it
-  const v = IS_VIEW ? 0 : clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1);
+  // const v = IS_VIEW ? 0 : clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1); // (views were silent until 2026-10-20)
+  const v = isAudioOwner(tile) ? clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1) : 0;
   if (tile.video) tile.video.volume = v;
   else if (tile.yt) tile.yt.volume(v); // Twitch embeds expose no volume control
 }
 // A tile's own mute is remembered separately so a group mute can be undone.
 function setOwnMuted(tile, m) {
+  const was = !!tile.ownMuted;
   tile.ownMuted = !!m;
   const muted = tile.ownMuted || !!(tile.group && tile.group.muted);
   if (tile.video) tile.video.muted = muted;
   else if (tile.yt) { muted ? tile.yt.mute() : tile.yt.unmute(); if (tile.refreshMute) tile.refreshMute(); }
   refreshToolbarToggles();
+  if (was !== tile.ownMuted) emitPlayback(tile, 'mute', tile.ownMuted); // the other windows follow
+}
+function applyAudioOwners() { for (const t of tiles) applyTileVolume(t); }
+// tell the other windows which tiles this one decodes (the main window adds its master volume)
+function announceLive(ids) {
+  if (!window.api.bus) return;
+  const msg = { type: 'live', n: window.OZY_VIEW, ids };
+  if (!IS_VIEW) msg.master = masterVolume;
+  window.api.bus(msg);
+}
+// after the live budget moved, or before a snapshot shows the views a new tile: say so if it changed
+function refreshLiveSet() {
+  const ids = tiles.filter(liveHere).map((t) => t.id);
+  const key = ids.join('\n');
+  if (key === lastLiveKey) return;
+  lastLiveKey = key;
+  liveSets.set(window.OZY_VIEW, new Set(ids));
+  announceLive(ids);
+  applyAudioOwners();
+}
+// a group's sound, changed here: the other windows follow (sent on one of its members)
+function emitGroupAudio(g) {
+  const t = g && [...g.members][0];
+  if (t) emitPlayback(t, 'group-audio', { volume: g.volume, muted: !!g.muted });
 }
 const isMuted = (t) => !!(t.ownMuted || (t.group && t.group.muted));
 
@@ -354,6 +396,7 @@ function setMasterVolume(v, { updateSlider = true } = {}) {
   masterPct.textContent = Math.round(masterVolume * 100) + '%';
   masterIcon.textContent = masterVolume === 0 ? '🔇' : masterVolume < 0.34 ? '🔈' : masterVolume < 0.67 ? '🔉' : '🔊';
   for (const t of tiles) applyTileVolume(t);
+  if (!IS_VIEW) announceLive([...(liveSets.get(0) || [])]); // the views play at the main window's master volume
 }
 
 // ---------- geometry ----------
@@ -670,8 +713,8 @@ gbQ('.gb-swatch').addEventListener('click', () => { active.color = GROUP_PALETTE
 gbQ('.gb-name').addEventListener('input', () => { active.name = gbQ('.gb-name').value; });
 gbQ('.gb-name').addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter' || e.key === 'Escape') e.target.blur(); });
 gbQ('.gb-play').addEventListener('click', () => playPauseGroup(active));
-gbQ('.gb-mute').addEventListener('click', () => { active.muted = !active.muted; applyGroupAudio(active); renderGroupBar(); });
-gbQ('.gb-vol').addEventListener('input', () => { active.volume = Number(gbQ('.gb-vol').value) / 100; applyGroupAudio(active); });
+gbQ('.gb-mute').addEventListener('click', () => { active.muted = !active.muted; applyGroupAudio(active); emitGroupAudio(active); renderGroupBar(); });
+gbQ('.gb-vol').addEventListener('input', () => { active.volume = Number(gbQ('.gb-vol').value) / 100; applyGroupAudio(active); emitGroupAudio(active); });
 gbQ('.gb-rate').addEventListener('change', () => { active.rate = Number(gbQ('.gb-rate').value); applyGroupAudio(active); });
 gbQ('.gb-sync').addEventListener('click', () => setGroupSync(active, !active.sync));
 gbQ('.gb-sticky').addEventListener('click', () => { active.sticky = !active.sticky; renderGroupBar(); });
@@ -2255,6 +2298,7 @@ function addVideo(filePath, state = {}) {
     }
     tile.releasedSrc = src;
     tile.live = false;
+    video.volume = 0; // never heard as a still, whichever window is heard next
     swapState = null; // a quality swap that had not landed yet: the shadow has the state now
     video.pause(); video.removeAttribute('src'); video.load();
     still.hidden = false; el.classList.add('still');
@@ -2521,6 +2565,7 @@ function addVideo(filePath, state = {}) {
   const setTileVolume = (pct) => {
     tile.volume = clamp(pct, 0, 100) / 100;
     applyTileVolume(tile);
+    emitPlayback(tile, 'volume', tile.volume);
     if (tile.volume > 0 && tile.ownMuted) setOwnMuted(tile, false);
     updateMuteBtn();
     updateVolUI();
@@ -3100,7 +3145,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
   }
   if (!tile.addBookmark && streamable) { const { renderMarkers } = attachBookmarks(tile, el, videoPb); tile.refreshWebMarkers = renderMarkers; }
   applyTileLoop(tile);
-  tile.setVolume = (pct) => { tile.volume = clamp(pct, 0, 100) / 100; applyTileVolume(tile); if (tile.volume > 0 && tile.ownMuted) setOwnMuted(tile, false); refreshMute(); };
+  tile.setVolume = (pct) => { tile.volume = clamp(pct, 0, 100) / 100; applyTileVolume(tile); emitPlayback(tile, 'volume', tile.volume); if (tile.volume > 0 && tile.ownMuted) setOwnMuted(tile, false); refreshMute(); };
   tile.destroy = () => {
     clearTimeout(loadTimer);
     if (tile.yt) tile.yt.destroy();
@@ -5180,6 +5225,7 @@ function applyLiveBudget() {
     else if (t.live) t.release();
     else t.onShadow(); // a still's clock keeps moving: keep its time and seek bar honest
   }
+  refreshLiveSet(); // which window is heard for each tile may have moved
 }
 setInterval(() => { if (!document.hidden) { applyLiveBudget(); applyOffscreen(); } }, 500);
 grid.addEventListener('scroll', scheduleOffscreen, { passive: true });
@@ -5701,9 +5747,12 @@ let snapSeq = 0, lastSnapKey = '';    // main: sequence number, and what the las
 let lastSeq = 0, lastGroups = [];     // view: the last snapshot applied, and its groups
 let viewFitted = false;               // view: framed the board once, after the first tiles came in
 // what a snapshot says about the board, minus what moves on its own (time, play state, speed, sound)
-const SNAP_SKIP = new Set(['currentTime', 'paused', 'playbackRate', 'volume', 'muted', 'savedAt']);
+// const SNAP_SKIP = new Set(['currentTime', 'paused', 'playbackRate', 'volume', 'muted', 'savedAt']);
+// (sound is board state since 2026-10-20: a volume or mute change in main reaches the views)
+const SNAP_SKIP = new Set(['currentTime', 'paused', 'playbackRate', 'savedAt']);
 function snapshotNow(force) {
   if (IS_VIEW || !viewsOpen.size) return;
+  refreshLiveSet(); // the views know a new tile is heard here before they build it
   const s = collectSession();
   const body = { videos: s.videos, groups: s.groups, layout: { mode: layout.mode, quality: layout.quality, timeDisplay: layout.timeDisplay }, name: sessionPath ? basename(sessionPath) : '' };
   const key = JSON.stringify(body, (k, v) => (SNAP_SKIP.has(k) ? undefined : v));
@@ -5726,6 +5775,7 @@ function applySnapshot(msg) {
     if (lay.mode && lay.mode !== layout.mode) setMode(lay.mode);
     if (lay.timeDisplay && lay.timeDisplay !== layout.timeDisplay) { layout.timeDisplay = lay.timeDisplay; for (const t of tiles) if (t.refreshTime) t.refreshTime(); }
     if (lay.quality && lay.quality !== layout.quality) { layout.quality = lay.quality; syncQualityRadios(); for (const t of tiles) if (t.applyQuality) t.applyQuality(); }
+    applyGroupSound(msg);
     const current = tiles.map((t) => ({ id: t.id, board: t.board ? { ...t.board } : null, galleryH: t.galleryH, sig: t.snapSig }));
     const d = Snapshot.diff(current, msg, lastGroups);
     for (const id of [...d.remove, ...d.rebuild.map((r) => r.id)]) { const t = tileById(id); if (t) removeTile(t, { record: false }); }
@@ -5747,6 +5797,14 @@ function applySnapshot(msg) {
       for (const g of regroup) { const list = g.members.map(tileById).filter(Boolean); if (list.length > 1) createGroup(list, g.opts); }
       lastGroups = regroup;
     }
+    // each tile's volume and mute as main has them (not one this view changed a moment ago and
+    // main has not heard about yet)
+    for (const rec of msg.videos || []) {
+      const t = rec && tileById(rec.id);
+      if (!t || !(t.video || t.yt) || touchedHere(t)) continue;
+      if (Number.isFinite(rec.volume) && Math.abs(rec.volume - t.volume) > 1e-6 && t.setVolume) t.setVolume(rec.volume * 100);
+      if (!!rec.muted !== !!t.ownMuted) setOwnMuted(t, !!rec.muted);
+    }
     // the board's stacking order is the main window's
     const order = new Map(((msg.videos) || []).map((r, i) => [r && r.id, i]));
     tiles.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
@@ -5757,15 +5815,57 @@ function applySnapshot(msg) {
   scheduleOffscreen(); // the live budget for what is now on screen here
 }
 
+const touchedHere = (t) => !!t.localActAt && performance.now() - t.localActAt < 1500;
+// A group's volume or mute changed in main: set it here as it is, rather than letting the snapshot
+// take the group apart and build it again for a slider's every step.
+function applyGroupSound(msg) {
+  const incoming = Snapshot.groupsOf(msg);
+  incoming.forEach((ng, i) => {
+    const og = lastGroups[i];
+    if (!og || JSON.stringify(og.members) !== JSON.stringify(ng.members)) return;
+    const first = tileById(ng.members[0]), g = first && first.group;
+    if (!g || g.members.size !== ng.members.length) return;
+    // (changed here a moment ago: this view's value stands until main has heard of it)
+    if (!touchedHere(first)) {
+      if (Number.isFinite(ng.opts.volume)) g.volume = clamp(ng.opts.volume, 0, 1);
+      if ('muted' in ng.opts) g.muted = !!ng.opts.muted;
+      applyGroupAudio(g);
+    }
+    if ('volume' in og.opts && 'volume' in ng.opts) og.opts.volume = ng.opts.volume;
+    if ('muted' in og.opts && 'muted' in ng.opts) og.opts.muted = ng.opts.muted;
+  });
+}
+
 if (window.api.onBus) window.api.onBus((msg) => {
   if (!msg || typeof msg !== 'object') return;
-  if (msg.type === 'snapshot-request' && !IS_VIEW) { if (msg.n) viewsOpen.add(msg.n); snapshotNow(true); if (msg.n) sendViewHint(msg.n); return; }
-  if (msg.type === 'view-closed' && !IS_VIEW) { viewsOpen.delete(msg.n); viewStates.delete(msg.n); viewHints.delete(msg.n); return; }
+  // which tiles another window decodes (and, from main, the master volume): who is heard may move
+  if (msg.type === 'live' && Number.isInteger(msg.n) && msg.n !== window.OZY_VIEW) {
+    const newcomer = !liveSets.has(msg.n);
+    liveSets.set(msg.n, new Set(msg.ids || []));
+    // a window not heard from before (just opened, or after main-hello) learns this one's set too:
+    // two views showing a tile main does not must know of each other, or both would be heard
+    if (newcomer && liveSets.has(window.OZY_VIEW)) announceLive([...liveSets.get(window.OZY_VIEW)]);
+    if (IS_VIEW && Number.isFinite(msg.master)) setMasterVolume(msg.master); // (applies every tile's volume)
+    else applyAudioOwners();
+    return;
+  }
+  if (msg.type === 'live-gone' && Number.isInteger(msg.n)) { liveSets.delete(msg.n); applyAudioOwners(); return; } // a view closed
+  // (a view that asks learns first which tiles main is heard for, then what is on the board)
+  if (msg.type === 'snapshot-request' && !IS_VIEW) { if (msg.n) viewsOpen.add(msg.n); announceLive([...(liveSets.get(0) || [])]); snapshotNow(true); if (msg.n) sendViewHint(msg.n); return; }
+  // if (msg.type === 'view-closed' && !IS_VIEW) { viewsOpen.delete(msg.n); viewStates.delete(msg.n); viewHints.delete(msg.n); return; }
+  // a closed view is heard for nothing: main takes back what it shows, and tells the other view too
+  if (msg.type === 'view-closed' && !IS_VIEW) {
+    viewsOpen.delete(msg.n); viewStates.delete(msg.n); viewHints.delete(msg.n);
+    liveSets.delete(msg.n); applyAudioOwners();
+    if (window.api.bus) window.api.bus({ type: 'live-gone', n: msg.n });
+    return;
+  }
   if (msg.type === 'view-state' && !IS_VIEW) { viewStates.set(msg.n, msg); viewHints.delete(msg.n); return; } // it has its own camera now
   if (msg.type === 'view-hint' && IS_VIEW && msg.n === window.OZY_VIEW) { applyViewHint(msg); return; }
   if (msg.type === 'snapshot' && IS_VIEW) { quietly(() => applySnapshot(msg)); return; } // building tiles here is not playback to send
   // the main window (re)started: its snapshot numbers start again, so ask afresh
-  if (msg.type === 'main-hello' && IS_VIEW) { lastSeq = 0; lastViewState = ''; window.api.bus({ type: 'snapshot-request', n: window.OZY_VIEW }); return; } // and tell it again where this view is
+  // and tell it again where this view is, and which tiles it decodes (the old main's sets go)
+  if (msg.type === 'main-hello' && IS_VIEW) { lastSeq = 0; lastViewState = ''; liveSets.clear(); lastLiveKey = ''; applyAudioOwners(); window.api.bus({ type: 'snapshot-request', n: window.OZY_VIEW }); return; }
   if (msg.type === 'settings' && msg.viewLiveCap) {
     settings.viewLiveCap = msg.viewLiveCap; optLiveCap.value = String(settings.viewLiveCap); applyLiveBudget(); return;
   }
@@ -5826,6 +5926,11 @@ function applyPlayback(msg) {
       else if (o.op === 'pause') { p.pause(); if (Number.isFinite(o.time)) p.time = o.time; }
       else if (o.op === 'seek') { if (Number.isFinite(o.value)) p.time = o.value; }
       else if (o.op === 'scrub') { if (Number.isFinite(o.value)) pbScrub(p, o.value); }
+      else if (o.op === 'mute') setOwnMuted(t, !!o.value);
+      else if (o.op === 'volume') { if (Number.isFinite(o.value) && t.setVolume) t.setVolume(o.value * 100); }
+      else if (o.op === 'group-audio') {
+        if (t.group && o.value) { if (Number.isFinite(o.value.volume)) t.group.volume = clamp(o.value.volume, 0, 1); t.group.muted = !!o.value.muted; applyGroupAudio(t.group); }
+      }
       else if (o.op === 'rate' && Number(o.value) > 0) {
         p.rate = Number(o.value);
         const sel = t.el.querySelector('select.rate, .rate select, select[class*="rate"]');
