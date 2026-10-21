@@ -57,6 +57,12 @@ Baseline: `feat/board-polish-and-performance` at `8dbe966` (v0.2.0.13 pre-releas
 - The bus is `ipcRenderer.send('bus', msg)` → main process → `webContents.send('bus', msg)` to
   every other Ozy window. Main does no interpretation except: a `snapshot-request` from a new
   view is forwarded to the main window only.
+- **Sound** (amended 2026-10-20, Scott: "if it's playing, and in ANY view, I should be able to
+  hear it"): a tile is heard from one window: main if it decodes it, else the lowest-numbered
+  view that does (`Lod.audioOwner`). Every window sends `{ type: 'live', n, ids }` with the tiles
+  it decodes (main adds `master`); a still is muted the moment it is released, so a tile is
+  never heard twice. Mute and volume are shared board state: changing them in any window sends
+  a `mute` / `volume` / `group-audio` playback op, and the snapshot carries them too.
 - Closing a view closes nothing else. Closing the main window closes its views. A view opened
   while the board is empty shows the empty-board hint.
 - Session file: `layout.views = [{ bounds: {x,y,w,h}, panX, panY, zoom }]`, written by the main
