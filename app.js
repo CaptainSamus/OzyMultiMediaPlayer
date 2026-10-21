@@ -12,6 +12,46 @@ let snapshotApplying = false;
 const viewMayEdit = () => !IS_VIEW || snapshotApplying;
 let viewSessionName = ''; // a view's title names the main window's session
 
+// ---------- playback mirroring ----------
+// Every play, pause, seek, scrub and speed change made on a tile through its tile.pb is sent to
+// the other Ozy windows, which apply it to their own copy of the tile (by id). Changes this
+// window makes on its own behalf (the sync engine, offscreen pause) and changes it applies for
+// another window are quiet, so nothing bounces back. Ops made in the same tick go as one message.
+let pbQuiet = 0;
+const quietly = (fn) => { pbQuiet++; try { return fn(); } finally { pbQuiet--; } };
+let pbOut = [];
+function emitPlayback(tile, op, value) {
+  if (pbQuiet || !tile || !tile.id || !window.api.bus) return;
+  tile.localActAt = performance.now(); // the clock leaves this tile alone for a moment
+  if (!pbOut.length) queueMicrotask(() => {
+    const ops = Snapshot.batch(pbOut).map((o) => ({ ...o, time: o.tile.pb ? o.tile.pb.time : 0 })).map(({ tile: _t, ...o }) => o);
+    pbOut = [];
+    window.api.bus({ type: 'playback', from: window.OZY_VIEW, ops });
+  });
+  pbOut.push({ tile, id: tile.id, op, value });
+}
+// tile.pb, observed: whatever playback object a tile has now or is given later (a web tile swaps
+// between its embed and its <video>) reports the changes made through it
+function observePb(tile) {
+  let inner = tile.pb, outer = null;
+  const wrap = (pb) => (pb && typeof pb === 'object' ? new Proxy(pb, {
+    get(target, prop) {
+      const v = Reflect.get(target, prop, target);
+      if (prop === 'play' || prop === 'pause') return (...a) => { emitPlayback(tile, prop); return v.apply(target, a); };
+      if (prop === 'scrub' && typeof v === 'function') return (t) => { const r = v.call(target, t); emitPlayback(tile, 'scrub', t); return r; };
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+    set(target, prop, value) {
+      const r = Reflect.set(target, prop, value, target);
+      if (prop === 'time') emitPlayback(tile, 'seek', value);
+      else if (prop === 'rate') emitPlayback(tile, 'rate', value);
+      return r;
+    },
+  }) : pb);
+  outer = wrap(inner);
+  Object.defineProperty(tile, 'pb', { configurable: true, enumerable: true, get: () => outer, set: (pb) => { inner = pb; outer = wrap(pb); } });
+}
+
 const grid = document.getElementById('grid');
 const canvas = document.getElementById('canvas');
 const emptyEl = document.getElementById('empty');
@@ -692,6 +732,9 @@ document.getElementById('btn-ungroup').addEventListener('click', () => { if (act
 // action: 'play' | 'pause' | 'seek' | 'rate'. Only call from user actions, never
 // from media events (those fire later, outside the `syncing` guard).
 function broadcast(leader, action, value) {
+  // the other windows hear about the leader here: its own bar and keys move its <video> directly,
+  // not through tile.pb (the members below go through tile.pb and report themselves)
+  if (leader.pb) emitPlayback(leader, action, action === 'rate' ? value : action === 'seek' || action === 'scrub' ? leader.pb.time : undefined);
   const g = leader.group;
   if (!g) return;
   if (action === 'rate') { g.rate = value; applyGroupAudio(g); if (active === g) renderGroupBar(); return; } // speed is shared even without Sync
@@ -711,8 +754,11 @@ function broadcast(leader, action, value) {
   } finally { syncing = false; }
 }
 
-// Runs 10x a second: drift correction, waiting members, held members, loops.
-setInterval(() => {
+// Runs 10x a second: drift correction, waiting members, held members, loops. Quiet (what it does
+// is this window's own correction), and not at all in a view: a view follows the main window's
+// playback messages and clock instead.
+setInterval(() => { if (!IS_VIEW) quietly(syncEngineTick); }, 100);
+function syncEngineTick() {
   for (const g of groups) {
     if (!g.sync) continue;
     const ms = memberModel(g);
@@ -746,7 +792,7 @@ setInterval(() => {
       }
     } finally { syncing = false; }
   }
-}, 100);
+}
 
 // ---------- marker colours ----------
 const MARKER_COLORS = Groups.PALETTE;
@@ -2033,6 +2079,7 @@ function addVideo(filePath, state = {}) {
     tile.board = { x: Number(sb.x), y: Number(sb.y), w: Number(sb.w), h: Number(sb.h) };
   }
   tiles.push(tile);
+  observePb(tile);
   tile.pb = budgetedPlayback(tile, tile.pb); // reads the still's clock while the source is released
   tile.info = null; tile.proxy = null; tile.fps = null;
   tile.fpsOverride = Number(state.fpsOverride) > 0 ? Number(state.fpsOverride) : null; // ⚙: frame step / timecode only
@@ -2673,6 +2720,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
   const sb = state.board;
   if (sb && isFinite(sb.x) && isFinite(sb.y) && sb.w > 0 && sb.h > 0) tile.board = { x: Number(sb.x), y: Number(sb.y), w: Number(sb.w), h: Number(sb.h) };
   tiles.push(tile);
+  observePb(tile); // its playback changes reach the other windows
   // YouTube tiles get their own timeline colour like local videos (Twitch never shows on the timeline)
   if (parsed.type === 'youtube') tile.hue = GROUP_PALETTE.includes(state.color) ? state.color : GROUP_PALETTE[(tiles.length - 1) % GROUP_PALETTE.length];
   nameEl.textContent = tile.title;
@@ -3496,6 +3544,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
   const sb = state.board;
   if (sb && isFinite(sb.x) && isFinite(sb.y) && sb.w > 0 && sb.h > 0) tile.board = { x: +sb.x, y: +sb.y, w: +sb.w, h: +sb.h };
   tiles.push(tile);
+  observePb(tile); // its playback changes reach the other windows
   tile.hue = GROUP_PALETTE.includes(state.color) ? state.color : GROUP_PALETTE[(tiles.length - 1) % GROUP_PALETTE.length];
   const nameEl = el.querySelector('.name');
   nameEl.textContent = tile.title;
@@ -4971,7 +5020,8 @@ function watchPause(t) {
   const pause = pb.pause.bind(pb);
   pb.pause = () => { t.autoPaused = false; pause(); };
 }
-function offscreenResume(t) {
+function offscreenResume(t) { quietly(() => offscreenResumeNow(t)); } // this window's own business
+function offscreenResumeNow(t) {
   t.autoPaused = false;
   const g = t.group;
   if (g && g.sync && t.sync) {
@@ -4981,7 +5031,8 @@ function offscreenResume(t) {
   }
   t.pb.play();
 }
-function applyOffscreen() {
+function applyOffscreen() { quietly(applyOffscreenNow); } // a pause here is not the board's
+function applyOffscreenNow() {
   if (!offscreenOn()) return;
   const r = gridRect();
   const view = { x: r.left, y: r.top, w: r.width, h: r.height };
@@ -5528,7 +5579,7 @@ function snapshotNow(force) {
 }
 // Five times a second while a view is open: cheaper and surer than hooking every place that can
 // change the board (a drag, a tidy, an undo, a paste, a metadata-corrected aspect, a text edit).
-if (!IS_VIEW) setInterval(() => { if (viewsOpen.size && !document.hidden) snapshotNow(false); }, 200);
+if (!IS_VIEW) setInterval(() => { if (viewsOpen.size) snapshotNow(false); }, 200); // even minimised: the views may be on show
 
 function applySnapshot(msg) {
   if (!Snapshot.accept(lastSeq, msg.seq)) return; // older than one already applied
@@ -5616,3 +5667,57 @@ if (IS_VIEW) {
   }, true);
   window.api.bus({ type: 'snapshot-request', n: window.OZY_VIEW });
 } else if (window.api.bus) window.api.bus({ type: 'main-hello' }); // views left open from before ask again
+
+// Apply another window's playback ops to this window's copies, quietly. A pause lands on the exact
+// time it was made at; a play only seeks when this copy is clearly off.
+function applyPlayback(msg) {
+  quietly(() => {
+    for (const o of msg.ops || []) {
+      const t = tileById(o.id);
+      if (!t || !t.pb) continue;
+      const p = t.pb;
+      if (o.op === 'play') { if (Snapshot.clockFix(p.time, o.time, 0.25) !== null) p.time = o.time; p.play(); }
+      else if (o.op === 'pause') { p.pause(); if (Number.isFinite(o.time)) p.time = o.time; }
+      else if (o.op === 'seek') { if (Number.isFinite(o.value)) p.time = o.value; }
+      else if (o.op === 'scrub') { if (Number.isFinite(o.value)) pbScrub(p, o.value); }
+      else if (o.op === 'rate' && Number(o.value) > 0) {
+        p.rate = Number(o.value);
+        const sel = t.el.querySelector('select.rate, .rate select, select[class*="rate"]');
+        if (sel) sel.value = String(o.value);
+      }
+      if (t.tick) t.tick();
+      if (t.refreshTime) t.refreshTime();
+      if (t.onShadow && !t.live) t.onShadow();
+    }
+  });
+  if (active) renderGroupBar();
+}
+// Once a second the main window says where every tile is and which are playing (a tile it only
+// paused because it is off screen counts as playing). A view puts right anything clearly off,
+// except a tile it acted on itself a moment ago or one it has paused off screen on its own.
+const boardPlaying = (t) => !!t.pb && (!t.pb.paused || !!t.autoPaused);
+if (!IS_VIEW) setInterval(() => {
+  if (!viewsOpen.size) return;
+  const times = {}, playing = [];
+  for (const t of tiles) if (t.pb && t.id) { times[t.id] = t.pb.time; if (boardPlaying(t)) playing.push(t.id); }
+  window.api.bus({ type: 'clock', times, playing });
+}, 1000);
+function applyClock(msg) {
+  const on = new Set(msg.playing || []), now = performance.now();
+  quietly(() => {
+    for (const t of tiles) {
+      if (!t.pb || !t.id || !(t.id in (msg.times || {})) || t.scrubbing || t.autoPaused) continue;
+      const since = t.localActAt ? now - t.localActAt : Infinity;
+      const act = Snapshot.clockPlay(t.pb.paused, on.has(t.id), since);
+      if (act) t.pb[act]();
+      if (since < Snapshot.CLOCK_GRACE_MS || (t.pb.settling)) continue;
+      const fix = Snapshot.clockFix(t.pb.time, msg.times[t.id], 0.25);
+      if (fix !== null) t.pb.time = fix;
+    }
+  });
+}
+if (window.api.onBus) window.api.onBus((msg) => {
+  if (!msg || typeof msg !== 'object') return;
+  if (msg.type === 'playback') applyPlayback(msg);
+  else if (msg.type === 'clock' && IS_VIEW) applyClock(msg);
+});

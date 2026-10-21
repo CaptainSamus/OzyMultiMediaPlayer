@@ -283,6 +283,10 @@ function openView(n, bounds) {
       sandbox: false,
       spellcheck: false,
       webSecurity: true,
+      // A view is silent (the main window has the sound), and Chromium pauses a silent video in a
+      // window it thinks is hidden - a view behind the main window, or on a monitor it thinks is
+      // covered. A view has to keep playing in step whatever is in front of it.
+      backgroundThrottling: false,
     },
   });
   v.loadURL(`http://127.0.0.1:${uiPort}/index.html?view=${n}`);
