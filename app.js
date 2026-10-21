@@ -5893,7 +5893,8 @@ if (winMenu) {
 // In a view only the keys that look and play do anything: no adding, removing, grouping, undo,
 // opening or saving, no tile settings. (Caught before every other handler.)
 if (IS_VIEW) {
-  const VIEW_KEYS = new Set([' ', 'arrowleft', 'arrowright', 'k', ',', '.', '[', ']', 'escape', 'h', 'f', 't', 'tab', 'shift', 'control', 'alt', 'meta']);
+  // const VIEW_KEYS = new Set([' ', 'arrowleft', 'arrowright', 'k', ',', '.', '[', ']', 'escape', 'h', 'f', 't', 'tab', 'shift', 'control', 'alt', 'meta']);
+  const VIEW_KEYS = new Set([' ', 'arrowleft', 'arrowright', 'k', ',', '.', '[', ']', 'escape', 'h', 'f', 't', 'm', 'tab', 'shift', 'control', 'alt', 'meta']); // M mutes (shared, since 2026-10-20)
   window.addEventListener('keydown', (e) => {
     const tag = (e.target && e.target.tagName) || '';
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return; // the controls a view keeps
