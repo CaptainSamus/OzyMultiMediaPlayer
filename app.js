@@ -4067,6 +4067,7 @@ function collectSession() {
       timeDisplay: layout.timeDisplay,
       timelineExpanded: layout.timelineExpanded,
       timelineHeight: layout.timelineHeight,
+      views: viewsForSession(), // the extra view windows open now, where they are and their camera
       quality: layout.quality, // v6: the scene's playback resolution
     },
     masterVolume,
@@ -4215,6 +4216,7 @@ async function applySession(data) {
     version: data.version, tiles: tiles.length, loaded: data.videos.length,
     missing: missing.length !== undefined ? missing.length : missing, mode: layout.mode, ms: Date.now() - startedAt,
   });
+  reopenViews(data.layout && data.layout.views); // the views that were open when it was saved
   return { loaded: data.videos.length, missing };
 }
 
@@ -5563,6 +5565,33 @@ setMasterVolume(DEFAULT_MASTER_VOLUME);
 // id) whenever the board changes, and each view applies it by diff (lib/snapshot.js). A view
 // pans, zooms, selects and plays on its own; it never changes the layout.
 const viewsOpen = new Set();          // main: the views that asked for snapshots
+const viewStates = new Map();         // main: n -> what each open view last reported (window and camera)
+const viewHints = new Map();          // main: n -> the camera a reopened view should take up
+let viewHintPending = null;           // view: a camera the main window asked for, before the tiles were in
+function viewsForSession() {
+  if (IS_VIEW) return [];
+  return [...viewStates.values()].filter((v) => viewsOpen.has(v.n)).map((v) => ({ n: v.n, bounds: v.bounds, panX: v.panX, panY: v.panY, zoom: v.zoom }));
+}
+// opening a session reopens its views where they were, each with its own camera
+function reopenViews(raw) {
+  if (IS_VIEW) return;
+  for (const v of Session.views(raw)) {
+    if (v.zoom !== null && v.panX !== null && v.panY !== null) viewHints.set(v.n, { panX: v.panX, panY: v.panY, zoom: v.zoom });
+    window.api.openView(v.n, v.bounds);
+    sendViewHint(v.n); // a view that was already open takes it now; a new one when it asks for the board
+  }
+}
+function sendViewHint(n) {
+  const h = viewHints.get(n);
+  if (h) window.api.bus({ type: 'view-hint', n, ...h });
+}
+function applyViewHint(h) {
+  if (!tiles.length) { viewHintPending = h; return; } // after the first snapshot
+  board.panX = h.panX; board.panY = h.panY; board.zoom = h.zoom; board.initialized = true;
+  viewFitted = true;
+  applyBoardView();
+  scheduleOffscreen();
+}
 let snapSeq = 0, lastSnapKey = '';    // main: sequence number, and what the last snapshot said
 let lastSeq = 0, lastGroups = [];     // view: the last snapshot applied, and its groups
 let viewFitted = false;               // view: framed the board once, after the first tiles came in
@@ -5618,14 +5647,17 @@ function applySnapshot(msg) {
     tiles.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
   } finally { snapshotApplying = false; }
   layoutTiles(); markOnBoard(); renderTimeline(); updateChrome();
-  if (tiles.length && (wasEmpty || !viewFitted)) { viewFitted = true; fitAll(); }
+  if (tiles.length && viewHintPending) { const h = viewHintPending; viewHintPending = null; applyViewHint(h); }
+  else if (tiles.length && (wasEmpty || !viewFitted)) { viewFitted = true; fitAll(); }
   scheduleOffscreen(); // the live budget for what is now on screen here
 }
 
 if (window.api.onBus) window.api.onBus((msg) => {
   if (!msg || typeof msg !== 'object') return;
-  if (msg.type === 'snapshot-request' && !IS_VIEW) { if (msg.n) viewsOpen.add(msg.n); snapshotNow(true); return; }
-  if (msg.type === 'view-closed' && !IS_VIEW) { viewsOpen.delete(msg.n); return; }
+  if (msg.type === 'snapshot-request' && !IS_VIEW) { if (msg.n) viewsOpen.add(msg.n); snapshotNow(true); if (msg.n) sendViewHint(msg.n); return; }
+  if (msg.type === 'view-closed' && !IS_VIEW) { viewsOpen.delete(msg.n); viewStates.delete(msg.n); viewHints.delete(msg.n); return; }
+  if (msg.type === 'view-state' && !IS_VIEW) { viewStates.set(msg.n, msg); viewHints.delete(msg.n); return; } // it has its own camera now
+  if (msg.type === 'view-hint' && IS_VIEW && msg.n === window.OZY_VIEW) { applyViewHint(msg); return; }
   if (msg.type === 'snapshot' && IS_VIEW) { applySnapshot(msg); return; }
   // the main window (re)started: its snapshot numbers start again, so ask afresh
   if (msg.type === 'main-hello' && IS_VIEW) { lastSeq = 0; window.api.bus({ type: 'snapshot-request', n: window.OZY_VIEW }); return; }
@@ -5666,6 +5698,16 @@ if (IS_VIEW) {
     e.stopImmediatePropagation();
   }, true);
   window.api.bus({ type: 'snapshot-request', n: window.OZY_VIEW });
+  // tell the main window where this view is and where its camera points, when that changes (and
+  // as it closes), so a saved session can bring it back
+  let lastViewState = '';
+  const reportViewState = async () => {
+    const bounds = await window.api.viewBounds();
+    const st = { type: 'view-state', n: window.OZY_VIEW, bounds: bounds ? { x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height } : null, panX: board.panX, panY: board.panY, zoom: board.zoom };
+    const key = JSON.stringify(st);
+    if (key !== lastViewState && tiles.length) { lastViewState = key; window.api.bus(st); }
+  };
+  setInterval(reportViewState, 1000);
 } else if (window.api.bus) window.api.bus({ type: 'main-hello' }); // views left open from before ask again
 
 // Apply another window's playback ops to this window's copies, quietly. A pause lands on the exact

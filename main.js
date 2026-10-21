@@ -265,8 +265,15 @@ function openView(n, bounds) {
   if (n !== 1 && n !== 2) return false;
   const open = views.get(n);
   if (open && !open.isDestroyed()) { if (open.isMinimized()) open.restore(); open.focus(); return true; }
-  const b = bounds && typeof bounds === 'object' ? bounds : {};
+  const b = bounds && typeof bounds === 'object' ? { ...bounds } : {};
   const num = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : undefined);
+  // a saved place on a monitor that is not there any more: let the system place the window
+  if (num(b.x) !== undefined && num(b.y) !== undefined) {
+    const { screen } = require('electron');
+    const r = { x: num(b.x), y: num(b.y), width: num(b.w) || 1100, height: num(b.h) || 700 };
+    const onScreen = screen.getAllDisplays().some((d) => { const a = d.workArea; return r.x < a.x + a.width - 40 && r.x + r.width > a.x + 40 && r.y < a.y + a.height - 40 && r.y + r.height > a.y; });
+    if (!onScreen) { delete b.x; delete b.y; }
+  }
   const v = new BrowserWindow({
     width: num(b.w) > 300 ? num(b.w) : 1100,
     height: num(b.h) > 200 ? num(b.h) : 700,
@@ -298,6 +305,7 @@ function openView(n, bounds) {
   return true;
 }
 ipcMain.handle('open-view', (_e, n, bounds) => openView(Number(n), bounds));
+ipcMain.handle('view-bounds', (e) => { const w = BrowserWindow.fromWebContents(e.sender); return w && !w.isDestroyed() ? w.getBounds() : null; });
 // The bus: whatever one Ozy window sends goes to every other one, untouched. A new view's
 // snapshot-request goes to the main window only. A window that is closing is skipped.
 ipcMain.on('bus', (e, msg) => {

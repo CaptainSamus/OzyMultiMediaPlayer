@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld('api', {
   onBus: (cb) => ipcRenderer.on('bus', (_e, m) => cb(m)),
   openView: (n, bounds) => ipcRenderer.invoke('open-view', n, bounds),
   viewNumber: () => Number(new URLSearchParams(location.search).get('view') || 0),
+  viewBounds: () => ipcRenderer.invoke('view-bounds'),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (s) => ipcRenderer.invoke('save-settings', s),
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
