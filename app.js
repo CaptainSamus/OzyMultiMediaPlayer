@@ -2136,16 +2136,29 @@ function addVideo(filePath, state = {}) {
   tile.tick = () => { updateSeek(); };
 
   // ----- seeking helpers -----
+  // (a still has no source: seeking and stepping move its shadow clock through tile.pb instead)
   const seekTo = (t) => {
+    if (!tile.live) {
+      tile.pb.time = clamp(t, 0, tile.pb.duration || Infinity);
+      tile.onShadow();
+      broadcast(tile, 'seek');
+      return;
+    }
     if (!video.duration) return;
     video.currentTime = clamp(t, 0, video.duration);
     updateTimeLabel();
     updateSeek();
     broadcast(tile, 'seek');
   };
-  const seekBy = (dt) => seekTo(video.currentTime + dt);
+  const seekBy = (dt) => seekTo(tile.pb.time + dt);
   tile.seekBy = seekBy;
   const stepFrame = (dir) => {
+    if (!tile.live) {
+      tile.pb.pause();
+      broadcast(tile, 'pause');
+      seekTo(Frames.step(tile.pb.time, effectiveFps(tile) || Frames.DEFAULT_FPS, dir));
+      return;
+    }
     if (!video.duration) return;
     video.pause();
     broadcast(tile, 'pause');
@@ -2234,7 +2247,10 @@ function addVideo(filePath, state = {}) {
       try {
         if (video.videoWidth && video.readyState >= 2) { still.width = video.videoWidth; still.height = video.videoHeight; still.getContext('2d').drawImage(video, 0, 0); }
       } catch {}
-      tile.shadow = { time: video.currentTime || 0, rate: video.playbackRate || 1, playing: !video.paused, duration: video.duration || 0, at: performance.now() };
+      // a tile released before its metadata came in (a big session just opened) or in the middle
+      // of a quality swap starts from what it was opened at, or from the swap's saved place
+      const seed = Lod.seed({ readyState: video.readyState, videoTime: video.currentTime, videoPaused: video.paused, rate: video.playbackRate, swap: swapState, wantTime, wantPlaying });
+      tile.shadow = { ...seed, duration: video.duration || 0, at: performance.now() };
     }
     tile.releasedSrc = src;
     tile.live = false;
@@ -2469,6 +2485,15 @@ function addVideo(filePath, state = {}) {
   seek.addEventListener('pointerup', endScrub);
   seek.addEventListener('pointercancel', endScrub);
   seek.addEventListener('input', () => {
+    if (!tile.live) { // a still: the bar moves its clock
+      if (!tile.pb.duration) return;
+      const f = Number(seek.value) / 10000;
+      tile.pb.time = f * tile.pb.duration;
+      seek.style.setProperty('--progress', (f * 100).toFixed(2) + '%');
+      updateTimeLabel();
+      if (!tile.scrubbing) broadcast(tile, 'seek');
+      return;
+    }
     if (!video.duration) return;
     const frac = Number(seek.value) / 10000;
     video.currentTime = frac * video.duration;
@@ -2480,8 +2505,13 @@ function addVideo(filePath, state = {}) {
   seek.addEventListener('change', () => { if (!tile.scrubbing) updateSeek(); });
   seek.addEventListener('keydown', (e) => {
     // step 5 s with arrow keys instead of 1/10000 of the video
-    if (!video.duration) return;
     const step = e.shiftKey ? 30 : 5;
+    if (!tile.live) { // a still
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); seekBy(-step); }
+      if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); seekBy(step); }
+      return;
+    }
+    if (!video.duration) return;
     if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - step); broadcast(tile, 'seek'); }
     if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); video.currentTime = Math.min(video.duration, video.currentTime + step); broadcast(tile, 'seek'); }
   });
@@ -2921,7 +2951,8 @@ function addWebTile(url, parsed, state = {}, at = null) {
       video.pause(); video.removeAttribute('src'); video.load();
       showVideo(false);
       load(); // the embed
-      if (tile.yt && at > 0) setTimeout(() => { if (tile.webMode === 'player' && tile.yt) tile.pb.time = at; }, 1200);
+      // (quiet: putting the embed back where it was is this window's business, not a seek to send)
+      if (tile.yt && at > 0) setTimeout(() => { if (tile.webMode === 'player' && tile.yt) quietly(() => { tile.pb.time = at; }); }, 1200);
       return;
     }
     if (tile.webMode === 'download') { startDownload(); return; }
@@ -3975,6 +4006,7 @@ setInterval(() => { if (navigator.onLine) for (const t of tiles) if (t.offline &
 */
 
 function clearAll() {
+  if (!viewMayEdit()) return; // (removeTile refuses in a view: the loop below would never end)
   while (tiles.length) removeTile(tiles[tiles.length - 1], { record: false });
   undoStack.clear();
   clearTimeout(rowTimer); rowEntry = null;
@@ -4929,6 +4961,12 @@ window.api.getSettings().then((s) => {
   sbEl.hidden = !settings.sidebar.open;
   sidebar.setTab(settings.sidebar.tab);
   refreshUpdateMenu(); // the update checkboxes come from the same settings file
+  applySettingsToUi();
+  renderFolders();
+  renderPlaylists(); // from the cache in settings.json, no refetch
+});
+// the toggles and fields that show a setting; at startup, and when another window saved settings
+function applySettingsToUi() {
   wheelZoomEl.checked = !!settings.wheelZoom;
   optOffscreen.checked = settings.pauseOffscreen;
   applyLoadStrip(); // the strip and its height come back as they were left
@@ -4936,9 +4974,7 @@ window.api.getSettings().then((s) => {
   tidySlackEl.value = String(settings.tidySlack);
   hoverPlayBtn.classList.toggle('toggled', !!settings.hoverPlay); // the mode survives a restart
   ezPlayBtn.classList.toggle('toggled', !!settings.ezPlay); document.body.classList.toggle('ez-play', !!settings.ezPlay);
-  renderFolders();
-  renderPlaylists(); // from the cache in settings.json, no refetch
-});
+}
 window.api.ytdlpAvailable().then((ok) => {
   document.getElementById('sb-add-playlist').disabled = !ok;
   if (!ok) sbNote.textContent = 'yt-dlp not found; playlists unavailable';
@@ -5064,10 +5100,13 @@ function applyLiveBudget() {
   const view = { x: r.left, y: r.top, w: r.width, h: r.height };
   const fsEl = document.fullscreenElement, now = performance.now();
   const forced = (t) => (!cmp.el.hidden && (t === cmp.a || t === cmp.b)) || (fsEl && fsEl === t.el) || (t.wantedAt && now - t.wantedAt < LIVE_WANTED_MS);
+  // compare and fullscreen first, then the most recently touched (Lod caps them at the window's cap)
+  const forcedRank = (t) => ((!cmp.el.hidden && (t === cmp.a || t === cmp.b)) || (fsEl && fsEl === t.el) ? 0 : 1 + (now - (t.wantedAt || 0)));
   const items = tiles.filter((t) => (t.release || t.pb) && !t.freeAspect).map((t) => {
     const shown = t.el.isConnected && !t.el.hidden && (isBoard() ? !!t.board : true);
     const b = shown ? t.el.getBoundingClientRect() : { left: -1e6, top: -1e6, width: 0, height: 0 };
-    return { id: t, rect: { x: b.left, y: b.top, w: b.width, h: b.height }, playing: !!(t.pb && !t.pb.paused), budgeted: !!t.release, forced: !!(t.release && forced(t)) };
+    const f = !!(t.release && forced(t));
+    return { id: t, rect: { x: b.left, y: b.top, w: b.width, h: b.height }, playing: !!(t.pb && !t.pb.paused), budgeted: !!t.release, forced: f, forcedRank: f ? forcedRank(t) : 0 };
   });
   const live = Lod.choose(items, view, { minPx: LIVE_MIN_PX, cap: liveCapHere() });
   for (const t of tiles) {
@@ -5568,6 +5607,7 @@ const viewsOpen = new Set();          // main: the views that asked for snapshot
 const viewStates = new Map();         // main: n -> what each open view last reported (window and camera)
 const viewHints = new Map();          // main: n -> the camera a reopened view should take up
 let viewHintPending = null;           // view: a camera the main window asked for, before the tiles were in
+let lastViewState = '';               // view: what it last told the main window about itself
 function viewsForSession() {
   if (IS_VIEW) return [];
   return [...viewStates.values()].filter((v) => viewsOpen.has(v.n)).map((v) => ({ n: v.n, bounds: v.bounds, panX: v.panX, panY: v.panY, zoom: v.zoom }));
@@ -5658,15 +5698,15 @@ if (window.api.onBus) window.api.onBus((msg) => {
   if (msg.type === 'view-closed' && !IS_VIEW) { viewsOpen.delete(msg.n); viewStates.delete(msg.n); viewHints.delete(msg.n); return; }
   if (msg.type === 'view-state' && !IS_VIEW) { viewStates.set(msg.n, msg); viewHints.delete(msg.n); return; } // it has its own camera now
   if (msg.type === 'view-hint' && IS_VIEW && msg.n === window.OZY_VIEW) { applyViewHint(msg); return; }
-  if (msg.type === 'snapshot' && IS_VIEW) { applySnapshot(msg); return; }
+  if (msg.type === 'snapshot' && IS_VIEW) { quietly(() => applySnapshot(msg)); return; } // building tiles here is not playback to send
   // the main window (re)started: its snapshot numbers start again, so ask afresh
-  if (msg.type === 'main-hello' && IS_VIEW) { lastSeq = 0; window.api.bus({ type: 'snapshot-request', n: window.OZY_VIEW }); return; }
+  if (msg.type === 'main-hello' && IS_VIEW) { lastSeq = 0; lastViewState = ''; window.api.bus({ type: 'snapshot-request', n: window.OZY_VIEW }); return; } // and tell it again where this view is
   if (msg.type === 'settings' && msg.viewLiveCap) {
     settings.viewLiveCap = msg.viewLiveCap; optLiveCap.value = String(settings.viewLiveCap); applyLiveBudget(); return;
   }
   if (msg.type === 'settings-changed') {
     // another window saved: take the file's settings so this window never writes back a stale copy
-    window.api.getSettings().then((s) => { if (!s) return; settings = s; optLiveCap.value = String(settings.viewLiveCap); applyLiveBudget(); });
+    window.api.getSettings().then((s) => { if (!s) return; settings = s; applySettingsToUi(); applyLiveBudget(); });
   }
 });
 
@@ -5698,9 +5738,8 @@ if (IS_VIEW) {
     e.stopImmediatePropagation();
   }, true);
   window.api.bus({ type: 'snapshot-request', n: window.OZY_VIEW });
-  // tell the main window where this view is and where its camera points, when that changes (and
-  // as it closes), so a saved session can bring it back
-  let lastViewState = '';
+  // tell the main window where this view is and where its camera points, when that changes, so a
+  // saved session can bring it back
   const reportViewState = async () => {
     const bounds = await window.api.viewBounds();
     const st = { type: 'view-state', n: window.OZY_VIEW, bounds: bounds ? { x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height } : null, panX: board.panX, panY: board.panY, zoom: board.zoom };
