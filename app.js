@@ -225,7 +225,7 @@ function isAudioOwner(tile) {
   return Lod.audioOwner(tile.id, sets) === window.OZY_VIEW;
 }
 function applyTileVolume(tile) {
-  // a view is silent: the main window plays the sound, two windows would only echo it
+  // heard from one window only (main if it decodes the tile, else the lowest view): two would echo
   // const v = IS_VIEW ? 0 : clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1); // (views were silent until 2026-10-20)
   const v = isAudioOwner(tile) ? clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1) : 0;
   if (tile.video) tile.video.volume = v;
