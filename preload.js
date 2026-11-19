@@ -1,5 +1,12 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+// Where videos, pictures and cached frames come from: the media server process (main.js /
+// lib/mediaserver.js), or '' when it isn't running and main serves them as localvideo://. Asked
+// once now; main says if it changes (the server was restarted on another port).
+let mediaBase = '';
+try { mediaBase = ipcRenderer.sendSync('media-base') || ''; } catch {}
+ipcRenderer.on('media-base', (_e, base) => { mediaBase = base || ''; });
+
 contextBridge.exposeInMainWorld('api', {
   pickVideos: () => ipcRenderer.invoke('pick-videos'),
   saveSessionAs: (data) => ipcRenderer.invoke('save-session-as', data),
@@ -7,14 +14,19 @@ contextBridge.exposeInMainWorld('api', {
   loadSession: (filePath) => ipcRenderer.invoke('load-session', filePath || null),
   fileExists: (p) => ipcRenderer.invoke('file-exists', p),
   forgetDeadPaths: () => ipcRenderer.send('forget-dead-paths'),
+  // a drive or share that answered too slowly has answered after all
+  onPathsRecovered: (cb) => ipcRenderer.on('paths-recovered', () => cb()),
   // logging: errors and a few user actions go to the same file main writes (userData\logs)
   log: (level, msg, data) => ipcRenderer.send('log', level, msg, data),
   openLogs: () => ipcRenderer.invoke('open-logs'),
   copyDiagnostics: (session) => ipcRenderer.invoke('copy-diagnostics', session),
   getPathForFile: (file) => webUtils.getPathForFile(file),
-  videoUrl: (p) => 'localvideo://v/' + Buffer.from(p, 'utf8').toString('base64url'),
+  videoUrl: (p) => (mediaBase || 'localvideo://v/') + Buffer.from(p, 'utf8').toString('base64url'),
   onOpenSession: (cb) => ipcRenderer.on('open-session', (_e, p) => cb(p)),
   probe: (p) => ipcRenderer.invoke('probe', p),
+  audioPcm: (p, start, dur) => ipcRenderer.invoke('audio-pcm', p, start, dur), // lining up by sound
+  sceneCuts: (p, start, dur) => ipcRenderer.invoke('scene-cuts', p, start, dur), // (and its picture cuts)
+  frameActivity: (p, start, dur) => ipcRenderer.invoke('frame-activity', p, start, dur), // (and how its picture changes)
   makeProxy: (p, tier) => ipcRenderer.invoke('make-proxy', p, tier || 'full'),
   cancelProxy: (p, tier) => ipcRenderer.send('cancel-proxy', p, tier || 'full'),
   onProxyProgress: (cb) => ipcRenderer.on('proxy-progress', (_e, p, frac, tier) => cb(p, frac, tier || 'full')),
@@ -30,6 +42,8 @@ contextBridge.exposeInMainWorld('api', {
   downloadUpdate: () => ipcRenderer.invoke('update-download'),
   installUpdate: () => ipcRenderer.send('update-install'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  openLink: (url) => ipcRenderer.invoke('open-link', url), // a bookmark block's link (http / https)
+  linkInfo: (url) => ipcRenderer.invoke('link-info', url), // its page title, site name and icon
   onUpdateEvent: (cb) => ipcRenderer.on('update-event', (_e, msg) => cb(msg)),
   webThumb: (id) => ipcRenderer.invoke('web-thumb', id),
   // extra views: the message bus between Ozy windows, and which window this is (0 = main)
@@ -41,6 +55,16 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (s) => ipcRenderer.invoke('save-settings', s),
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
+  // Miro import (main does the talking to Miro; the token is never handed back here)
+  miroDefaults: () => ipcRenderer.invoke('miro-defaults'),
+  // a picture copied in another program (Chrome, Discord): what is on the clipboard, and paste it
+  clipboardKind: () => ipcRenderer.invoke('clipboard-kind'),
+  pasteImage: () => ipcRenderer.invoke('paste-image'),
+  miroPickRoot: (from) => ipcRenderer.invoke('miro-pick-root', from),
+  miroImport: (opts) => ipcRenderer.invoke('miro-import', opts),
+  miroCancel: () => ipcRenderer.invoke('miro-cancel'),
+  miroForgetToken: () => ipcRenderer.invoke('miro-forget-token'),
+  onMiroProgress: (cb) => ipcRenderer.on('miro-progress', (_e, p) => cb(p)),
   listFolder: (dir) => ipcRenderer.invoke('list-folder', dir),
   thumb: (p) => ipcRenderer.invoke('thumb', p),
   listPlaylist: (u) => ipcRenderer.invoke('list-playlist', u),
@@ -48,6 +72,9 @@ contextBridge.exposeInMainWorld('api', {
   ytdlpAvailable: () => ipcRenderer.invoke('ytdlp-available'),
   showInExplorer: (p) => ipcRenderer.invoke('show-in-explorer', p),
   copyText: (t) => ipcRenderer.invoke('copy-text', t),
+  // (2026-11-15) export: a part of the window as a PNG, and saving pictures or a PDF of them
+  captureRect: (rect) => ipcRenderer.invoke('capture-rect', rect),
+  saveExport: (job) => ipcRenderer.invoke('save-export', job),
   // image sequences (frame player)
   sequenceFor: (p) => ipcRenderer.invoke('sequence-for', p),
   seqInfo: (dir, seq) => ipcRenderer.invoke('seq-info', dir, seq),

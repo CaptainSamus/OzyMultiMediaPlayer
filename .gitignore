@@ -3,3 +3,6 @@ node_modules/
 dist/
 bin/
 !test-fixtures/sessions/*.mvp
+
+# Miro imports Mark keeps inside the project folder (pictures, gigabytes): never part of the code
+Ozy Imports/

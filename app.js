@@ -92,7 +92,7 @@ const MIN_H = 60;
 const MAX_H = 1200;
 const BOARD_MIN_H = 40;
 const BOARD_MAX_H = 4000;
-const MIN_ZOOM = 0.05;
+const MIN_ZOOM = 0.002; // (0.05 until 2026-11-06: a big Miro board has to fit on screen, with room to spare)
 const MAX_ZOOM = 4;
 const GAP = 8;
 const DEFAULT_ASPECT = 16 / 9;
@@ -100,8 +100,9 @@ const TEXT_DEFAULT_W = 240; // canvas px a new text tile starts at
 const TEXT_MIN_W = 40;      // narrower than this and a word can't wrap at all
 // rowHeight is now only the size new tiles start at (it follows scale-all) and the fallback for
 // older session files; each tile keeps its own gallery height in tile.galleryH.
-const layout = { mode: 'gallery', rowHeight: 240, galleryScale: 1, timeDisplay: 'clock', timelineExpanded: false, timelineHeight: 140, quality: 'full' };
-const board = { panX: 0, panY: 0, zoom: 1, initialized: false, linked: true, hand: false };
+const layout = { mode: 'gallery', rowHeight: 240, galleryScale: 1, timeDisplay: 'clock', timelineExpanded: false, timelineHeight: 140, quality: 'full', background: 'dark' };
+// const board = { panX: 0, panY: 0, zoom: 1, initialized: false, linked: true, hand: false }; // (before 2026-11-19: pushing was on by default)
+const board = { panX: 0, panY: 0, zoom: 1, initialized: false, linked: false, hand: false }; // linked: Push neighbours (settings.pushNeighbours)
 let zTop = 1;
 const selection = new Set(); // board mode: tiles picked with the lasso / shift-click
 const marqueeEl = document.getElementById('marquee');
@@ -197,11 +198,16 @@ window.api.version().then((v) => { appVersion = v || ''; updateChrome(); });
 function updateChrome() {
   emptyEl.classList.toggle('hidden', tiles.length > 0);
   renderEmptyRecent(); // the empty-board hint lists the latest sessions
-  countEl.textContent = tiles.length ? `${tiles.length} video${tiles.length === 1 ? '' : 's'}` : '';
+  // 'videos' while it is all videos; 'items' once pictures, notes or text are on the board too (a Miro import)
+  const noun = tiles.every((t) => t.video || t.yt || t.type === 'sequence') ? 'video' : 'item';
+  document.body.classList.toggle('many-tiles', tiles.length > 300); // a big board drops the soft shadows (style.css)
+  countEl.textContent = tiles.length ? `${tiles.length} ${noun}${tiles.length === 1 ? '' : 's'}` : '';
   const name = sessionPath ? basename(sessionPath) : 'Unsaved session';
   if (IS_VIEW) document.title = `Ozy view ${window.OZY_VIEW} – ${viewSessionName || 'Unsaved session'}`;
   else document.title = `${name} – Ozy Multi Media Player${appVersion ? ' ' + appVersion : ''}`;
+  if (typeof updateBoardName === 'function') updateBoardName(); // (the name in the top-left panel)
   refreshToolbarToggles();
+  scheduleFavorites(); // a tile came or went: the Favorites list follows
 }
 
 const isBoard = () => layout.mode === 'board';
@@ -220,6 +226,9 @@ const liveHere = (t) => !!t.id && (t.live || !t.release); // web tiles are alway
 // once it is a still.
 function isAudioOwner(tile) {
   if (!liveHere(tile)) return false;
+  // a favorite kept playing out of view here is not shown here: a window that has it on screen is
+  // heard instead, and this one only when none does
+  if (tile.quietKept) { const others = new Map(liveSets); others.delete(window.OZY_VIEW); return Lod.audioOwner(tile.id, others) === null; }
   const sets = new Map(liveSets);
   sets.set(window.OZY_VIEW, [tile.id]);
   return Lod.audioOwner(tile.id, sets) === window.OZY_VIEW;
@@ -227,9 +236,31 @@ function isAudioOwner(tile) {
 function applyTileVolume(tile) {
   // heard from one window only (main if it decodes the tile, else the lowest view): two would echo
   // const v = IS_VIEW ? 0 : clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1); // (views were silent until 2026-10-20)
-  const v = isAudioOwner(tile) ? clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1) : 0;
+  const full = isAudioOwner(tile) ? clamp(tile.volume * masterVolume * (tile.group ? tile.group.volume : 1), 0, 1) : 0;
+  // a favorite playing on out of view is turned right down (Mark, 2026-11-05), fading either way
+  const target = tile.quietKept ? Favorites.quietVolume(full, settings ? settings.favQuiet : Favorites.QUIET) : full;
+  let v = target;
+  const f = tile.volFade;
+  if (f) {
+    const k = (performance.now() - f.t0) / Favorites.FADE_MS;
+    if (k >= 1) tile.volFade = null;
+    else {
+      v = Favorites.fade(f.from, target, k);
+      if (!f.raf) f.raf = requestAnimationFrame(() => { f.raf = 0; if (tile.volFade === f) applyTileVolume(tile); });
+    }
+  }
+  tile.outVolume = v;
   if (tile.video) tile.video.volume = v;
   else if (tile.yt) tile.yt.volume(v); // Twitch embeds expose no volume control
+}
+// A playing favorite out of sight is kept playing quietly (the live budget decides when): fade
+// from what it plays at now to where it is going.
+function setQuietKept(tile, on) {
+  if (!!tile.quietKept === !!on) return;
+  tile.quietKept = !!on;
+  const from = tile.video ? tile.video.volume : Number.isFinite(tile.outVolume) ? tile.outVolume : 0;
+  tile.volFade = { from, t0: performance.now(), raf: 0 };
+  applyTileVolume(tile);
 }
 // A tile's own mute is remembered separately so a group mute can be undone.
 function setOwnMuted(tile, m) {
@@ -251,7 +282,7 @@ function announceLive(ids) {
 }
 // after the live budget moved, or before a snapshot shows the views a new tile: say so if it changed
 function refreshLiveSet() {
-  const ids = tiles.filter(liveHere).map((t) => t.id);
+  const ids = tiles.filter((t) => liveHere(t) && !t.quietKept).map((t) => t.id); // a favorite only heard here, not shown, is not counted as shown
   const key = ids.join('\n');
   if (key === lastLiveKey) return;
   lastLiveKey = key;
@@ -288,7 +319,8 @@ function refreshToolbarToggles() {
   const mutable = tiles.filter((t) => t.video || t.yt);
   const allMuted = mutable.length > 0 && mutable.every(isMuted);
   const m = document.getElementById('btn-mute-all');
-  m.textContent = allMuted ? '🔊 Unmute all' : '🔇 Mute all';
+  // m.textContent = allMuted ? '🔊 Unmute all' : '🔇 Mute all'; // DISABLED (Mark, 2026-11-15): an icon button now
+  m.classList.toggle('all-muted', allMuted);
   m.title = allMuted ? 'Unmute every video' : 'Mute every video';
   const loopable = tiles.filter((t) => t.pb);
   document.getElementById('btn-loop-all').classList.toggle('toggled', loopable.length > 0 && loopable.every((t) => t.loop));
@@ -387,7 +419,7 @@ function ytPlayback(yt) {
 }
 // A text tile has no path and no title: its own first words name it, on one line (the name goes
 // into status lines, undo labels and the timeline legend, where a newline would break the layout).
-const tileName = (t) => (t.type === 'text' ? (t.text.trim().replace(/\s+/g, ' ').slice(0, 24) || 'Text') : t.title || basename(t.path));
+const tileName = (t) => (t.type === 'text' ? (t.text.trim().replace(/\s+/g, ' ').slice(0, 24) || 'Text') : t.type === 'line' ? 'Line' : t.title || basename(t.path));
 
 function setMasterVolume(v, { updateSlider = true } = {}) {
   masterVolume = clamp(Number(v), 0, 1);
@@ -459,13 +491,20 @@ function layoutTile(t) {
     s.top = t.board.y + 'px';
     s.width = t.board.w + 'px';
     s.height = t.board.h + 'px';
+    s.rotate = t.rotation ? t.rotation + 'deg' : '';
+    s.zIndex = t.lifted ? String(zTop + 2) : t.z != null ? String(t.z) : ''; // its place in the stack (bring to front / send to back); lifted: above all while cropping or swapping
+    cullTile(t); // moved into or out of view (an undo, a drag, a tidy)
+    if (t.type === 'line') drawLine(t); // its stroke, in its (maybe new) box
+    else { const ls = attachedLinesOf(t); if (ls) for (const ln of ls) reattachLine(ln); } // (arrows on it follow)
+    if (selection.size === 1 && selection.has(t)) updateRotateHandle(); // (resized, moved, undone)
+    if (t.group) try { schedulePlaceSyncBars(); } catch {} // (its group's play bar follows it)
   } else {
     if (t.freeAspect) return; // text tiles have no gallery form; they are hidden there
     const maxW = innerWidth();
     let h = galleryHOf(t); // each tile's own height
     let w = h * t.aspect;
     if (w > maxW) { w = maxW; h = w / t.aspect; }
-    s.left = ''; s.top = ''; s.zIndex = '';
+    s.left = ''; s.top = ''; s.zIndex = ''; s.rotate = ''; // the gallery is a straight grid
     s.width = Math.round(w) + 'px';
     s.height = Math.round(h) + 'px';
   }
@@ -473,16 +512,60 @@ function layoutTile(t) {
 
 // offscreen pause (the block after hover play) re-checks shortly after anything moves the view
 let offscreenTimer = null;
-function scheduleOffscreen() { clearTimeout(offscreenTimer); offscreenTimer = setTimeout(() => { applyLiveBudget(); applyOffscreen(); }, 50); }
+function scheduleOffscreen() { clearTimeout(offscreenTimer); offscreenTimer = setTimeout(() => { applyLiveBudget(); applyOffscreen(); applyImageLod(); }, 50); }
 
+// ---- big boards: what is not in view is not on the page (2026-11-06) ----
+// A Miro import of 3000 pictures and captions made every frame of a pan cost 50-200 ms: Chromium
+// redraws, and works out what is under the mouse among, every element on the board, ~25 per tile.
+// So a picture or text tile well outside the view is taken off the page (display: none) until the
+// view comes near it, and one too small on screen to click loses its buttons and handles. The
+// tile's place, size and everything else stay as they are; only the drawing goes. Videos are left
+// alone: the live budget already decides what they decode.
+const CULL_MARGIN = 0.5;   // of the view, each side: tiles that near are kept, so a pan never shows a gap
+const TINY_PX = 28;        // shorter than this on screen: no title bar or handles (nothing to aim at)
+let cullView = null;       // the view in board coordinates, set by applyBoardView
+const cullable = (t) => t.type === 'image' || t.type === 'text' || t.type === 'line';
+function cullTile(t) {
+  if (!cullable(t) || !t.board) return;
+  const v = cullView;
+  const out = !!v && isBoard() && !t.editing && !selection.has(t) && (t.board.x > v.x1 || t.board.x + t.board.w < v.x0 || t.board.y > v.y1 || t.board.y + t.board.h < v.y0);
+  if (out !== !!t.culled) {
+    t.culled = out;
+    t.el.classList.toggle('culled', out);
+    if (!out && t.type === 'text' && t.needsMeasure) { t.needsMeasure = false; renderTextTile(t); } // its height was left as it was while off the page
+  }
+  const tiny = !!v && isBoard() && t.board.h * board.zoom < TINY_PX;
+  if (tiny !== !!t.tiny) { t.tiny = tiny; t.el.classList.toggle('tiny', tiny); }
+}
+function applyCulling() {
+  if (!isBoard()) { cullView = null; for (const t of tiles) { if (t.culled) { t.culled = false; t.el.classList.remove('culled'); } if (t.tiny) { t.tiny = false; t.el.classList.remove('tiny'); } } return; }
+  const r = gridRect();
+  const z = board.zoom, mx = r.width * CULL_MARGIN, my = r.height * CULL_MARGIN;
+  cullView = { x0: (-mx - board.panX) / z, y0: (-my - board.panY) / z, x1: (r.width + mx - board.panX) / z, y1: (r.height + my - board.panY) / z };
+  for (const t of tiles) cullTile(t);
+}
+// The controls on every tile keep their screen size through --ui-scale (1 / zoom). Changing it
+// restyles and re-lays-out every tile on the page, which made each step of a zoom cost 100+ ms on a
+// big board; so while a zoom is going on it waits, and is set once the zoom has paused.
+let lastUiScale = '', uiScaleTimer = null;
+const UI_SCALE_SETTLE_MS = 120;
+function setUiScaleNow() { clearTimeout(uiScaleTimer); uiScaleTimer = null; const ui = String(1 / board.zoom); if (ui !== lastUiScale) { lastUiScale = ui; canvas.style.setProperty('--ui-scale', ui); } }
 function applyBoardView() {
   canvas.style.transform = `translate(${board.panX}px, ${board.panY}px) scale(${board.zoom})`;
-  canvas.style.setProperty('--ui-scale', String(1 / board.zoom)); // controls keep their screen size
-  const spacing = 24 * board.zoom;
+  if (String(1 / board.zoom) !== lastUiScale) {
+    if (!lastUiScale || lastUiScale === '1' || tiles.length < 150) setUiScaleNow(); // a small board, or the first view: at once
+    else { clearTimeout(uiScaleTimer); uiScaleTimer = setTimeout(setUiScaleNow, UI_SCALE_SETTLE_MS); }
+  }
+  applyCulling();
+  // the dots: 24 board px apart, four times wider each time they would crowd closer than 12 screen px
+  let spacing = 24 * board.zoom;
+  while (spacing < 12) spacing *= 4;
   grid.style.backgroundSize = `${spacing}px ${spacing}px`;
   grid.style.backgroundPosition = `${board.panX}px ${board.panY}px`;
   updateZoomUI();
   updateTextToolbar(); // it floats over the board in screen space, so pan and zoom move it
+  try { placeSyncBars(); } catch {} // (so do the synced groups' play bars; not yet set up while the app starts)
+  try { if (miniOn) drawMiniMap(); } catch {} // (the view on the overview map; not yet set up while the app starts)
   scheduleOffscreen();
 }
 
@@ -492,7 +575,8 @@ function layoutTiles() {
     applyBoardView();
   } else {
     canvas.style.transform = ''; // the board's pan/zoom must not leak into the gallery
-    canvas.style.setProperty('--ui-scale', '1');
+    canvas.style.setProperty('--ui-scale', '1'); lastUiScale = '1';
+    applyCulling(); // everything back on the page for the gallery
     updateZoomUI();
   }
   scheduleOffscreen();
@@ -553,8 +637,109 @@ function zoomAtCenter(newZoom) {
   zoomAt(newZoom, r.left + r.width / 2, r.top + r.height / 2);
 }
 
+// ---------- stacking: bring to front / send to back (Mark, 2026-11-10) ----------
+// A tile is raised whenever it is clicked or dragged, so something can end up in front by
+// accident; Send to back (right-click any tile, or PageDown) puts it behind everything again, and
+// Bring to front (PageUp) the other way. A tile's place in the stack is tile.z (null: where it was
+// added, in board order), saved with the session so it survives a reopen.
+let zBottom = 0;
 function bringToFront(tile) {
-  tile.el.style.zIndex = String(++zTop);
+  tile.z = ++zTop;
+  tile.el.style.zIndex = String(tile.z);
+}
+function sendToBack(tile) {
+  tile.z = --zBottom;
+  tile.el.style.zIndex = String(tile.z);
+}
+// where a tile is in the stack now: its z (0 when it has none), then board order
+const stackKey = (t) => (t.z != null ? t.z : 0) * 1e6 + tiles.indexOf(t);
+// what a menu or key acts on: everything selected when this tile is part of it, else just this tile
+function stackTargets(tile) {
+  const list = tile && !selection.has(tile) ? [tile] : [...selection].filter((t) => tiles.includes(t) && t.board);
+  return list.sort((a, b) => stackKey(a) - stackKey(b));
+}
+function stackToFront(tile) {
+  const list = stackTargets(tile);
+  if (!list.length) return;
+  for (const t of list) bringToFront(t); // lowest first: they keep their order among themselves
+  setStatus(list.length === 1 ? `${tileName(list[0])} brought to front` : `${list.length} tiles brought to front`, 2500);
+}
+function stackToBack(tile) {
+  const list = stackTargets(tile);
+  if (!list.length) return;
+  for (const t of list.slice().reverse()) sendToBack(t); // highest first, so they keep their order
+  setStatus(list.length === 1 ? `${tileName(list[0])} sent to back` : `${list.length} tiles sent to back`, 2500);
+}
+// the two lines every tile's right-click menu has
+const stackMenuItems = (tile) => [
+  ['Bring to front  (PgUp)', () => stackToFront(tile)],
+  ['Send to back  (PgDn)', () => stackToBack(tile)],
+];
+// a tile's place in the stack from a saved record (null when it has none)
+function applySavedZ(tile, v) {
+  const z = v && v.z != null && v.z !== '' ? Number(v.z) : NaN;
+  if (!Number.isFinite(z)) return;
+  tile.z = z;
+  if (z > zTop) zTop = z;
+  if (z < zBottom) zBottom = z;
+  layoutTile(tile);
+}
+// ---------- locking (Mark, 2026-11-10) ----------
+// A locked tile stays exactly as it is: it can't be moved, resized, cropped, edited, restyled or
+// removed, and the lasso and every tidy leave it alone. Pressing on it is pressing on the board:
+// a drag draws the lasso (so pictures lying on a locked panel are easy to sweep up), a click selects
+// just it, so it can be unlocked (right-click → Unlock, or Ctrl+Shift+L). Lines and pictures still
+// snap to it, and a locked divider still makes rows. Videos on it still play from their buttons.
+function setLocked(tile, on, { quiet = false } = {}) {
+  tile.locked = !!on;
+  tile.el.classList.toggle('locked', tile.locked);
+  if (tile.locked && !tile.el.querySelector(':scope > .lock-badge')) {
+    const b = document.createElement('div');
+    b.className = 'lock-badge';
+    b.textContent = '🔒';
+    b.title = 'Locked – right-click → Unlock (Ctrl+Shift+L)';
+    tile.el.appendChild(b);
+  }
+  if (tile.locked && tile.editing) endTextEdit(tile);
+  if (!quiet) updateTextToolbar();
+}
+// what the menu or the key acts on: the selection when this tile is in it, else this tile
+function lockTargets(tile) { return tile && !selection.has(tile) ? [tile] : [...selection].filter((t) => tiles.includes(t)); }
+// lock them all, or, when they are all locked already, unlock them all (one undo)
+function toggleLock(tile) {
+  const list = lockTargets(tile);
+  if (!list.length) { setStatus('Select something to lock first'); return; }
+  const on = list.some((t) => !t.locked);
+  const changes = list.filter((t) => !!t.locked !== on).map((t) => ({ tile: t, before: !!t.locked, after: on }));
+  for (const c of changes) setLocked(c.tile, on);
+  if (changes.length) undoStack.push({ kind: 'lock', label: `${on ? 'lock' : 'unlock'} ${changes.length === 1 ? tileName(changes[0].tile) : changes.length + ' tiles'}`, changes });
+  setStatus(list.length === 1 ? `${tileName(list[0])} ${on ? 'locked – drag on it to lasso what lies on it' : 'unlocked'}` : `${list.length} tiles ${on ? 'locked' : 'unlocked'}`, 4000);
+}
+const lockMenuItem = (tile) => ['Lock  (Ctrl+Shift+L)', () => toggleLock(tile)];
+// the menu of a locked tile: unlocking, and for a divider the rows it makes (they move other things)
+function lockedMenuItems(tile) {
+  const items = [['Unlock  (Ctrl+Shift+L)', () => toggleLock(tile)]];
+  if (tile.type === 'line' && isLevelLine(tile)) {
+    items.push(['Line up the pictures between these lines', () => lineUpRows(tile)]);
+    items.push(['Trim pictures at these lines', () => trimAtLines(tile)]);
+  }
+  if (tile.type === 'line') items.push(['Select lines like this one', () => selectLinesLike(tile)]);
+  if (tile.type === 'image') items.push([REVEAL_LABEL, async () => { if (!(await window.api.showInExplorer(tile.path))) setStatus('File not found: ' + tile.path); }]);
+  return items;
+}
+// the locked tile a press landed on (a control on it, like a video's play button, is not the tile)
+function lockedTileAt(target) {
+  if (!target || !target.closest || target.closest('button, input, select, textarea, .handle, .line-end')) return null;
+  const el = target.closest('.tile');
+  const t = el && tiles.find((x) => x.el === el);
+  return t && t.locked && t.board ? t : null;
+}
+
+// For the length of a gesture that needs the tile seen whole (cropping, swapping), it is drawn
+// above everything without changing its place in the stack; off again, it is back where it was.
+function liftTile(tile, on) {
+  tile.lifted = !!on;
+  layoutTile(tile);
 }
 
 // Every board interaction (drag, resize, lasso, pan) marks the body and the tile while it runs,
@@ -623,8 +808,16 @@ function paintGroup(t) {
   if (t.group) sw.style.background = Groups.PALETTE[t.group.color];
 }
 // members that can play (local and YouTube); Twitch and image members only share Sticky / mute / volume
+// (2026-11-18) and its sync points, if it has any: see lib/groups.js
+const memberEntry = (t) => ({ tile: t, start: t.sync ? t.sync.start : 0, points: (t.sync && t.sync.points) || null, duration: t.pb.duration });
 function memberModel(g) {
-  return [...g.members].filter((t) => t.pb).map((t) => ({ tile: t, start: t.sync ? t.sync.start : 0, duration: t.pb.duration }));
+  return [...g.members].filter((t) => t.pb).map(memberEntry);
+}
+// the video the others follow: the one picked, else the longest (it never has sync points itself)
+function mainOf(g) {
+  if (g.main && g.members.has(g.main) && g.main.pb) return g.main;
+  const ms = [...g.members].filter((t) => t.pb);
+  return ms.sort((a, b) => (b.pb.duration || 0) - (a.pb.duration || 0))[0] || null;
 }
 function captureStarts(g) {
   const ms = [...g.members].filter((t) => t.pb);
@@ -651,7 +844,7 @@ function createGroup(list, opts = {}) {
 }
 // back to the tile's own mute and volume once it leaves its group
 function releaseTile(t) {
-  t.group = null; t.sync = null; paintGroup(t);
+  t.group = null; t.sync = null; paintGroup(t); markHold(t, false);
   setOwnMuted(t, t.ownMuted); applyTileVolume(t); applyTileLoop(t);
 }
 function removeFromGroup(g, t) {
@@ -664,7 +857,9 @@ function dissolveGroup(g) {
   logUi('info', 'group dissolved', { id: g.id, members: g.members.size });
   for (const t of [...g.members]) releaseTile(t);
   g.members.clear();
+  if (g.lining) g.lining = null;
   const i = groups.indexOf(g); if (i >= 0) groups.splice(i, 1);
+  placeSyncBars();
   if (active === g) setActiveGroup(null);
 }
 function applyGroupAudio(g) {
@@ -716,16 +911,39 @@ gbQ('.gb-play').addEventListener('click', () => playPauseGroup(active));
 gbQ('.gb-mute').addEventListener('click', () => { active.muted = !active.muted; applyGroupAudio(active); emitGroupAudio(active); renderGroupBar(); });
 gbQ('.gb-vol').addEventListener('input', () => { active.volume = Number(gbQ('.gb-vol').value) / 100; applyGroupAudio(active); emitGroupAudio(active); });
 gbQ('.gb-rate').addEventListener('change', () => { active.rate = Number(gbQ('.gb-rate').value); applyGroupAudio(active); });
+/* (before 2026-11-18: Sync locked the videos wherever they happened to be)
 gbQ('.gb-sync').addEventListener('click', () => setGroupSync(active, !active.sync));
+*/
+gbQ('.gb-sync').addEventListener('click', () => toggleSyncFromUser(active));
 gbQ('.gb-sticky').addEventListener('click', () => { active.sticky = !active.sticky; renderGroupBar(); });
 gbQ('.gb-tidy').addEventListener('click', () => tidyGroup(active));
 gbQ('.gb-loop').addEventListener('change', () => { active.loop = gbQ('.gb-loop').value; if (active.loop !== 'off' && !active.sync) setGroupSync(active, true); renderGroupBar(); renderTimeline(); });
 gbQ('.gb-name').addEventListener('change', () => renderTimeline());
 gbQ('.gb-ungroup').addEventListener('click', () => dissolveGroup(active));
 
+// Sync from the user: never lined up (and nothing kept from before) -> the sync editor, to line them up
+function toggleSyncFromUser(g) {
+  if (!g) return;
+  if (!g.sync && !g.stash && [...g.members].filter((t) => t.pb && t.mediaEl && !t.pb.web).length >= 2) {
+    openSyncEditor(g);
+    setStatus('Line them up here: put both on the same frame, then ◆ Sync here');
+    return;
+  }
+  setGroupSync(g, !g.sync);
+}
 function setGroupSync(g, on) {
+  if (g.lining) endLining(g, false);
   g.sync = on;
-  if (on) captureStarts(g); else for (const t of g.members) t.sync = null;
+  if (on) {
+    // sync points made before Sync was turned off come back with it
+    const st = g.stash;
+    if (st && [...g.members].every((t) => !t.pb || st.has(t))) { for (const t of g.members) t.sync = st.get(t) || null; setStatus('Sync on, with its sync points back'); }
+    else captureStarts(g);
+    g.stash = null;
+  } else {
+    if (g.main || [...g.members].some((t) => t.sync && t.sync.points)) g.stash = new Map([...g.members].map((t) => [t, t.sync])); // (lined up in the sync editor: kept for turning it on again)
+    for (const t of g.members) t.sync = null;
+  }
   if (!on && g.loop !== 'off') g.loop = 'off';
   renderGroupBar();
   renderTimeline();
@@ -736,19 +954,21 @@ function setGroupSync(g, on) {
 // The playing member with the steadiest clock leads: a local video (exact), then a sequence (it can
 // stall while frames decode), then YouTube (extrapolated).
 const LEAD_RANK = { video: 0, frames: 1, web: 2 };
-const leadOf = (ms) => ms.filter((m) => !m.tile.pb.paused).sort((a, b) => LEAD_RANK[a.tile.pb.kind] - LEAD_RANK[b.tile.pb.kind])[0];
+// (the main video first when it is playing: its time maps straight onto the group's, where a follower
+// with sync points may be holding or about to jump)
+const leadOf = (ms) => ms.filter((m) => !m.tile.pb.paused).sort((a, b) => (a.points ? 1 : 0) - (b.points ? 1 : 0) || LEAD_RANK[a.tile.pb.kind] - LEAD_RANK[b.tile.pb.kind])[0];
 function groupTimeOf(g) {
   const ms = memberModel(g);
   if (!ms.length) return 0;
   const inside = (m) => m.tile.pb.time > 0 && m.tile.pb.time < m.duration;
-  const lead = leadOf(ms) || ms.find(inside);
-  if (lead) return Groups.groupTime(lead.tile.pb.time, lead.start);
+  const lead = leadOf(ms) || ms.find((m) => !m.points && inside(m)) || ms.find(inside);
+  if (lead) return Groups.toGroup(lead, lead.tile.pb.time);
   const waiting = ms.filter((m) => m.tile.pb.time <= 0);
-  return waiting.length ? Math.min(...waiting.map((m) => m.start)) : Groups.end(ms);
+  return waiting.length ? Math.min(...waiting.map((m) => Groups.extent(m).from)) : Groups.end(ms);
 }
 function seekGroup(g, gt) {
   syncing = true;
-  try { for (const m of memberModel(g)) m.tile.pb.time = Groups.memberTime(gt, m.start, m.duration); }
+  try { for (const m of memberModel(g)) m.tile.pb.time = Groups.at(m, gt); }
   finally { syncing = false; }
 }
 function playPauseGroup(g) {
@@ -759,7 +979,7 @@ function playPauseGroup(g) {
     const end = Groups.end(ms);
     if (groupTimeOf(g) >= end - 0.05) seekGroup(g, g.loop === 'range' && g.range ? g.range.in : 0); // Loop Off: play after the end restarts
     const gt = groupTimeOf(g);
-    for (const m of ms) if (gt >= m.start && gt < m.start + m.duration) m.tile.pb.play();
+    for (const m of ms) if (Groups.plays(m, gt)) m.tile.pb.play();
   } else for (const m of ms) m.tile.pb.play();
   renderGroupBar();
 }
@@ -783,17 +1003,18 @@ function broadcast(leader, action, value) {
   if (!g) return;
   if (action === 'rate') { g.rate = value; applyGroupAudio(g); if (active === g) renderGroupBar(); return; } // speed is shared even without Sync
   if (syncing || !g.sync || !leader.sync) return;
+  if (g.lining) return; // lining up: each video moves on its own until Keep
   syncing = true;
   try {
-    const gt = Groups.groupTime(leader.pb.time, leader.sync.start);
+    const gt = Groups.toGroup(memberEntry(leader), leader.pb.time);
     for (const m of memberModel(g)) {
       if (m.tile === leader) continue;
       const p = m.tile.pb;
-      if (action === 'play') { if (gt >= m.start && gt < m.start + m.duration) p.play(); }
+      if (action === 'play') { if (Groups.plays(m, gt)) p.play(); }
       else if (action === 'pause') p.pause();
-      else if (action === 'seek') p.time = Groups.memberTime(gt, m.start, m.duration);
+      else if (action === 'seek') p.time = Groups.at(m, gt);
       // mid-drag: members preview too, so a YouTube member is not made to re-buffer on every step
-      else if (action === 'scrub') pbScrub(p, Groups.memberTime(gt, m.start, m.duration));
+      else if (action === 'scrub') pbScrub(p, Groups.at(m, gt));
     }
   } finally { syncing = false; }
 }
@@ -804,19 +1025,19 @@ function broadcast(leader, action, value) {
 setInterval(() => { if (!IS_VIEW) quietly(syncEngineTick); }, 100);
 function syncEngineTick() {
   for (const g of groups) {
-    if (!g.sync) continue;
+    if (!g.sync || g.lining) continue;
     const ms = memberModel(g);
     const lead = leadOf(ms);
     if (!lead) continue;
     // Someone is dragging a member's bar: the group is deliberately out of sync until they let go,
     // and correcting it mid-drag just re-seeks (and re-buffers) the other members for nothing.
     if (timelineScrubbing || ms.some((m) => m.tile.scrubbing)) continue;
-    const gt = Groups.groupTime(lead.tile.pb.time, lead.start);
+    const gt = Groups.toGroup(lead, lead.tile.pb.time);
     const loopEnd = Groups.loopEnd(g.loop, ms.filter((m) => m.duration > 0), g.range); // ignore members still loading
     if (loopEnd !== null && gt >= loopEnd - 0.05) {
       const to = g.loop === 'range' && g.range ? g.range.in : 0;
       seekGroup(g, to);
-      for (const m of ms) if (!m.tile.autoPaused && Groups.memberTime(to, m.start, m.duration) < m.duration && to >= m.start) m.tile.pb.play();
+      for (const m of ms) if (!m.tile.autoPaused && Groups.plays(m, to)) m.tile.pb.play();
       continue;
     }
     syncing = true;
@@ -825,8 +1046,8 @@ function syncEngineTick() {
         if (m === lead) continue;
         if (m.tile.autoPaused) continue; // paused because it is off screen: applyOffscreen re-seeks and resumes it
         const p = m.tile.pb;
-        const want = Groups.memberTime(gt, m.start, m.duration);
-        const inside = gt >= m.start && gt < m.start + m.duration;
+        const want = Groups.at(m, gt);
+        const inside = Groups.plays(m, gt);
         if (inside && p.paused) p.play();   // its start was reached
         if (!inside && !p.paused) p.pause(); // waiting at 0 or holding at the end
         // YouTube on either side: ~¼ s slack, and none while it is still settling after a seek
@@ -836,6 +1057,957 @@ function syncEngineTick() {
       }
     } finally { syncing = false; }
   }
+}
+
+// ---------- sync points, lining up, and a play bar by each synced group (2026-11-18) ----------
+// Two cuts of the same footage drift apart wherever their edits differ, so one offset per video is
+// not enough. A follower can carry sync points ("at this moment of the main video, I am here"; the
+// maths is in lib/groups.js), made by lining the videos up by eye or by sound (lib/audiosync.js).
+// Each synced group gets a small bar on the board, just above its videos: play/pause, the main
+// video's time, previous / next sync point, + Sync point. It can be dragged, but only so far from
+// the videos.
+const SYNC_NEAR = 1.0; // s: a new sync point this close to one already there re-does that one
+function syncRecord(t) {
+  const s = t.sync || (t.group && t.group.stash && t.group.stash.get(t)) || null;
+  if (!s) return null;
+  return { start: s.start, ...(s.points ? { points: s.points.map((p) => ({ g: p.g, t: p.t })) } : {}) };
+}
+// dimmed while it waits through a part only the main video has
+function markHold(t, on) {
+  if (!!t.holdMarked === !!on) return;
+  t.holdMarked = !!on;
+  t.el.classList.toggle('sync-hold', !!on);
+}
+// a follower's sync as a whole: a single point is just an offset
+function followerSync(pts, fallbackStart) {
+  if (!pts || !pts.length) return { start: fallbackStart, points: null };
+  /* (before 2026-11-18 evening: one point was folded into a plain offset; the sync editor keeps it,
+     so a line-up made there is told apart from an old blind Sync press)
+  if (pts.length === 1) return { start: pts[0].g - pts[0].t, points: null };
+  */
+  return { start: Groups.extent({ points: pts, duration: 0 }).from, points: pts };
+}
+// every sync point of the group, in group time (the followers' points together)
+function groupPoints(g) {
+  const out = [];
+  for (const m of memberModel(g)) if (m.points) for (const p of m.points) if (!out.some((x) => Math.abs(x.g - p.g) < 0.05)) out.push(p);
+  return out.sort((a, b) => a.g - b.g);
+}
+// group time from 0: the earliest member begins at 0, as Groups.starts has always done
+function normalizeGroup(g) {
+  const ms = memberModel(g);
+  if (!ms.length) return;
+  const from = Math.min(...ms.map((m) => Groups.extent(m).from));
+  if (!isFinite(from) || Math.abs(from) < 1e-6) return;
+  const d = -from;
+  for (const m of ms) m.tile.sync = { start: m.start + d, points: m.points ? Groups.shiftPoints(m.points, d) : null };
+  if (g.range) g.range = { in: g.range.in + d, out: g.range.out + d };
+}
+// undo: the group's whole sync (on/off, main video, every member's offset and points, the range)
+function syncState(g) {
+  return { sync: g.sync, main: g.main || null, range: g.range ? { ...g.range } : null, members: new Map([...g.members].map((t) => [t, t.sync ? { ...t.sync } : null])) };
+}
+function applySyncState(g, st) {
+  if (!groups.includes(g)) return;
+  if (g.lining && !(sedOpen() && sed.g === g)) endLining(g, false); // (the sync editor keeps its videos apart)
+  g.sync = st.sync; g.main = st.main; g.range = st.range ? { ...st.range } : null;
+  for (const [t, v] of st.members) if (g.members.has(t)) t.sync = v ? { ...v } : null;
+  afterSyncChange(g);
+}
+function pushSyncUndo(g, label, before) { undoStack.push({ kind: 'sync', label, group: g, before, after: syncState(g) }); }
+function afterSyncChange(g) {
+  if (!g.sync) for (const t of g.members) markHold(t, false);
+  renderGroupBar(); renderTimeline(); placeSyncBars();
+}
+
+// ---- lining up: each video moves on its own (its bar, , . keys) until Keep ----
+function startLining(g, quiet) {
+  if (!viewMayEdit() || !g || g.lining) return;
+  const ms = memberModel(g);
+  if (ms.length < 2) { setStatus('Lining up needs two videos in the group'); return; }
+  for (const m of ms) m.tile.pb.pause();
+  g.lining = { before: syncState(g), times: new Map(ms.map((m) => [m.tile, m.tile.pb.time])) };
+  for (const m of ms) { m.tile.el.classList.add('lining'); markHold(m.tile, false); }
+  if (!quiet) setStatus('Lining up: move each video to the same moment (its own bar, or , and . on the one under the mouse). 🎧 can do it by sound. Then ✓ Keep.', 12000);
+  placeSyncBars();
+}
+function endLining(g, kept) {
+  const L = g.lining;
+  if (!L) return;
+  g.lining = null;
+  for (const t of g.members) t.el.classList.remove('lining');
+  if (!kept) for (const [t, time] of L.times) if (g.members.has(t) && t.pb) { t.pb.pause(); t.pb.time = time; }
+  renderGroupBar(); renderTimeline(); placeSyncBars();
+}
+// Keep: this moment of the main video is this moment of each other one
+async function keepLining(g) {
+  const L = g.lining;
+  if (!L) return;
+  const main = mainOf(g);
+  if (!main) { endLining(g, false); return; }
+  const before = L.before;
+  const ms = memberModel(g), mm = ms.find((m) => m.tile === main);
+  let label = 'sync point', note = '';
+  if (!g.sync) {
+    // the first line-up: plain offsets from here, as Sync always made
+    for (const m of ms) m.tile.sync = { start: m.tile === main ? 0 : main.pb.time - m.tile.pb.time, points: null };
+    g.sync = true; g.stash = null; label = 'line up';
+    note = 'Synced here. Where their cuts differ later, line them up again there (+ Sync point).';
+  } else {
+    if (mm.points) main.sync = { start: Groups.extent(mm).from, points: null }; // (the main video never follows)
+    const gt = Groups.toGroup(memberEntry(main), main.pb.time);
+    let added = 0, redone = 0, refined = 0;
+    L.newAt = gt; L.changed = [];
+    for (const m of ms) {
+      if (m.tile === main) continue;
+      const ft = m.tile.pb.time;
+      if (!m.points) {
+        // a plain offset so far: a small change is a better line-up of the same stretch; a big one is
+        // a place where the cuts differ, so the old line-up stays as a point at its frame 0
+        if (Math.abs((gt - ft) - m.start) < SYNC_NEAR) { m.tile.sync = { start: gt - ft, points: null }; refined++; continue; }
+        m.tile.sync = followerSync(Groups.cleanPoints([{ g: m.start, t: 0 }, { g: gt, t: ft }]), m.start);
+        added++; L.changed.push(m.tile);
+      } else {
+        const near = m.points.some((p) => Math.abs(p.g - gt) <= SYNC_NEAR);
+        m.tile.sync = followerSync(Groups.addPoint(m.points, gt, ft, SYNC_NEAR), m.start);
+        if (near) redone++; else added++;
+        L.changed.push(m.tile);
+      }
+    }
+    note = added ? 'Sync point added: from here on they stay together' : redone ? 'Sync point re-done' : refined ? 'Lined up here' : '';
+  }
+  g.main = main;
+  const gtAt = L.newAt, changed = L.changed || [];
+  endLining(g, true);
+  // where exactly the cuts part, between this sync point and the ones either side of it
+  let cuts = [];
+  if (changed.length) {
+    setStatus('Listening for where their cuts part…', 20000);
+    try { cuts = await findCuts(g, main, changed, gtAt); } catch (err) { logUi('warn', 'finding cuts failed', { error: String(err && err.message || err) }); }
+  }
+  normalizeGroup(g);
+  pushSyncUndo(g, label, before);
+  afterSyncChange(g);
+  const n = groupPoints(g).length;
+  setStatus(`${note}${cuts.length ? ' · ' + cuts.join(' · ') : ''}${n ? ` · ${n} sync point${n === 1 ? '' : 's'}` : ''} · ▶ plays them together`, 9000);
+}
+// Between a new sync point and its neighbours the offset changes, but the points alone cannot say
+// where: by itself the follower would play on and only wait (or jump) just before the next point.
+// The sound can say: the cut is put where it is, as one more sync point. Videos on this PC only,
+// stretches up to ten minutes.
+async function findCuts(g, main, followers, at) {
+  const local = (t) => !!(t.pb && t.pb.kind === 'video' && !t.pb.web && !t.url && t.path);
+  const out = [];
+  if (!local(main) || main.sync.points) return out;
+  const S_M = main.sync.start, step = AudioSync.HOP / AudioSync.RATE;
+  const pcm = (u) => new Int16Array(u.buffer.slice(u.byteOffset, u.byteOffset + (u.byteLength & ~1)));
+  for (const f of followers) {
+    if (!local(f) || !f.sync || !f.sync.points) continue;
+    let pts = f.sync.points;
+    const i = pts.findIndex((p) => Math.abs(p.g - at) < 0.05);
+    if (i < 0) continue;
+    for (const [p, n] of [[pts[i - 1], pts[i]], [pts[i], pts[i + 1]]]) {
+      if (!p || !n || n.t < p.t) continue;
+      const dg = n.g - p.g, dt = n.t - p.t;
+      if (Math.abs(dg - dt) < 0.1 || dg > 600 || dg < 2) continue;
+      const o1 = p.g - p.t, o2 = n.g - n.t, gap = Math.max(0, dg - dt), skip = Math.max(0, dt - dg);
+      const b0 = Math.max(0, Math.min(p.t, n.t - dg) - 0.5), b1 = Math.min(f.pb.duration || Infinity, Math.max(p.t + dg, n.t) + 0.5);
+      const [ua, ub] = await Promise.all([window.api.audioPcm(main.path, p.g - S_M, dg), window.api.audioPcm(f.path, b0, b1 - b0)]);
+      if (!ua || !ub) continue;
+      // (offsets in main time: main time = group time - S_M). The points are lined up by picture, and
+      // the sound can sit a few frames off it, differently in each copy: a quarter second of slack.
+      const pm = p.g - S_M;
+      const r = AudioSync.findCut(AudioSync.envelope(pcm(ua)), pm, AudioSync.envelope(pcm(ub)), b0, o1 - S_M, o2 - S_M, gap, step, 0.25);
+      logUi('info', 'find cut', { file: tileName(f), from: p.g, to: n.g, gap, skip, result: r });
+      if (!r) { out.push(`${tileName(f)}: could not hear where the cuts part, so it ${gap ? 'waits' : 'jumps'} just before the next sync point`); continue; }
+      let gc = r.at + S_M;
+      // the sound says roughly; the picture says exactly: onto the nearest shot change in the follower
+      const ft = p.t + (gc - p.g);
+      const scenes = await window.api.sceneCuts(f.path, Math.max(0, ft - 0.6), 1.2).catch(() => []);
+      if (scenes && scenes.length) { const near = scenes.reduce((x, y) => (Math.abs(y - ft) < Math.abs(x - ft) ? y : x)); gc += near - ft; }
+      const q = gap ? { g: gc + gap, t: p.t + (gc - p.g) } : { g: gc, t: p.t + (gc - p.g) + skip };
+      if (q.g <= p.g + 0.05 || q.g >= n.g - 0.05) continue; // already where the points put it
+      pts = Groups.cleanPoints([...pts, q]);
+      f.sync = followerSync(pts, f.sync.start);
+      out.push(gap ? `${tileName(f)} waits ${gap.toFixed(1)} s from ${fmtTime(gc - S_M)} (a part it does not have)` : `${tileName(f)} skips ${skip.toFixed(1)} s at ${fmtTime(gc - S_M)} (a part only it has)`);
+    }
+  }
+  return out;
+}
+
+// ---- by sound: move each other local video to where its sound matches the main one's ----
+async function matchBySound(g, btn) {
+  const main = mainOf(g);
+  if (!main || !g.lining) return;
+  const local = (t) => !!(t.pb && t.pb.kind === 'video' && !t.pb.web && !t.url && t.path); // a video file (no type: the original kind)
+  if (!local(main)) { setStatus('Matching by sound needs the main video to be a video file on this PC'); return; }
+  const others = [...g.members].filter((t) => t !== main && t.pb);
+  if (btn) { btn.disabled = true; btn.textContent = '🎧 Listening…'; }
+  const msgs = [];
+  try {
+    for (const f of others) {
+      if (!local(f)) { msgs.push(`${tileName(f)}: not a video file, line it up by eye`); continue; }
+      const mainT = main.pb.time;
+      const pcm = (u) => new Int16Array(u.buffer.slice(u.byteOffset, u.byteOffset + (u.byteLength & ~1)));
+      // 16 s of sound within 40 s either way first; nothing there: 32 s, then two minutes either way
+      let r = null, unread = null;
+      for (const { half, search } of AudioSync.TRIES) {
+        const w = AudioSync.windows(mainT, main.pb.duration, f.pb.time, f.pb.duration, search, half);
+        const [a, b] = await Promise.all([window.api.audioPcm(main.path, w.main.start, w.main.dur), window.api.audioPcm(f.path, w.other.start, w.other.dur)]);
+        if (!g.lining) return; // cancelled meanwhile
+        if (!a || !b) { unread = !a ? main : f; break; }
+        r = AudioSync.match(pcm(a), w.main.start, pcm(b), w.other.start, mainT);
+        if (r.time !== null) break;
+      }
+      if (unread) { msgs.push(`${tileName(unread)}: its sound could not be read`); continue; }
+      logUi('info', 'match by sound', { file: tileName(f), at: mainT, result: r });
+      if (r.time === null) { msgs.push(`${tileName(f)}: ${r.why}, line it up by eye`); continue; }
+      const moved = r.time - f.pb.time;
+      f.pb.time = r.time;
+      msgs.push(`${tileName(f)} moved ${moved >= 0 ? '+' : '−'}${Math.abs(moved).toFixed(2)} s${r.sure ? '' : ' (not sure: check by eye)'}`);
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🎧 Match by sound'; }
+  }
+  setStatus(msgs.join(' · ') + (msgs.length ? ' · ✓ Keep when it looks right' : ''), 9000);
+}
+
+// ---- the sync points themselves ----
+function gotoSyncPoint(g, dir) {
+  const pts = groupPoints(g);
+  if (!pts.length) return;
+  const gt = groupTimeOf(g);
+  const p = dir < 0 ? [...pts].reverse().find((x) => x.g < gt - 0.25) : pts.find((x) => x.g > gt + 0.05);
+  if (!p) { setStatus(dir < 0 ? 'No sync point before this' : 'No sync point after this'); return; }
+  seekGroup(g, p.g);
+  if (tl._model && tl._model.group === g) tickTimeline();
+}
+function removeSyncPoint(g, at) {
+  const before = syncState(g);
+  let n = 0;
+  for (const m of memberModel(g)) {
+    if (!m.points) continue;
+    const pts = Groups.removePoint(m.points, at, 0.05);
+    if ((pts ? pts.length : 0) === m.points.length) continue;
+    const keep = pts || [m.points.find((p) => Math.abs(p.g - at) <= 0.05)];
+    m.tile.sync = followerSync(keep, m.start); n++;
+  }
+  if (!n) return;
+  normalizeGroup(g);
+  pushSyncUndo(g, 'remove sync point', before);
+  afterSyncChange(g);
+  setStatus('Sync point removed (Ctrl+Z puts it back)');
+}
+function nearSyncPoint(g) {
+  const gt = groupTimeOf(g);
+  return groupPoints(g).find((p) => Math.abs(p.g - gt) <= SYNC_NEAR) || null;
+}
+// back to one offset each: the one they have where the playhead is, so they stay together here
+function clearSyncPoints(g) {
+  const before = syncState(g), gt = groupTimeOf(g);
+  for (const m of memberModel(g)) {
+    if (!m.points) continue;
+    const p = m.points[Groups.seg(m.points, gt)];
+    m.tile.sync = { start: p.g - p.t, points: null };
+  }
+  normalizeGroup(g);
+  pushSyncUndo(g, 'clear sync points', before);
+  afterSyncChange(g);
+  setStatus('Sync points cleared: one offset each, as lined up here');
+}
+// two videos: the other one becomes the one followed
+function swapMain(g) {
+  const ms = memberModel(g);
+  if (ms.length !== 2) return;
+  const before = syncState(g);
+  const M = ms.find((m) => m.tile === mainOf(g)), F = ms.find((m) => m !== M);
+  if (F.points) {
+    const pts = Groups.swapPoints(M.start, F.points);
+    F.tile.sync = { start: 0, points: null };
+    M.tile.sync = followerSync(pts, 0);
+    g.range = null; // group time means something else now
+  }
+  g.main = F.tile;
+  normalizeGroup(g);
+  pushSyncUndo(g, 'swap the main video', before);
+  afterSyncChange(g);
+  setStatus(`${tileName(F.tile)} is the main video now: ${tileName(M.tile)} follows it`);
+}
+
+// the timeline's lanes (expanded): each sync point, and the stretches a follower waits through
+function laneSyncPoints(row, model, m, end, width) {
+  const g = model.group, pts = m.points;
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const p = pts[i], n = pts[i + 1];
+    if (n.t < p.t) continue;
+    const len = Math.min(n.t - p.t, n.g - p.g);
+    if (n.g - p.g > len + 0.05) {
+      const h = document.createElement('div'); h.className = 'tl-hold';
+      h.style.left = Timeline.xFor(p.g + len, end, width) + 'px';
+      h.style.width = Math.max(2, Timeline.xFor(n.g, end, width) - Timeline.xFor(p.g + len, end, width)) + 'px';
+      h.title = `${tileName(m.tile)} does not have these ${(n.g - p.g - len).toFixed(1)} s: it waits (dimmed) until the next sync point`;
+      row.appendChild(h);
+    }
+  }
+  for (const p of pts) {
+    const d = document.createElement('div'); d.className = 'tl-sp';
+    d.style.left = Timeline.xFor(p.g, end, width) + 'px';
+    const main = mainOf(g);
+    d.title = `Sync point: ${main ? tileName(main) + ' ' + fmtTime(Groups.at(memberEntry(main), p.g)) : fmtTime(p.g)} = ${tileName(m.tile)} ${fmtTime(p.t)} · click: go there · right-click: remove`;
+    d.addEventListener('pointerdown', (e) => e.stopPropagation());
+    d.addEventListener('click', (e) => { e.stopPropagation(); tlSeek(model, p.g); });
+    d.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); if (viewMayEdit()) removeSyncPoint(g, p.g); });
+    row.appendChild(d);
+  }
+}
+
+// ---- the bar ----
+const syncBars = new Map(); // group -> { el, parts }
+function syncBarFor(g) {
+  let sb = syncBars.get(g);
+  if (sb) return sb;
+  const el = document.createElement('div');
+  el.className = 'sync-bar';
+  el.hidden = true;
+  const mk = (cls, text, title) => { const b = document.createElement('button'); b.className = cls; b.textContent = text; if (title) b.title = title; el.appendChild(b); return b; };
+  const span = (cls, text, title) => { const s = document.createElement('span'); s.className = cls; s.textContent = text; if (title) s.title = title; el.appendChild(s); return s; };
+  const parts = {
+    grip: span('sb-grip', '⠿', 'Drag to move this bar (it stays near its videos)'),
+    play: mk('sb-play', '▶', 'Play / pause them together'),
+    time: span('sb-time', ''),
+    prev: mk('sb-prev sb-on', '‹', 'Previous sync point'),
+    count: span('sb-count sb-on', ''),
+    next: mk('sb-next sb-on', '›', 'Next sync point'),
+    /* (the first version, lining up in place on the board; replaced by the sync editor, 2026-11-18)
+    add: mk('sb-add sb-on', '＋ Sync point', 'Line them up again here, where their cuts differ (pauses them)'),
+    line: mk('sb-line sb-off', '⛓ Line them up', 'Put each on the same moment, then Keep: they play together from then on'),
+    hint: span('sb-hint sb-lining', 'Put each on the same moment'),
+    sound: mk('sb-sound sb-lining', '🎧 Match by sound', 'Listens to 16-32 s around the main video and moves the other one (up to 2 minutes either way) to where its sound matches'),
+    keep: mk('sb-keep sb-lining', '✓ Keep', 'They are on the same moment: keep it as a sync point'),
+    cancel: mk('sb-cancel sb-lining', '✕', 'Cancel: put them back where they were'),
+    */
+    edit: mk('sb-edit', '⇆ Sync editor', 'Line them up frame by frame, side by side (they are never linked while you do)'),
+    more: mk('sb-more', '⋯', 'More'),
+  };
+  el.addEventListener('dblclick', (e) => e.stopPropagation());
+  el.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
+  parts.play.addEventListener('click', () => {
+    if (g.sync && !g.lining) { playPauseGroup(g); return; }
+    // not synced yet, or lining up: each plays on its own, to check them by eye and ear
+    const ms = memberModel(g), any = ms.some((m) => !m.tile.pb.paused);
+    for (const m of ms) { if (any) m.tile.pb.pause(); else m.tile.pb.play(); }
+  });
+  parts.prev.addEventListener('click', () => gotoSyncPoint(g, -1));
+  parts.next.addEventListener('click', () => gotoSyncPoint(g, 1));
+  /* (the first version's lining up in place, 2026-11-18)
+  parts.add.addEventListener('click', () => startLining(g));
+  parts.line.addEventListener('click', () => startLining(g));
+  parts.sound.addEventListener('click', () => matchBySound(g, parts.sound));
+  parts.keep.addEventListener('click', () => keepLining(g));
+  parts.cancel.addEventListener('click', () => { endLining(g, false); setStatus('Lining up cancelled'); });
+  */
+  parts.edit.addEventListener('click', () => openSyncEditor(g));
+  parts.more.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const ms = memberModel(g), main = mainOf(g), other = ms.length === 2 ? ms.find((m) => m.tile !== main) : null;
+    const near = g.sync ? nearSyncPoint(g) : null;
+    const can = viewMayEdit() && !g.lining;
+    showRowMenu(menuAt(parts.more), [
+      [main ? `Main video: ${tileName(main)}` : 'Main video', () => {}, true],
+      [other ? `Make “${tileName(other.tile)}” the main video` : 'Make the other one the main video', () => swapMain(g), !can || !other],
+      ['Remove the sync point here', () => removeSyncPoint(g, near.g), !can || !near],
+      ['Clear all sync points', () => clearSyncPoints(g), !can || !groupPoints(g).length],
+      [g.sync ? 'Turn Sync off' : 'Turn Sync on', () => toggleSyncFromUser(g), !can],
+      ['Put this bar back above the videos', () => { g.ctrl = null; placeSyncBars(); }, !g.ctrl],
+    ]);
+  });
+  // drag it anywhere near its videos
+  el.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+    if (e.button !== 0 || e.target.closest('button')) return;
+    e.preventDefault();
+    const box = groupBox(g);
+    if (!box) return;
+    const z = board.zoom, c0 = syncBarCenter(g, box), x0 = e.clientX, y0 = e.clientY;
+    try { el.setPointerCapture(e.pointerId); } catch {}
+    el.classList.add('dragging');
+    const move = (ev) => {
+      const cx = c0.x + (ev.clientX - x0) / z, cy = c0.y + (ev.clientY - y0) / z;
+      g.ctrl = { dx: cx - (box.x + box.w / 2), dy: cy - box.y };
+      placeSyncBars();
+    };
+    const up = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); el.removeEventListener('lostpointercapture', up); el.classList.remove('dragging'); if (g.ctrl) { const k = syncBarCenter(g, box); g.ctrl = { dx: k.x - (box.x + box.w / 2), dy: k.y - box.y }; } };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('lostpointercapture', up);
+  });
+  document.body.appendChild(el);
+  sb = { el, parts };
+  syncBars.set(g, sb);
+  return sb;
+}
+function groupBox(g) {
+  const ts = [...g.members].filter((t) => t.board && t.el.isConnected);
+  if (!ts.length) return null;
+  const x0 = Math.min(...ts.map((t) => t.board.x)), y0 = Math.min(...ts.map((t) => t.board.y));
+  const x1 = Math.max(...ts.map((t) => t.board.x + t.board.w)), y1 = Math.max(...ts.map((t) => t.board.y + t.board.h));
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+// the bar's centre on the board: where it was put, kept within reach of its videos
+function syncBarCenter(g, box) {
+  const z = board.zoom, sb = syncBars.get(g);
+  const h = (sb && sb.el.offsetHeight) || 40;
+  const reach = Math.max(box.h * 0.35, 90 / z);
+  let x = box.x + box.w / 2, y = box.y - (h / 2 + 12) / z; // default: just above the videos
+  if (g.ctrl) { x = box.x + box.w / 2 + g.ctrl.dx; y = box.y + g.ctrl.dy; }
+  x = clamp(x, box.x - reach, box.x + box.w + reach);
+  y = clamp(y, box.y - reach, box.y + box.h + reach);
+  return { x, y };
+}
+let syncBarsQueued = false;
+function schedulePlaceSyncBars() { if (syncBarsQueued) return; syncBarsQueued = true; requestAnimationFrame(() => { syncBarsQueued = false; placeSyncBars(); }); }
+function placeSyncBars() {
+  for (const [g, sb] of syncBars) if (!groups.includes(g)) { sb.el.remove(); syncBars.delete(g); }
+  const r = gridRect(), z = board.zoom;
+  const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+  for (const g of groups) {
+    const box = isBoard() && !IS_VIEW && cmp.el.hidden && !sedOpen() && !document.fullscreenElement && g !== cmp.temp && memberModel(g).length >= 2 ? groupBox(g) : null;
+    // off the screen, or too small there to aim at: no bar
+    const on = box && box.h * z >= 50 && r.left + board.panX + (box.x + box.w) * z > r.left && r.left + board.panX + box.x * z < r.right
+      && r.top + board.panY + (box.y + box.h) * z > r.top && r.top + board.panY + box.y * z < r.bottom;
+    const sb = on ? syncBarFor(g) : syncBars.get(g);
+    if (!sb) continue;
+    sb.el.hidden = !on;
+    if (!on) continue;
+    fillSyncBar(g, sb);
+    const c = syncBarCenter(g, box), w = sb.el.offsetWidth, h = sb.el.offsetHeight;
+    const sx = r.left + board.panX + c.x * z, sy = r.top + board.panY + c.y * z;
+    sb.el.style.left = Math.round(clamp(sx - w / 2, 8, vw - w - 8)) + 'px';
+    sb.el.style.top = Math.round(clamp(sy - h / 2, 8, vh - h - 8)) + 'px';
+  }
+  try { clearSelBarOfSyncBars(); } catch {}
+}
+function fillSyncBar(g, sb) {
+  const P = sb.parts, el = sb.el;
+  const state = g.lining ? 'lining' : g.sync ? 'on' : 'off';
+  if (el.dataset.state !== state) {
+    el.dataset.state = state;
+    for (const b of el.querySelectorAll('.sb-on')) b.hidden = state !== 'on';
+    for (const b of el.querySelectorAll('.sb-off')) b.hidden = state !== 'off';
+    for (const b of el.querySelectorAll('.sb-lining')) b.hidden = state !== 'lining';
+    P.edit.disabled = !viewMayEdit();
+  }
+  const ms = memberModel(g), main = mainOf(g);
+  P.play.textContent = ms.some((m) => !m.tile.pb.paused) ? '❚❚' : '▶';
+  P.time.textContent = main ? `${fmtTime(main.pb.time)} / ${fmtTime(main.pb.duration)}` : '';
+  P.time.title = main ? `${tileName(main)} (the main video; the others follow it)` : '';
+  if (state === 'on') {
+    const n = groupPoints(g).length;
+    P.count.textContent = n ? `◆ ${n}` : '◆';
+    P.count.title = n ? `${n} sync points: where their cuts differ they are lined up again` : 'Lined up once, at one offset. Where their cuts differ, add a sync point there.';
+    P.prev.disabled = P.next.disabled = !n;
+  }
+}
+// every quarter second: the bars' times, and which followers are waiting through a part they lack
+setInterval(() => quietly(() => {
+  for (const g of groups) {
+    if (!g.sync || g.lining) continue;
+    const ms = memberModel(g);
+    if (!ms.some((m) => m.points)) { for (const m of ms) markHold(m.tile, false); continue; }
+    const gt = groupTimeOf(g);
+    for (const m of ms) markHold(m.tile, !!m.points && Groups.holding(m, gt));
+  }
+  if (groups.length || syncBars.size) placeSyncBars();
+}), 250);
+// the selection bar goes above a sync bar it would cover
+function clearSelBarOfSyncBars() {
+  if (selBar.hidden) return;
+  const a = selBar.getBoundingClientRect();
+  for (const sb of syncBars.values()) {
+    if (sb.el.hidden) continue;
+    const b = sb.el.getBoundingClientRect();
+    if (a.right > b.left && a.left < b.right && a.bottom > b.top && a.top < b.bottom) selBar.style.top = Math.max(8, b.top - a.height - 6) + 'px';
+  }
+}
+
+// ---------- the sync editor (2026-11-18) ----------
+// Lining two cuts of the same footage up by hand, frame by frame. The two videos fill the window side
+// by side and are never linked while it is open: moving one never moves the other. Under each, a
+// strip a few seconds wide with a tick per frame and the video's sound drawn on it: drag it to scrub
+// (right is later), scroll it one frame at a time. The video last clicked is the one the keys steer.
+// ⚡ Match lines the other one up by sound, then by picture (that is what has to line up; in a
+// capture the sound can sit a few frames off it). ◆ Sync here keeps the moment as a sync point.
+const sed = { el: document.getElementById('sync-editor'), g: null, main: null, f: null, active: 1, saved: 0, raf: 0, span: 8, wave: new Map(), busy: false, drawn: [null, null] };
+const sedQ = (s) => sed.el.querySelector(s);
+const sedOpen = () => !!sed.g;
+const sedTile = (i) => (i === 0 ? sed.main : sed.f);
+const sedFps = (t) => effectiveFps(t) || Frames.DEFAULT_FPS;
+const sedOffset = () => sed.main.pb.time - sed.f.pb.time;
+const sedLocal = (t) => !!(t && t.pb && t.pb.kind === 'video' && !t.pb.web && !t.url && t.path);
+const sedTC = (t, time) => `${Frames.timecode(time, sedFps(t))}`;
+
+// the two panes are built once
+(function buildSyncEditorPanes() {
+  const stage = sedQ('.sed-stage');
+  for (let i = 0; i < 2; i++) {
+    const p = document.createElement('section');
+    p.className = 'sed-pane';
+    p.dataset.i = String(i);
+    p.innerHTML = `<div class="sed-head"><span class="sed-role"></span><b class="sed-name"></b><select class="sed-which" hidden title="Which video to line up with the main one"></select><button class="sed-tosync" hidden title="Put it where the sync puts it for the main video's frame (G)">⤓ Go to its sync</button><button class="sed-mkmain" hidden title="Make this the video the others follow">Make this the main video</button></div>
+      <div class="sed-media"></div>
+      <div class="sed-read"><span class="sed-tc"></span><span class="sed-fr"></span><span class="sed-delta"></span></div>
+      <div class="sed-over" title="The whole video: click or drag to jump"><div class="sed-over-pts"></div><div class="sed-over-head"></div></div>
+      <canvas class="sed-jog" title="Drag to scrub frame by frame (right is later) · scroll: one frame (Shift: ten) · Ctrl+scroll: show more or less"></canvas>
+      <div class="sed-btns"><button data-step="-10" title="Back ten frames (Shift+←)">−10</button><button data-step="-1" title="Back one frame (←)">◀ 1</button><button class="sed-play" title="Play / pause this one (Space)">▶</button><button data-step="1" title="Forward one frame (→)">1 ▶</button><button data-step="10" title="Forward ten frames (Shift+→)">+10</button></div>`;
+    stage.appendChild(p);
+    p.addEventListener('pointerdown', () => sedActivate(i), true);
+    // the picture belongs to a tile, whose own clicks play it or start a drag: here a click only picks it
+    const media = p.querySelector('.sed-media');
+    for (const type of ['click', 'dblclick', 'pointerdown', 'mousedown', 'contextmenu']) media.addEventListener(type, (e) => { e.stopPropagation(); if (type !== 'pointerdown' && type !== 'mousedown') e.preventDefault(); }, true);
+    p.addEventListener('wheel', (e) => {
+      if (!sedOpen()) return;
+      e.preventDefault();
+      if (e.ctrlKey) { sed.span = clamp(sed.span * (e.deltaY > 0 ? 1.25 : 0.8), 2, 60); return; }
+      sedStep(sedTile(i), (e.deltaY > 0 ? 1 : -1) * (e.shiftKey ? 10 : 1));
+    }, { passive: false });
+    for (const b of p.querySelectorAll('[data-step]')) b.addEventListener('click', () => sedStep(sedTile(i), Number(b.dataset.step)));
+    p.querySelector('.sed-play').addEventListener('click', () => sedPlay(sedTile(i)));
+    p.querySelector('.sed-mkmain').addEventListener('click', () => sedMakeMain());
+    p.querySelector('.sed-tosync').addEventListener('click', () => sedToSync());
+    p.querySelector('.sed-which').addEventListener('change', (e) => sedSetFollower(sed.g && [...sed.g.members].find((t) => t.id === e.target.value)));
+    // the whole video
+    const over = p.querySelector('.sed-over');
+    over.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || !sedOpen()) return;
+      e.preventDefault();
+      const t = sedTile(i), r = over.getBoundingClientRect();
+      const go = (ev) => sedSeek(t, clamp((ev.clientX - r.left) / r.width, 0, 1) * (t.pb.duration || 0));
+      t.pb.pause(); go(e);
+      try { over.setPointerCapture(e.pointerId); } catch {}
+      const up = () => { over.removeEventListener('pointermove', go); over.removeEventListener('pointerup', up); over.removeEventListener('lostpointercapture', up); };
+      over.addEventListener('pointermove', go); over.addEventListener('pointerup', up); over.addEventListener('lostpointercapture', up);
+    });
+    // the frame strip: drag to scrub (right is later), a click without a drag jumps there
+    const jog = p.querySelector('.sed-jog');
+    jog.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || !sedOpen()) return;
+      e.preventDefault();
+      const t = sedTile(i), x0 = e.clientX, t0 = t.pb.time, pps = jog.clientWidth / sed.span;
+      let moved = false;
+      t.pb.pause();
+      try { jog.setPointerCapture(e.pointerId); } catch {}
+      jog.classList.add('dragging');
+      const move = (ev) => { if (Math.abs(ev.clientX - x0) > 2) moved = true; if (moved) sedSeek(t, t0 + (ev.clientX - x0) / pps); };
+      const up = (ev) => {
+        jog.removeEventListener('pointermove', move); jog.removeEventListener('pointerup', up); jog.removeEventListener('lostpointercapture', up);
+        jog.classList.remove('dragging');
+        if (!moved && ev && ev.type === 'pointerup') { const r = jog.getBoundingClientRect(); sedSeek(t, t0 + (ev.clientX - r.left - r.width / 2) / pps); }
+      };
+      jog.addEventListener('pointermove', move); jog.addEventListener('pointerup', up); jog.addEventListener('lostpointercapture', up);
+    });
+  }
+})();
+sedQ('.sed-done').addEventListener('click', () => closeSyncEditor(false));
+sedQ('.sed-match').addEventListener('click', () => sedMatch());
+sedQ('.sed-both').addEventListener('click', () => sedPlayBoth());
+sedQ('.sed-add').addEventListener('click', () => sedSyncHere());
+sedQ('.sed-prev').addEventListener('click', () => sedGoPoint(-1));
+sedQ('.sed-next').addEventListener('click', () => sedGoPoint(1));
+sedQ('.sed-ask-keep').addEventListener('click', async () => { sedQ('.sed-ask').hidden = true; await sedSyncHere(); closeSyncEditor(true); });
+sedQ('.sed-ask-drop').addEventListener('click', () => closeSyncEditor(true));
+sedQ('.sed-ask-back').addEventListener('click', () => { sedQ('.sed-ask').hidden = true; });
+
+function openSyncEditor(g) {
+  if (!g || sedOpen() || !cmp.el.hidden || !viewMayEdit()) return;
+  const ms = [...g.members].filter((t) => t.pb && t.mediaEl && !t.pb.web);
+  if (ms.length < 2) { setStatus('The sync editor needs two video files (or image sequences) in the group'); return; }
+  if (g.lining) endLining(g, false);
+  if (!g.sync && g.stash) setGroupSync(g, true); // its sync points first
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  hpReset();
+  const main = ms.includes(mainOf(g)) ? mainOf(g) : ms[0];
+  sed.g = g; sed.main = main; sed.f = ms.find((t) => t !== main); sed.active = 1; sed.drawn = [null, null];
+  startLining(g, true);
+  sedQ('.sed-ask').hidden = true;
+  sedAttach();
+  sed.saved = sedOffset();
+  sed.el.hidden = false;
+  sedMsg(g.sync ? '' : 'Put both on the same frame, then ◆ Sync here.');
+  setTimeout(applyLiveBudget, 0);
+  sedFill();
+  cancelAnimationFrame(sed.raf);
+  sed.raf = requestAnimationFrame(sedFrame);
+  placeSyncBars();
+  logUi('info', 'sync editor', { group: g.id, main: tileName(main), other: tileName(sed.f) });
+}
+function sedAttach() {
+  sed.el.querySelectorAll('.sed-pane')[0].querySelector('.sed-media').appendChild(sed.main.mediaEl);
+  sed.el.querySelectorAll('.sed-pane')[1].querySelector('.sed-media').appendChild(sed.f.mediaEl);
+}
+function sedDetach(t) { if (t && t.mediaEl && t.el && t.mediaEl.parentElement !== t.el) t.el.insertBefore(t.mediaEl, t.el.firstChild); }
+// lined up differently from their sync, and not kept yet
+function sedDirty() {
+  if (!sedOpen()) return false;
+  const half = 0.5 / Math.max(sedFps(sed.main), sedFps(sed.f));
+  return Math.abs(sedOffset() - sed.saved) > half;
+}
+function closeSyncEditor(force) {
+  if (!sedOpen()) return;
+  if (!force && sedDirty()) { sedQ('.sed-ask').hidden = false; return; }
+  const g = sed.g, main = sed.main;
+  for (const t of [sed.main, sed.f]) { t.pb.pause(); sedDetach(t); }
+  sed.el.hidden = true;
+  sedQ('.sed-ask').hidden = true;
+  cancelAnimationFrame(sed.raf);
+  sed.g = sed.main = sed.f = null;
+  endLining(g, true);
+  // the others go where the sync puts them for the main video's frame
+  if (g.sync && groups.includes(g)) seekGroup(g, Groups.toGroup(memberEntry(main), main.pb.time));
+  layoutTiles();
+  setTimeout(applyLiveBudget, 0);
+  afterSyncChange(g);
+}
+function sedActivate(i) {
+  if (sed.active === i) return;
+  sed.active = i;
+  for (const p of sed.el.querySelectorAll('.sed-pane')) p.classList.toggle('active', Number(p.dataset.i) === i);
+}
+function sedSeek(t, time) {
+  const d = t.pb.duration || 0;
+  t.pb.time = clamp(PicSync.onFrame(Math.max(0, time), sedFps(t)), 0, d ? Math.max(0, d - 0.5 / sedFps(t)) : Infinity);
+}
+function sedStep(t, n) {
+  if (!t) return;
+  t.pb.pause();
+  const fps = sedFps(t);
+  sedSeek(t, (Frames.toFrame(t.pb.time, fps) + n + 0.5) / fps);
+}
+function sedPlay(t) { if (t.pb.paused) t.pb.play(); else t.pb.pause(); }
+// both from where they are, to check them by eye and ear (not linked: each on its own clock)
+function sedPlayBoth() {
+  const any = !sed.main.pb.paused || !sed.f.pb.paused;
+  for (const t of [sed.main, sed.f]) { if (any) t.pb.pause(); else t.pb.play(); }
+}
+function sedMsg(text, ms = 0) {
+  const el = sedQ('.sed-msg');
+  el.textContent = text || '';
+  clearTimeout(sed.msgTimer);
+  if (ms) sed.msgTimer = setTimeout(() => { el.textContent = ''; }, ms);
+}
+// this follower's sync points, as { g, t }
+const sedPoints = () => (sed.f && sed.f.sync && sed.f.sync.points) || [];
+function sedFill() {
+  if (!sedOpen()) return;
+  const g = sed.g;
+  sedQ('.sed-title').textContent = `Sync editor · ${g.name}`;
+  const panes = sed.el.querySelectorAll('.sed-pane');
+  [sed.main, sed.f].forEach((t, i) => {
+    const p = panes[i];
+    p.classList.toggle('active', sed.active === i);
+    p.querySelector('.sed-role').textContent = i === 0 ? 'Main' : 'Lines up with it';
+    p.querySelector('.sed-name').textContent = `${tileName(t)} · ${(+sedFps(t).toFixed(3))} fps`;
+    p.querySelector('.sed-mkmain').hidden = i === 0 || memberModel(g).length !== 2;
+    p.querySelector('.sed-tosync').hidden = i === 0 || !g.sync;
+    const which = p.querySelector('.sed-which');
+    const others = [...g.members].filter((x) => x !== sed.main && x.pb && x.mediaEl && !x.pb.web);
+    which.hidden = i === 0 || others.length < 2;
+    if (!which.hidden) {
+      which.textContent = '';
+      for (const o of others) { const op = document.createElement('option'); op.value = o.id; op.textContent = tileName(o); op.selected = o === sed.f; which.appendChild(op); }
+    }
+    // sync points along the whole video
+    const op = p.querySelector('.sed-over-pts'); op.textContent = '';
+    const d = t.pb.duration || 0;
+    if (d) for (const pt of sedPoints()) {
+      const tt = i === 0 ? Groups.at(memberEntry(sed.main), pt.g) : pt.t;
+      const m = document.createElement('i'); m.style.left = (tt / d * 100) + '%'; op.appendChild(m);
+    }
+  });
+  // the sync points of the one being lined up
+  const box = sedQ('.sed-pts'); box.textContent = '';
+  const pts = sedPoints();
+  if (!pts.length) {
+    const s = document.createElement('span'); s.className = 'sed-none';
+    s.textContent = g.sync ? 'No sync points yet (they are at one offset, never lined up here: the first ◆ Sync here replaces it)' : 'No sync points yet';
+    box.appendChild(s);
+  }
+  pts.forEach((pt, k) => {
+    const chip = document.createElement('span'); chip.className = 'sed-chip';
+    const go = document.createElement('button'); go.className = 'sed-chip-go';
+    go.textContent = `◆ ${k + 1}  ${sedTC(sed.main, Groups.at(memberEntry(sed.main), pt.g))}`;
+    go.title = `${tileName(sed.main)} ${sedTC(sed.main, Groups.at(memberEntry(sed.main), pt.g))} = ${tileName(sed.f)} ${sedTC(sed.f, pt.t)} · click: go there`;
+    go.addEventListener('click', () => sedGoTo(pt));
+    const x = document.createElement('button'); x.className = 'sed-chip-x'; x.textContent = '✕'; x.title = 'Remove this sync point';
+    x.addEventListener('click', () => { removeSyncPoint(g, pt.g); sedFill(); });
+    chip.append(go, x); box.appendChild(chip);
+  });
+  sedQ('.sed-prev').disabled = sedQ('.sed-next').disabled = !pts.length;
+  sedQ('.sed-match').disabled = sed.busy || !sedLocal(sed.main) || !sedLocal(sed.f);
+  sedQ('.sed-match').title = sedLocal(sed.main) && sedLocal(sed.f) ? `Line ${tileName(sed.f)} up with ${tileName(sed.main)} where it is: by sound to get close, then by picture to land on the frame (M)` : 'Matching needs two video files on this PC';
+}
+// where the sync puts the other one for the main video's frame (null while not synced)
+function sedExpected() {
+  if (!sedOpen() || !sed.g.sync || !sed.f.sync) return null;
+  return Groups.at(memberEntry(sed.f), Groups.toGroup(memberEntry(sed.main), sed.main.pb.time));
+}
+function sedToSync() {
+  const e = sedExpected();
+  if (e === null) return;
+  sed.f.pb.pause();
+  sedSeek(sed.f, e);
+  sed.saved = sedOffset();
+}
+function sedGoTo(pt) {
+  sed.main.pb.pause(); sed.f.pb.pause();
+  sedSeek(sed.main, Groups.at(memberEntry(sed.main), pt.g));
+  sedSeek(sed.f, pt.t);
+  sed.saved = sedOffset();
+}
+function sedGoPoint(dir) {
+  const pts = sedPoints();
+  if (!pts.length) return;
+  const gt = Groups.toGroup(memberEntry(sed.main), sed.main.pb.time);
+  const p = dir < 0 ? [...pts].reverse().find((x) => x.g < gt - 0.05) : pts.find((x) => x.g > gt + 0.05);
+  if (p) sedGoTo(p); else sedMsg(dir < 0 ? 'No sync point before this' : 'No sync point after this', 2500);
+}
+async function sedSyncHere() {
+  if (!sedOpen() || sed.busy) return;
+  sed.busy = true; sedQ('.sed-add').disabled = true;
+  sedMsg('Keeping it…');
+  try {
+    const msg = await commitLineUp(sed.g, [sed.f]);
+    sed.saved = sedOffset();
+    sedMsg(msg || 'Kept', 12000);
+  } finally { sed.busy = false; sedQ('.sed-add').disabled = false; sedFill(); }
+}
+function sedMakeMain() {
+  if (!sedOpen() || memberModel(sed.g).length !== 2) return;
+  swapMain(sed.g);
+  [sed.main, sed.f] = [sed.f, sed.main];
+  sedAttach();
+  sed.active = 1 - sed.active;
+  sed.saved = sedOffset();
+  sedFill();
+}
+function sedSetFollower(t) {
+  if (!t || t === sed.f || t === sed.main) return;
+  sed.f.pb.pause(); sedDetach(sed.f);
+  sed.f = t; sedAttach();
+  sed.saved = sedOffset();
+  setTimeout(applyLiveBudget, 0);
+  sedFill();
+}
+async function sedMatch() {
+  if (!sedOpen() || sed.busy || !sedLocal(sed.main) || !sedLocal(sed.f)) return;
+  sed.busy = true; sedFill();
+  sed.main.pb.pause(); sed.f.pb.pause();
+  sedMsg('Listening and looking…');
+  try {
+    const before = sed.f.pb.time;
+    // far from where its sync puts it (the main one was moved a long way): look from there
+    const e = sedExpected();
+    const r = await matchFollower(sed.main, sed.f, e !== null && Math.abs(e - sed.f.pb.time) > 20 ? e : null);
+    if (!sedOpen()) return;
+    if (r.time === null) { sedMsg(`Could not match them here: ${r.why}. Line it up by eye.`, 12000); return; }
+    sedSeek(sed.f, r.time);
+    const frames = Math.round((sed.f.pb.time - before) * sedFps(sed.f));
+    sedMsg(`${tileName(sed.f)} moved ${frames >= 0 ? '+' : '−'}${Math.abs(frames)} frame${Math.abs(frames) === 1 ? '' : 's'} (lined up by ${r.how}). Check it, nudge it if you need to, then ◆ Sync here.`, 20000);
+  } finally { sed.busy = false; sedFill(); }
+}
+// (first, before every other key handler: nothing else on the board reacts while it is open)
+window.addEventListener('keydown', (e) => { if (sedOpen()) { sedKey(e); e.stopImmediatePropagation(); } }, true);
+function sedKey(e) {
+  const ctrl = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
+  if (e.target instanceof HTMLSelectElement) return;
+  e.stopPropagation();
+  if (e.key === 'Escape') { e.preventDefault(); if (!sedQ('.sed-ask').hidden) sedQ('.sed-ask').hidden = true; else closeSyncEditor(false); return; }
+  if (ctrl && key === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); sedFill(); return; }
+  if (ctrl && key === 'y') { e.preventDefault(); redo(); sedFill(); return; }
+  if (ctrl) return;
+  const t = sedTile(sed.active);
+  if (e.key === 'ArrowLeft' || e.key === ',') { e.preventDefault(); sedStep(t, e.shiftKey ? -10 : -1); return; }
+  if (e.key === 'ArrowRight' || e.key === '.') { e.preventDefault(); sedStep(t, e.shiftKey ? 10 : 1); return; }
+  if (e.key === 'Tab' || e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); sedActivate(1 - sed.active); return; }
+  if (e.code === 'Space') { e.preventDefault(); if (e.shiftKey) sedPlayBoth(); else sedPlay(t); return; }
+  if (key === 'k') { e.preventDefault(); t.pb.pause(); return; }
+  if (key === 'l') { e.preventDefault(); t.pb.play(); return; }
+  if (key === 'j') { e.preventDefault(); t.pb.pause(); sedSeek(t, t.pb.time - 1); return; }
+  if (key === 'm') { e.preventDefault(); sedMatch(); return; }
+  if (key === 'p') { e.preventDefault(); sedPlayBoth(); return; }
+  if (key === 'g') { e.preventDefault(); sedToSync(); return; }
+  if (e.key === 'Enter') { e.preventDefault(); sedSyncHere(); return; }
+}
+
+// every frame while it is open: the readouts, and each strip when its video moved
+function sedFrame() {
+  if (!sedOpen()) return;
+  sed.raf = requestAnimationFrame(sedFrame);
+  const panes = sed.el.querySelectorAll('.sed-pane');
+  const expected = sed.g.sync && sed.f.sync ? Groups.at(memberEntry(sed.f), Groups.toGroup(memberEntry(sed.main), sed.main.pb.time)) : null;
+  [sed.main, sed.f].forEach((t, i) => {
+    const p = panes[i], fps = sedFps(t), time = t.pb.time;
+    p.querySelector('.sed-tc').textContent = sedTC(t, time);
+    p.querySelector('.sed-fr').textContent = `frame ${Frames.toFrame(time, fps)}`;
+    p.querySelector('.sed-play').textContent = t.pb.paused ? '▶' : '❚❚';
+    const d = t.pb.duration || 0;
+    p.querySelector('.sed-over-head').style.left = d ? (time / d * 100) + '%' : '0';
+    const del = p.querySelector('.sed-delta');
+    if (i === 1) {
+      if (expected === null) { del.textContent = 'not synced yet'; del.className = 'sed-delta'; }
+      else {
+        const n = Math.round((time - expected) * fps);
+        del.textContent = n === 0 ? 'on its sync' : `${n > 0 ? '+' : '−'}${Math.abs(n)} frame${Math.abs(n) === 1 ? '' : 's'} from its sync`;
+        del.className = 'sed-delta ' + (n === 0 ? 'ok' : 'off');
+      }
+    } else del.textContent = '';
+    const cv = p.querySelector('.sed-jog');
+    const key = `${time.toFixed(4)}|${cv.clientWidth}|${cv.clientHeight}|${sed.span}|${sedWaveKey(t)}|${sedPoints().length}`;
+    if (sed.drawn[i] !== key) { sed.drawn[i] = key; sedDrawJog(t, cv, i); }
+    sedWantWave(t);
+  });
+  sedQ('.sed-both').textContent = !sed.main.pb.paused || !sed.f.pb.paused ? '❚❚ Pause both' : '▶ Play both';
+  sedQ('.sed-add').classList.toggle('pulse', sedDirty());
+}
+// its sound around where it is, for the strip (fetched in 20 s pieces, peaks every 10 ms)
+function sedWaveKey(t) { const w = sed.wave.get(t); return w ? w.start + ':' + (w.peaks ? w.peaks.length : 'x') : ''; }
+function sedWantWave(t) {
+  if (!sedLocal(t)) return;
+  const w = sed.wave.get(t), now = t.pb.time, half = sed.span / 2 + 1;
+  if (w && (w.loading || (now - half >= w.start && now + half <= w.start + w.dur))) return;
+  if (w && w.failed && performance.now() - w.failed < 5000) return;
+  const start = Math.max(0, now - Math.max(10, half + 4)), dur = Math.max(20, 2 * half + 8);
+  const entry = { start, dur, loading: true, peaks: w && w.peaks && !w.failed ? w.peaks : null, pStart: w ? w.pStart : 0 };
+  sed.wave.set(t, entry);
+  window.api.audioPcm(t.path, start, dur).then((u) => {
+    if (sed.wave.get(t) !== entry) return;
+    if (!u) { entry.loading = false; entry.failed = performance.now(); return; }
+    const pcm = new Int16Array(u.buffer.slice(u.byteOffset, u.byteOffset + (u.byteLength & ~1)));
+    const per = AudioSync.RATE / 100, n = Math.floor(pcm.length / per), peaks = new Float32Array(n);
+    for (let i = 0; i < n; i++) { let m = 0; for (let k = i * per, e = k + per; k < e; k++) { const v = Math.abs(pcm[k]); if (v > m) m = v; } peaks[i] = m / 32768; }
+    Object.assign(entry, { loading: false, peaks, pStart: start });
+  }).catch(() => { entry.loading = false; entry.failed = performance.now(); });
+}
+function sedDrawJog(t, cv, i) {
+  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+  const c = cv.getContext('2d');
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.fillStyle = '#15151a'; c.fillRect(0, 0, w, h);
+  const fps = sedFps(t), now = t.pb.time, span = sed.span, pps = w / span, x0 = now - span / 2;
+  const X = (time) => (time - x0) * pps;
+  // the sound
+  const wv = sed.wave.get(t);
+  if (wv && wv.peaks) {
+    c.fillStyle = '#34507e';
+    const mid = h * 0.55, amp = h * 0.42;
+    for (let x = 0; x < w; x++) {
+      const a = Math.floor((x0 + x / pps - wv.pStart) * 100), b = Math.max(a + 1, Math.floor((x0 + (x + 1) / pps - wv.pStart) * 100));
+      let m = 0;
+      for (let k = Math.max(0, a); k < Math.min(wv.peaks.length, b); k++) if (wv.peaks[k] > m) m = wv.peaks[k];
+      if (m > 0) { const y = Math.max(1, Math.sqrt(m) * amp); c.fillRect(x, mid - y, 1, 2 * y); }
+    }
+  }
+  // the frame it is on
+  const f0 = Frames.toFrame(now, fps);
+  c.fillStyle = 'rgba(79,140,255,0.28)';
+  c.fillRect(X(f0 / fps), 0, Math.max(1, pps / fps), h);
+  // a tick per frame (when they are far enough apart), a tall one and a label every second
+  const step = pps / fps >= 3 ? 1 : pps / fps >= 0.6 ? 5 : Math.round(fps);
+  c.fillStyle = '#5a5a66';
+  for (let f = Math.floor(x0 * fps / step) * step; f / fps < x0 + span; f += step) { if (f >= 0) c.fillRect(Math.round(X(f / fps)), 0, 1, 6); }
+  c.fillStyle = '#9a9aa6'; c.font = '10px system-ui, sans-serif';
+  const every = span > 24 ? 5 : 1;
+  for (let s = Math.max(0, Math.ceil(x0 / every) * every); s < x0 + span; s += every) {
+    const x = Math.round(X(s)); c.fillRect(x, 0, 1, 14); c.fillText(fmtTime(s), x + 3, 12);
+  }
+  // sync points
+  c.fillStyle = '#ffd166';
+  for (const pt of sedPoints()) {
+    const tt = i === 0 ? Groups.at(memberEntry(sed.main), pt.g) : pt.t;
+    const x = X(tt);
+    if (x < -6 || x > w + 6) continue;
+    c.beginPath(); c.moveTo(x, h - 12); c.lineTo(x + 5, h - 6); c.lineTo(x, h); c.lineTo(x - 5, h - 6); c.closePath(); c.fill();
+  }
+  // where it is
+  c.fillStyle = '#ffffff'; c.fillRect(Math.round(w / 2), 0, 1.5, h);
+}
+
+// ---- lining up by sound, then by picture ----
+// Where the other video is when the main one is where it is now. { time, how } or { time: null, why }.
+async function matchFollower(main, f, guess = null) {
+  const mainT = main.pb.time, fromT = guess !== null ? guess : f.pb.time;
+  const pcm = (u) => new Int16Array(u.buffer.slice(u.byteOffset, u.byteOffset + (u.byteLength & ~1)));
+  // 1. by sound, to get close (16 s within 40 s either way; then 32 s; then two minutes either way)
+  let sound = null;
+  for (const { half, search } of AudioSync.TRIES) {
+    const w = AudioSync.windows(mainT, main.pb.duration, fromT, f.pb.duration, search, half);
+    const [a, b] = await Promise.all([window.api.audioPcm(main.path, w.main.start, w.main.dur), window.api.audioPcm(f.path, w.other.start, w.other.dur)]);
+    if (!a || !b) break;
+    const r = AudioSync.match(pcm(a), w.main.start, pcm(b), w.other.start, mainT);
+    if (r.time !== null) { sound = r; break; }
+  }
+  const est = sound ? sound.time : fromT;
+  // 2. by picture, to land on the frame: 12 s of the main video against the other around there
+  const aS = Math.max(0, mainT - 6), aD = 12, reach = sound ? 7 : 15;
+  const bS = Math.max(0, est - (mainT - aS) - reach), bD = aD + 2 * reach;
+  const [sa, sb] = await Promise.all([window.api.frameActivity(main.path, aS, aD), window.api.frameActivity(f.path, bS, bD)]);
+  const pic = sa.length > 20 && sb.length > 20 ? PicSync.match({ start: aS, dur: aD, sig: sa }, { start: bS, dur: bD, sig: sb }) : null;
+  let offset = null, how = '';
+  if (pic && pic.score >= 0.25 && pic.score - pic.second >= 0.05 && (!sound || Math.abs(pic.offset - (mainT - sound.time)) < 1)) { offset = pic.offset; how = 'picture'; }
+  else if (sound) { offset = mainT - sound.time; how = 'sound only, check it by eye'; }
+  logUi('info', 'match', { main: tileName(main), other: tileName(f), at: mainT, sound: sound && { time: sound.time, score: sound.score }, picture: pic, offset, how });
+  if (offset === null) return { time: null, why: sound ? 'their pictures do not match here' : 'neither their sound nor their pictures match here' };
+  // 3. a shot change in both at that offset says it exactly
+  const [ca, cb] = await Promise.all([window.api.sceneCuts(main.path, aS, Math.min(5, aD)), window.api.sceneCuts(f.path, Math.max(0, aS - offset - 0.5), Math.min(5, aD) + 1)]).catch(() => [[], []]);
+  const more = mainT - aS > 5 ? await Promise.all([window.api.sceneCuts(main.path, aS + 5, 5), window.api.sceneCuts(f.path, Math.max(0, aS + 5 - offset - 0.5), 6)]).catch(() => [[], []]) : [[], []];
+  const cut = PicSync.fromCuts([...ca, ...more[0]], [...cb, ...more[1]], offset, how === 'picture' ? 0.12 : 0.3);
+  if (cut) { offset = cut.offset; how = 'a shot change in both'; }
+  return { time: mainT - offset, how };
+}
+
+// ◆ Sync here: this frame of the main video is this frame of each one in `followers`. A sync point made
+// here is kept; an offset never lined up here (an old Sync press) is replaced by the first one.
+// Returns what it did, in words.
+async function commitLineUp(g, followers) {
+  const main = mainOf(g);
+  if (!main) return '';
+  const before = syncState(g);
+  const ms = memberModel(g), list = ms.filter((m) => m.tile !== main && (!followers || followers.includes(m.tile)));
+  let note = '';
+  const changed = [];
+  if (!g.sync) {
+    main.sync = { start: 0, points: null };
+    for (const m of ms) if (m.tile !== main) m.tile.sync = list.includes(m) ? { start: main.pb.time - m.tile.pb.time, points: [{ g: main.pb.time, t: m.tile.pb.time }] } : { start: main.pb.time - m.tile.pb.time, points: null };
+    g.sync = true; g.stash = null;
+    note = 'Synced at this frame. Where their cuts differ later, line them up there and ◆ Sync here again.';
+  } else {
+    const mm = ms.find((m) => m.tile === main);
+    if (mm.points) main.sync = { start: Groups.extent(mm).from, points: null }; // (the main video never follows)
+    const gt = Groups.toGroup(memberEntry(main), main.pb.time);
+    let added = 0, redone = 0;
+    for (const m of list) {
+      const ft = m.tile.pb.time;
+      if (!m.points) { m.tile.sync = { start: gt - ft, points: [{ g: gt, t: ft }] }; redone++; continue; }
+      const near = m.points.some((p) => Math.abs(p.g - gt) <= SYNC_NEAR);
+      m.tile.sync = followerSync(Groups.addPoint(m.points, gt, ft, SYNC_NEAR), m.start);
+      if (near) redone++; else added++;
+      if (m.tile.sync.points && m.tile.sync.points.length > 1) changed.push(m.tile);
+    }
+    note = added ? 'Sync point added' : redone ? 'Lined up again here' : '';
+    g.newAt = gt;
+  }
+  g.main = main;
+  let cuts = [];
+  if (changed.length) {
+    sedMsg('Listening for where their cuts part…');
+    try { cuts = await findCuts(g, main, changed, g.newAt); } catch (err) { logUi('warn', 'finding cuts failed', { error: String(err && err.message || err) }); }
+  }
+  normalizeGroup(g);
+  pushSyncUndo(g, 'sync point', before);
+  afterSyncChange(g);
+  const n = Math.max(...memberModel(g).map((m) => (m.points ? m.points.length : 0)));
+  return `${note}${cuts.length ? ' · ' + cuts.join(' · ') : ''}${n ? ` · ${n} sync point${n === 1 ? '' : 's'}` : ''}`;
 }
 
 // ---------- marker colours ----------
@@ -869,7 +2041,7 @@ const tileColor = (t) => Groups.PALETTE[t.hue] || Groups.PALETTE.yellow;
 function tlTime(model) { return model.group ? groupTimeOf(model.group) : model.members[0].tile.pb.time; }
 function tlSeek(model, gt) {
   if (model.group && model.group.sync) seekGroup(model.group, gt);
-  else for (const m of model.members) m.tile.pb.time = Groups.memberTime(gt, m.start, m.duration);
+  else for (const m of model.members) m.tile.pb.time = Groups.at(m, gt);
 }
 // True while the bottom timeline is being dragged: the drift engine leaves every group alone until
 // the drag ends, the same as it does for a tile's own bar (tile.scrubbing).
@@ -877,7 +2049,7 @@ let timelineScrubbing = false;
 // A preview seek on every member, never the group machinery (no broadcast, no drift work) - the
 // real seek happens once on release.
 function tlScrub(model, gt) {
-  for (const m of model.members) pbScrub(m.tile.pb, Groups.memberTime(gt, m.start, m.duration));
+  for (const m of model.members) pbScrub(m.tile.pb, Groups.at(m, gt));
 }
 
 function renderTimeline() {
@@ -906,7 +2078,7 @@ function renderTimeline() {
   // lanes (expanded)
   const lanesEl = tlQ('.tl-lanes'); lanesEl.textContent = '';
   if (layout.timelineExpanded) {
-    Timeline.lanes(model.members).forEach((lane, i) => {
+    model.members.map((m) => { const e = Groups.extent(m); return { start: e.from, end: e.to }; }).forEach((lane, i) => {
       const m = model.members[i];
       const row = document.createElement('div'); row.className = 'tl-lane';
       const block = document.createElement('div'); block.className = 'tl-block';
@@ -919,10 +2091,11 @@ function renderTimeline() {
       block.append(tcL, tcR); row.appendChild(block);
       for (const b of m.tile.bookmarks) {
         const mk = document.createElement('div'); mk.className = 'tl-mk'; mk.style.background = MARKER_COLORS[b.color];
-        mk.style.left = Timeline.xFor(lane.start + b.t, end, width) + 'px'; mk.title = `${b.label || ''} ${fmtTime(b.t)}`.trim();
-        mk.addEventListener('click', (e) => { e.stopPropagation(); tlSeek(model, lane.start + b.t); });
+        mk.style.left = Timeline.xFor(Groups.toGroup(m, b.t), end, width) + 'px'; mk.title = `${b.label || ''} ${fmtTime(b.t)}`.trim();
+        mk.addEventListener('click', (e) => { e.stopPropagation(); tlSeek(model, Groups.toGroup(m, b.t)); });
         row.appendChild(mk);
       }
+      if (m.points && model.group) laneSyncPoints(row, model, m, end, width);
       lanesEl.appendChild(row);
     });
   }
@@ -931,10 +2104,10 @@ function renderTimeline() {
   for (const m of model.members) for (const b of m.tile.bookmarks) {
     // several videos: colour by video so you can tell whose marker it is; one video: the bookmark's own colour
     const mk = document.createElement('div'); mk.className = 'tl-mk'; mk.style.background = multi ? tileColor(m.tile) : MARKER_COLORS[b.color];
-    mk.style.left = Timeline.xFor(m.start + b.t, end, width) + 'px';
+    mk.style.left = Timeline.xFor(Groups.toGroup(m, b.t), end, width) + 'px';
     mk.title = `${tileName(m.tile)}: ${b.label || fmtTime(b.t)}  (right-click to delete, Shift-right-click to recolour)`;
     mk.addEventListener('pointerdown', (e) => e.stopPropagation()); // don't start a bar scrub
-    mk.addEventListener('click', (e) => { e.stopPropagation(); tlSeek(model, m.start + b.t); });
+    mk.addEventListener('click', (e) => { e.stopPropagation(); tlSeek(model, Groups.toGroup(m, b.t)); });
     mk.addEventListener('contextmenu', (e) => {
       e.preventDefault(); e.stopPropagation();
       if (e.shiftKey) b.color = nextMarkerColor(b.color);
@@ -942,6 +2115,15 @@ function renderTimeline() {
       m.tile.refreshBookmarks();
     });
     mkEl.appendChild(mk);
+  }
+  // a synced group's sync points (2026-11-18)
+  if (model.group && model.group.sync) for (const p of groupPoints(model.group)) {
+    const d = document.createElement('div'); d.className = 'tl-sp';
+    d.style.left = Timeline.xFor(p.g, end, width) + 'px';
+    d.title = 'Sync point · click: go there';
+    d.addEventListener('pointerdown', (e) => e.stopPropagation());
+    d.addEventListener('click', (e) => { e.stopPropagation(); tlSeek(model, p.g); });
+    mkEl.appendChild(d);
   }
   // loop range
   const showRange = !!(model.group && model.group.loop === 'range');
@@ -1240,7 +2422,7 @@ function restoreRemoved(entry) {
     }
     if (groups.includes(g)) {
       g.members.add(t); t.group = g;
-      t.sync = v.sync ? { start: v.sync.start } : null;
+      t.sync = v.sync ? { start: Session.syncStart(v), points: Groups.cleanPoints(Session.syncPoints(v)) } : null;
       paintGroup(t); applyGroupAudio(g);
     }
   }
@@ -1252,7 +2434,12 @@ function restoreRemoved(entry) {
   applyLoops(); // back in a synced group: its own loop is overridden again
 }
 function applyEntry(entry, dir) {
-  if (entry.kind === 'move' || entry.kind === 'resize') applyRects(entry, dir);
+  if (entry.kind === 'move' || entry.kind === 'resize') {
+    // a scaled block: its text size first, so its height comes back with the rect
+    if (entry.styles) for (const c of entry.styles) if (tiles.includes(c.tile)) { c.tile.style = { ...c[dir] }; rerenderBlock(c.tile); }
+    applyRects(entry, dir);
+    if (entry.styles) for (const c of entry.styles) if (tiles.includes(c.tile)) rerenderBlock(c.tile);
+  }
   else if (entry.kind === 'gresize') { if (tiles.includes(entry.tile)) setTileGalleryH(entry.tile, entry[dir]); }
   else if (entry.kind === 'gscale') {
     for (const h of entry.heights) if (tiles.includes(h.tile)) h.tile.galleryH = h[dir];
@@ -1268,8 +2455,23 @@ function applyEntry(entry, dir) {
     if (dir === 'before') for (const it of entry.items) { if (tiles.includes(it.tile)) removeTile(it.tile, { record: false }); }
     else for (const it of [...entry.items].sort((a, b) => a.index - b.index)) restoreRemoved(it);
   }
+  else if (entry.kind === 'crop') {
+    const t = entry.tile, st = entry[dir];
+    if (tiles.includes(t)) { t.crop = st.crop ? { ...st.crop } : null; t.board = { ...st.board }; t.aspect = st.aspect; applyCrop(t); layoutTile(t); }
+  }
   else if (entry.kind === 'text') {
     if (tiles.includes(entry.tile)) { entry.tile.text = entry[dir]; renderTextTile(entry.tile); updateTextToolbar(); }
+  }
+  else if (entry.kind === 'frame-title') { if (tiles.includes(entry.tile)) setFrame(entry.tile, { title: entry[dir] }); }
+  else if (entry.kind === 'todo') { if (tiles.includes(entry.tile)) { if (todoEdit && todoEdit.tile === entry.tile) todoEdit = null; setTodo(entry.tile, entry[dir]); } } // a to-do list (2026-11-17)
+  else if (entry.kind === 'sync') applySyncState(entry.group, entry[dir]); // sync points, lining up (2026-11-18)
+  else if (entry.kind === 'links') { if (tiles.includes(entry.tile)) { if (linkEdit && linkEdit.tile === entry.tile) finishLinkEdit(false); if (entry.boards) { entry.tile.board = { ...entry.boards[dir] }; layoutTile(entry.tile); } setLinks(entry.tile, entry[dir]); } } // a bookmark block (2026-11-16)
+  else if (entry.kind === 'lock') { // locked or unlocked (2026-11-10)
+    for (const c of entry.changes) if (tiles.includes(c.tile)) setLocked(c.tile, c[dir]);
+  }
+  else if (entry.kind === 'state') { // a line's ends or look, a tidy, a trim (2026-11-10)
+    for (const c of entry.changes) if (tiles.includes(c.tile)) setShapeState(c.tile, c[dir]);
+    updateLineToolbar(); scheduleOffscreen();
   }
   else if (entry.kind === 'tstyle') {
     for (const c of entry.changes) if (tiles.includes(c.tile)) { c.tile.style = { ...c[dir] }; renderTextTile(c.tile); }
@@ -1282,6 +2484,14 @@ function redo() { if (IS_VIEW) return; const e = undoStack.redo(); if (!e) { set
 function setLinked(on) {
   board.linked = !!on;
   document.getElementById('btn-link').classList.toggle('toggled', board.linked);
+}
+// Push neighbours on or off, from the user (the board's right-click menu, the toolbar button,
+// Shift+L): kept in settings, so every board works the same way (2026-11-19; off as standard)
+function setPushNeighbours(on) {
+  setLinked(on);
+  if (settings) { settings.pushNeighbours = !!on; saveSettings(); }
+  setStatus(on ? 'Push neighbours: what you move or resize pushes its neighbours out of the way'
+    : `Push neighbours off: what you move stops against what it meets, and nothing else moves (hold ${IS_MAC ? 'Option' : 'Alt'} while dragging to let it overlap)`, 5000);
 }
 function setHand(on) {
   board.hand = !!on;
@@ -1299,8 +2509,13 @@ function rememberStart() {
   startPos = new Map(tiles.filter((t) => t.board).map((t) => [t, { ...t.board }]));
 }
 
+// what stops a move when nothing is pushed (lib/collide.js): not lines (they cross things on
+// purpose) and not frames (they hold things); locked tiles are the background and stop nothing
+function blocksMoves(t) { return !!t.board && t.type !== 'line' && !t.frame; }
+function stopObstacles(moving) { return tiles.filter((t) => blocksMoves(t) && !t.locked && !moving.has(t)).map((t) => t.board); }
+
 function resolveOverlaps(fixed) {
-  const list = tiles.filter((t) => t.board);
+  const list = tiles.filter((t) => t.board && t.type !== 'line' && !t.locked && !t.frame); // (lines cross things on purpose; locked tiles never move; a frame holds things)
   for (const t of list) {
     if (fixed.has(t)) continue;
     const s = startPos.get(t);
@@ -1358,32 +2573,43 @@ function showGuideH(canvasY) {
 function snapRect(rect, exclude) {
   const th = SNAP_PX / board.zoom;
   const g = LINK_GAP;
-  let bestX = null, bestY = null;
-  const others = tiles.filter((t) => t.board && !exclude.has(t));
   const L = rect.x, R = rect.x + rect.w, T = rect.y, Bm = rect.y + rect.h;
-  for (const o of others) {
-    const b = o.board;
-    const oL = b.x, oR = b.x + b.w, oT = b.y, oB = b.y + b.h;
-    // x candidates: [our edge, target position for our left, guide x]
-    const xs = [
-      [L, oL, oL], [L, oR + g, oR], [L, oR, oR],
-      [R, oR - rect.w, oR], [R, oL - g - rect.w, oL], [R, oL - rect.w, oL],
-    ];
-    for (const [edge, newX, guide] of xs) {
-      const d = Math.abs(newX - rect.x);
-      if (d <= th && (!bestX || d < bestX.d)) bestX = { d, x: newX, guide };
-      void edge;
+  // the nearest edge within reach among some tiles, each way
+  const scan = (list) => {
+    let bestX = null, bestY = null;
+    for (const o of list) {
+      // const b = o.board; // DISABLED (Mark, 2026-11-10): a line snaps by its stroke (a picture stops at it)
+      const b = snapBoxOf(o);
+      if (!b) continue;
+      const oL = b.x, oR = b.x + b.w, oT = b.y, oB = b.y + b.h;
+      // x candidates: [our edge, target position for our left, guide x]
+      const xs = [
+        [L, oL, oL], [L, oR + g, oR], [L, oR, oR],
+        [R, oR - rect.w, oR], [R, oL - g - rect.w, oL], [R, oL - rect.w, oL],
+      ];
+      for (const [edge, newX, guide] of xs) {
+        const d = Math.abs(newX - rect.x);
+        if (d <= th && (!bestX || d < bestX.d)) bestX = { d, x: newX, guide };
+        void edge;
+      }
+      const ys = [
+        [T, oT, oT], [T, oB + g, oB], [T, oB, oB],
+        [Bm, oB - rect.h, oB], [Bm, oT - g - rect.h, oT], [Bm, oT - rect.h, oT],
+      ];
+      for (const [edge, newY, guide] of ys) {
+        const d = Math.abs(newY - rect.y);
+        if (d <= th && (!bestY || d < bestY.d)) bestY = { d, y: newY, guide };
+        void edge;
+      }
     }
-    const ys = [
-      [T, oT, oT], [T, oB + g, oB], [T, oB, oB],
-      [Bm, oB - rect.h, oB], [Bm, oT - g - rect.h, oT], [Bm, oT - rect.h, oT],
-    ];
-    for (const [edge, newY, guide] of ys) {
-      const d = Math.abs(newY - rect.y);
-      if (d <= th && (!bestY || d < bestY.d)) bestY = { d, y: newY, guide };
-      void edge;
-    }
-  }
+    return { bestX, bestY };
+  };
+  const others = tiles.filter((t) => t.board && !exclude.has(t));
+  // lines are guides: one within reach wins over any tile's edge (2026-11-10: a caption under a
+  // picture used to win, and the picture never stopped at the divider)
+  const byLines = scan(others.filter((t) => t.type === 'line'));
+  const byTiles = scan(others.filter((t) => t.type !== 'line'));
+  const bestX = byLines.bestX || byTiles.bestX, bestY = byLines.bestY || byTiles.bestY;
   hideGuides();
   const out = { x: rect.x, y: rect.y };
   if (bestX) { out.x = bestX.x; showGuideV(bestX.guide); }
@@ -1475,7 +2701,7 @@ function setMode(mode) {
   if (!isBoard() || mode !== 'board') { clearSelection(); hideGuides(); }
   document.body.classList.toggle('mode-board', isBoard());
   for (const b of modeEl.querySelectorAll('button')) b.classList.toggle('active', b.dataset.mode === mode);
-  for (const t of tiles) if (t.type === 'text') t.el.hidden = !isBoard(); // text is board-only
+  for (const t of tiles) if (t.type === 'text' || t.type === 'line') t.el.hidden = !isBoard(); // text and lines are board-only
   layoutTiles();
   // now they are visible again, let the text say how tall each box really is
   if (isBoard()) for (const t of tiles) if (t.type === 'text') renderTextTile(t);
@@ -1568,17 +2794,31 @@ function startResize(tile, corner, e) {
   // Ctrl-drag). A sticky group scales whole even with nothing selected. Unlike a move, selected
   // members of a non-sticky group come too. Text members scale their box and re-wrap; a text
   // tile's own handle only ever sets its width. Rule in lib/select.js.
-  const groupScale = onBoard && !tile.freeAspect ? Select.dragSet(tile, [...selection], modKey(e), Select.RESIZE) : null;
+  if (tile.locked) return; // (its handles are hidden too)
+  const groupScale = onBoard && !tile.freeAspect ? Select.dragSet(tile, [...selection], modKey(e), Select.RESIZE).filter((t) => !t.locked) : null;
   const members = groupScale && groupScale.length > 1 ? groupScale : null;
   const groupBB = members ? boardBounds(members) : null;
   const memberStart = members ? new Map(members.map((m) => [m, { ...m.board }])) : null;
   // the corner of the group's box that stays put: the one opposite the handle
   const groupOrigin = members ? { x: corner.includes('l') ? groupBB.minX + groupBB.w : groupBB.minX, y: corner.includes('t') ? groupBB.minY + groupBB.h : groupBB.minY } : undefined;
   const start = onBoard ? { ...tile.board } : { w: tile.el.offsetWidth, h: tile.el.offsetHeight };
-  if (onBoard) { bringToFront(tile); rememberStart(); }
+  // DISABLED (Mark, 2026-11-10): resizing no longer raises the tile; it keeps its layer
+  // if (onBoard) { bringToFront(tile); rememberStart(); }
+  if (onBoard) rememberStart();
   // Linked mode can push neighbours, so remember every board rect
   const undoEntry = onBoard ? recordResize(tiles.filter((t) => t.board)) : recordGResize(tile);
   const fixed = new Set(members || [tile]);
+  // Push neighbours off (the standard): growing into something stops where it touches (2026-11-19)
+  const fixedList = [...fixed], blockIdx = fixedList.map((t, i) => (blocksMoves(t) ? i : -1)).filter((i) => i >= 0);
+  const stopObst = onBoard && !tile.frame ? stopObstacles(fixed) : [];
+  const stopBefore = onBoard ? blockIdx.map((i) => ({ ...fixedList[i].board })) : [];
+  const stops = (ev) => onBoard && !board.linked && !ev.altKey && stopObst.length > 0 && blockIdx.length > 0;
+  const nowRects = () => blockIdx.map((i) => fixedList[i].board);
+  let lastK = 1, lastRect = onBoard ? { ...tile.board } : null; // the last scale / box that touched nothing new
+  // a bookmark block or to-do list scales as a whole from a corner: its text, padding and corners
+  // with it (Shift: the width only, as before) (2026-11-17)
+  const startStyle = tile.style ? { ...tile.style } : null;
+  let blockScaled = false;
   tile.el.classList.add('resizing');
   if (members) for (const m of members) m.el.classList.add('resizing');
   document.body.classList.add('resizing');
@@ -1593,12 +2833,28 @@ function startResize(tile, corner, e) {
     if (tile.freeAspect) {
       if (!onBoard) return;
       const b = tile.board;
-      const w = Math.max(TEXT_MIN_W, start.w + dx);
+      if (isScalableBlock(tile) && !ev.shiftKey && corner.length === 2) {
+        // the scale whose corner lands nearest the pointer: the pull projected on the box's diagonal
+        const k = ((start.w + dx) * start.w + (start.h + dy) * start.h) / (start.w * start.w + start.h * start.h);
+        const kk = scaleBlockTo(tile, startStyle, start, k, corner);
+        blockScaled = true;
+        if (stops(ev)) { if (Collide.blocked(nowRects(), stopBefore, stopObst)) scaleBlockTo(tile, startStyle, start, lastK, corner); else lastK = kk; }
+        if (board.linked && !ev.altKey) resolveOverlaps(fixed);
+        return;
+      }
+      if (isScalableBlock(tile) && blockScaled) { tile.style = { ...startStyle }; rerenderBlock(tile); blockScaled = false; } // Shift pressed mid-drag: back to the text size it had
+      const w = Math.max(isScalableBlock(tile) ? Math.min(blockMinW(tile), start.w) : TEXT_MIN_W, start.w + dx); // (a bookmark block keeps its columns whole)
       if (corner.includes('l')) b.x = start.x + (start.w - w);
       b.y = start.y;
       b.w = w;
+      // a fixed box (sticky note, shape, frame) takes its height from the drag too
+      if (tile.style && tile.style.box === 'fixed') { const h = Math.max(BOARD_MIN_H, start.h + dy); if (corner.includes('t')) b.y = start.y + (start.h - h); b.h = h; }
       layoutTile(tile);
       renderTextTile(tile);
+      if (stops(ev)) {
+        if (Collide.blocked(nowRects(), stopBefore, stopObst)) { Object.assign(b, lastRect); layoutTile(tile); renderTextTile(tile); }
+        else lastRect = { ...b };
+      }
       if (board.linked && !ev.altKey) resolveOverlaps(fixed);
       updateTextToolbar();
       return;
@@ -1613,14 +2869,32 @@ function startResize(tile, corner, e) {
     if (onBoard) {
       // snap the size and the moving edges to the other tiles (Alt: free), like a move does
       if (!ev.altKey) {
-        const others = tiles.filter((t) => t.board && !fixed.has(t)).map((t) => t.board);
-        const s = Snap.resize({ start, corner, h, aspect: tile.aspect, others, th: SNAP_PX / board.zoom, gap: LINK_GAP, origin: groupOrigin });
+        // (lines first: a line within reach wins over any tile's edge; a line snaps by its stroke)
+        const near = tiles.filter((t) => t.board && !fixed.has(t));
+        const opts = { start, corner, h, aspect: tile.aspect, th: SNAP_PX / board.zoom, gap: LINK_GAP, origin: groupOrigin };
+        let s = Snap.resize({ ...opts, others: near.filter((t) => t.type === 'line').map(snapBoxOf).filter(Boolean) });
+        if (s.guideX === null && s.guideY === null) s = Snap.resize({ ...opts, others: near.filter((t) => t.type !== 'line').map(snapBoxOf).filter(Boolean) });
         h = s.h;
         hideGuides();
         if (s.guideX !== null) showGuideV(s.guideX);
         if (s.guideY !== null) showGuideH(s.guideY);
       } else hideGuides();
       h = clamp(h, BOARD_MIN_H, BOARD_MAX_H);
+      if (stops(ev)) {
+        // the rects at height hh, without moving anything: the biggest that touches nothing new wins
+        const rectsAt = (hh) => {
+          let all;
+          if (members) {
+            const factor = Arrange.clampFactor([...memberStart.values()], hh / start.h, BOARD_MIN_H, BOARD_MAX_H);
+            all = Arrange.scaleAbout(members.map((m) => memberStart.get(m)), groupBB, factor, corner);
+          } else {
+            const w = hh * tile.aspect;
+            all = [{ x: corner.includes('l') ? start.x + (start.w - w) : start.x, y: corner.includes('t') ? start.y + (start.h - hh) : start.y, w, h: hh }];
+          }
+          return blockIdx.map((i) => all[i]);
+        };
+        h = Collide.largest(rectsAt, stopBefore, stopObst, start.h, h);
+      }
       if (members) {
         const factor = Arrange.clampFactor([...memberStart.values()], h / start.h, BOARD_MIN_H, BOARD_MAX_H);
         const rects = Arrange.scaleAbout(members.map((m) => memberStart.get(m)), groupBB, factor, corner);
@@ -1652,7 +2926,9 @@ function startResize(tile, corner, e) {
     document.body.classList.remove('resizing');
     document.body.style.cursor = '';
     hideGuides();
+    if (onBoard && blockScaled) { undoEntry.styles = [{ tile, before: startStyle, after: { ...tile.style } }]; undoEntry.label = 'scale ' + blockName(tile); }
     if (onBoard) finishRects(undoEntry); else finishGResize(undoEntry);
+    if (blockScaled) setStatus(`${blockName(tile)[0].toUpperCase() + blockName(tile).slice(1)}: text ${Math.round(tile.style.size * board.zoom)} px on screen (Shift+drag a corner changes the width only)`, 4000);
   };
   handle.addEventListener('pointermove', onMove);
   handle.addEventListener('pointerup', onUp);
@@ -1664,12 +2940,33 @@ function startResize(tile, corner, e) {
 // ---------- board: move a tile ----------
 
 function attachTileDrag(tile) {
+  attachFavorite(tile); // every kind of tile passes through here: it gets its favorite star too
   const el = tile.el;
+  // right-click a tile on the board: its place in the stack (pictures and text add their own lines
+  // to this menu and handle the click themselves; a control's own menu goes first)
+  el.addEventListener('contextmenu', (e) => {
+    if (e.defaultPrevented || !isBoard() || IS_VIEW || !tile.board) return;
+    if (e.target.closest('input, select, textarea, iframe')) return;
+    e.preventDefault(); e.stopPropagation();
+    showRowMenu(e, [...stackMenuItems(tile), lockMenuItem(tile), ['Remove', () => removeTile(tile)]]);
+  });
+  // a locked tile has its own short menu, ahead of every other one on it (capture: before them)
+  el.addEventListener('contextmenu', (e) => {
+    if (!tile.locked || !isBoard() || IS_VIEW || !tile.board) return;
+    if (e.target.closest('input, select, textarea, iframe')) return;
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+    if (!selection.has(tile)) selectOnly(tile);
+    showRowMenu(e, lockedMenuItems(tile));
+  }, true);
   el.addEventListener('pointerdown', (e) => {
     tile.guard.pointerDown(); // a fresh press: whatever click the last drag was waiting for never came
     if (!isBoard() || e.button !== 0 || !tile.board) return;
     if (e.target.closest('.handle, input, button, select')) return;
+    if (tile.locked && !IS_VIEW) return; // a press on a locked tile is a press on the board: grid's pointerdown draws the lasso
+    if (tile.frame && !IS_VIEW && !e.target.closest('.frame-title')) return; // inside a frame too (its title moves it)
     if (tile.editing && e.target.closest('.text-body')) return; // put the caret, don't drag the tile
+    if (e.target.closest('.lt-ed, .lt-grip')) return; // (a bookmark block's cell being typed in, or a column divider, too)
+    if (e.target.closest('.td-edit[contenteditable="plaintext-only"]')) return; // (and a to-do list's words)
     // Alt-drag on a sticky group's member rearranges inside the group (swap two slots)
     const swapMembers = tile.group ? [...tile.group.members].filter((m) => m.board) : [];
     if (!IS_VIEW && Swap.isSwapDrag({ sticky: !!(tile.group && tile.group.sticky), alt: e.altKey, mod: modKey(e), shift: e.shiftKey, memberCount: swapMembers.length })) {
@@ -1706,6 +3003,7 @@ function attachTileDrag(tile) {
     let group = [];
     let movingSet = new Set();
     let undoEntry = null;
+    let stopZones = null, lastFree = { x: 0, y: 0 }; // Push neighbours off: where the group may not go
     const onMove = (ev) => {
       const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
       if (!moving) {
@@ -1725,21 +3023,44 @@ function attachTileDrag(tile) {
         // DISABLED (2026-10-07): selected members of a non-sticky group used to be left behind by a move
         // group = Select.dragSet(tile, [...selection], single);
         // everything selected moves together, non-sticky group or not; a sticky group moves whole
-        group = Select.dragSet(tile, [...selection], single, Select.MOVE);
+        group = Select.dragSet(tile, [...selection], single, Select.MOVE).filter((t) => !t.locked); // (locked tiles stay put)
         movingSet = new Set(group);
+        // a frame takes what is in it along (2026-11-15)
+        for (const f of [...group]) if (f.frame) for (const c of frameContents(f)) if (!movingSet.has(c)) { group.push(c); movingSet.add(c); }
+        // an arrow held by a tile that is not moving stays where it is: its ends move it (2026-11-15)
+        const held = group.filter((t) => t.type === 'line' && t.ends && t.ends.some((en) => en && !group.some((g) => g.id === en.id)));
+        if (held.length) { group = group.filter((t) => !held.includes(t)); movingSet = new Set(group); if (!group.length) setStatus('This arrow is held by what it points at – drag its round ends to move it', 4000); }
         rememberStart();
+        // Push neighbours off (the standard): it stops against what it meets (2026-11-19)
+        stopZones = Collide.zones(group.filter(blocksMoves).map((t) => startPos.get(t)), stopObstacles(movingSet));
         undoEntry = recordMove(tiles.filter((t) => t.board)); // all board tiles: Linked mode can push neighbours
-        for (const t of group) { bringToFront(t); t.el.classList.add('dragging'); }
+        // DISABLED (Mark, 2026-11-10): moving no longer raises tiles; they keep their layers, as in Miro
+        // for (const t of group) { bringToFront(t); t.el.classList.add('dragging'); }
+        for (const t of group) t.el.classList.add('dragging');
         document.body.classList.add('tile-dragging');
       }
+      if (!group.length) return; // (only a held arrow was dragged: it stays)
       // proposed position of the group's bounding box
       const bb0 = boardBounds(group.map((t) => ({ board: startPos.get(t) })));
       let nx = bb0.minX + dx / board.zoom, ny = bb0.minY + dy / board.zoom;
-      if (!ev.altKey) {
+      // one level or upright line: its stroke is what snaps, not the room around it
+      const sb0 = group.length === 1 && group[0].type === 'line' ? snapBoxOf({ ...group[0], board: startPos.get(group[0]) }) : null;
+      if (!ev.altKey && sb0) {
+        const s = snapRect({ x: sb0.x + dx / board.zoom, y: sb0.y + dy / board.zoom, w: sb0.w, h: sb0.h }, movingSet);
+        nx = bb0.minX + (s.x - sb0.x); ny = bb0.minY + (s.y - sb0.y);
+      } else if (!ev.altKey) {
         const s = snapRect({ x: nx, y: ny, w: bb0.w, h: bb0.h }, movingSet);
         nx = s.x; ny = s.y;
       } else hideGuides();
-      const shiftX = nx - bb0.minX, shiftY = ny - bb0.minY;
+      // const shiftX = nx - bb0.minX, shiftY = ny - bb0.minY; // (before 2026-11-19)
+      let shiftX = nx - bb0.minX, shiftY = ny - bb0.minY;
+      if (!board.linked && !ev.altKey && stopZones && stopZones.length) {
+        // it rests against what it ran into and slides along it; once the place under the mouse is clear, it goes there
+        const p = Collide.move(stopZones, lastFree, { x: shiftX, y: shiftY });
+        if (p.x !== shiftX) guideV.hidden = true;
+        if (p.y !== shiftY) guideH.hidden = true;
+        shiftX = p.x; shiftY = p.y; lastFree = p;
+      }
       for (const t of group) {
         const s = startPos.get(t);
         t.board.x = s.x + shiftX; t.board.y = s.y + shiftY;
@@ -1804,7 +3125,8 @@ function startSwapDrag(tile, members, e) {
       if (Math.hypot(dx, dy) < 4) return;
       moving = true;
       undoEntry = recordMove(members, 'swap');
-      bringToFront(tile);
+      // bringToFront(tile); // DISABLED (Mark, 2026-11-10): lifted only while it follows the pointer
+      liftTile(tile, true);
       el.classList.add('swapping');
       document.body.classList.add('tile-dragging');
     }
@@ -1831,6 +3153,7 @@ function startSwapDrag(tile, members, e) {
       if (swapped && (s.id === tile || s.id === swapped)) place(s.id, s.rect); else restore(s.id);
     }
     el.classList.remove('swapping');
+    liftTile(tile, false); // back at its own layer
     document.body.classList.remove('tile-dragging');
     finishRects(undoEntry); // drops the entry when nothing changed (no target)
     tile.guard.afterDrag();
@@ -1868,7 +3191,7 @@ function startPan(e) {
   activeInteractions.add(onUp);
 }
 
-function startLasso(e) {
+function startLasso(e, lockedHit = null) {
   e.preventDefault();
   try { grid.setPointerCapture(e.pointerId); } catch {}
   const r = gridRect();
@@ -1891,12 +3214,16 @@ function startLasso(e) {
     const b = toCanvas(left + w + r.left, top + h + r.top);
     const hits = new Set();
     for (const t of tiles) {
-      if (!t.board) continue;
+      if (!t.board || t.locked) continue; // (the lasso leaves locked tiles out)
       const B = t.board;
+      // (a tile the whole lasso lies inside is what it was drawn on, a background: not taken)
+      if (B.x <= a.x && B.y <= a.y && B.x + B.w >= b.x && B.y + B.h >= b.y) continue;
+      // (a frame only when all of it is inside the lasso, as in Miro)
+      if (t.frame && !(B.x >= a.x && B.y >= a.y && B.x + B.w <= b.x && B.y + B.h <= b.y)) continue;
       if (B.x < b.x && B.x + B.w > a.x && B.y < b.y && B.y + B.h > a.y) hits.add(t);
     }
     // a sticky group is lassoed as one
-    for (const t of [...hits]) if (t.group && t.group.sticky) for (const m of t.group.members) hits.add(m);
+    for (const t of [...hits]) if (t.group && t.group.sticky) for (const m of t.group.members) if (!m.locked) hits.add(m);
     for (const t of tiles) if (t.board) setSelected(t, hits.has(t) || before.has(t));
   };
   let ended = false;
@@ -1909,6 +3236,8 @@ function startLasso(e) {
     grid.removeEventListener('pointercancel', onUp);
     marqueeEl.hidden = true;
     if (dragged) selectionStatus();
+    // a click (no drag) on a locked tile selects it, so it can be unlocked
+    else if (lockedHit && tiles.includes(lockedHit)) { if (additive) setSelected(lockedHit, !before.has(lockedHit)); else selectOnly(lockedHit); }
   };
   grid.addEventListener('pointermove', onMove);
   grid.addEventListener('pointerup', onUp);
@@ -1918,9 +3247,11 @@ function startLasso(e) {
 
 grid.addEventListener('pointerdown', (e) => {
   if (!isBoard()) return;
-  const onBackground = e.target === grid || e.target === canvas;
+  // a locked tile is part of the board here: a drag on it draws the lasso (or pans), a click selects it
+  const lockedHit = IS_VIEW ? null : lockedTileAt(e.target);
+  const onBackground = e.target === grid || e.target === canvas || !!lockedHit || (!IS_VIEW && !!frameBodyAt(e.target));
   if (e.button === 1 || (e.button === 0 && e.altKey) || (e.button === 0 && onBackground && board.hand)) return startPan(e);
-  if (e.button === 0 && onBackground) return startLasso(e);
+  if (e.button === 0 && onBackground) return startLasso(e, lockedHit);
 });
 // right-click on empty board space: copy the selection, or paste where the cursor is
 grid.addEventListener('contextmenu', (e) => {
@@ -1930,7 +3261,9 @@ grid.addEventListener('contextmenu', (e) => {
   lastPointer = { clientX: e.clientX, clientY: e.clientY };
   showRowMenu(e, [
     ['Copy', () => copySelection(), !selection.size],
-    ['Paste', () => pasteClipboard(), !clipboard || !clipboard.records.length],
+    ['Paste', () => pasteClipboard()], // Ozy's own tiles, or a picture copied elsewhere
+    [layout.background === 'light' ? 'Dark board' : 'Light board', () => { setBoardBackground(layout.background === 'light' ? 'dark' : 'light'); setStatus(layout.background === 'light' ? 'Light board (saved with the session)' : 'Dark board'); }, IS_VIEW],
+    [(board.linked ? '☑' : '☐') + ' Push neighbours when moving', () => setPushNeighbours(!board.linked), IS_VIEW], // (2026-11-19; off as standard)
   ]);
 });
 // stop Chromium's middle-click autoscroll from fighting the pan
@@ -2253,6 +3586,16 @@ function addVideo(filePath, state = {}) {
     errorEl.classList.remove('hidden');
   };
   tile.setSource = (url) => { errorEl.classList.add('hidden'); video.src = url; };
+  // The file could not be read while the PC was busy (or its share was down) and has answered
+  // since: load it again. Chromium remembers the failed URL, hence the new query.
+  tile.retryAfterRecovery = () => {
+    if (!video.error || tile.unplayable) return; // only a tile that failed to load, not one that can't play here
+    logUi('info', 'reloading after the drive answered', { path: filePath });
+    tile.loadRetries = (tile.loadRetries || 0) + 1;
+    tierGen.full++; tierGen.half++; tierGen.quarter++;
+    loadFull();
+    if (wanted() !== 'full') tile.applyQuality();
+  };
 
   // ----- playback resolution (Optimize menu, ⚙): play a half / quarter size copy instead -----
   // the tier this tile should play: its own override, else the scene's
@@ -2339,12 +3682,13 @@ function addVideo(filePath, state = {}) {
   const tierGen = { half: 0, quarter: 0, full: 0 };
   const tierUrl = (q) => window.api.videoUrl(tile.tiers[q]) + (tierGen[q] ? '?v=' + tierGen[q] : '');
   const proxyUrl = () => window.api.videoUrl(tile.proxy) + (tierGen.full ? '?v=' + tierGen.full : '');
+  const origUrl = () => window.api.videoUrl(filePath) + (tile.loadRetries ? '?r=' + tile.loadRetries : ''); // see retryAfterRecovery
   const loadFull = () => {
     tile.tier = 'full'; showBadge('');
     if (tile.unplayable && !tile.proxy) { // the original can't play here and no playable copy was made: back to that offer
       swapState = null; video.removeAttribute('src'); video.load();
       showError(`${(tile.info && tile.info.codec) || 'This codec'} can't play here.`, true);
-    } else tile.swapSource(tile.proxy ? proxyUrl() : window.api.videoUrl(filePath));
+    } else tile.swapSource(tile.proxy ? proxyUrl() : origUrl());
   };
   // an encode this tile no longer wants is stopped, unless another tile of the same file still wants it
   const dropTierJob = () => {
@@ -2509,7 +3853,7 @@ function addVideo(filePath, state = {}) {
   });
   // (gallery; on the board the dblclick goes to the tile element, see tileDblClick)
   video.addEventListener('dblclick', () => {
-    if (!cmp.el.hidden) return; // in the compare view the tile is empty
+    if (!cmp.el.hidden || sedOpen()) return; // in the compare view (or the sync editor) the tile is empty
     toggleTileFullscreen(el);
   });
   el.addEventListener('dblclick', (e) => tileDblClick(tile, e));
@@ -2670,6 +4014,7 @@ function togglePlay(video) {
 
 function removeTile(tile, { record = true } = {}) {
   if (!viewMayEdit()) return;
+  attachDirty(); // (an arrow's end on it is loose from now on)
   if (record && tiles.includes(tile)) recordRemove(tile); // before it leaves `tiles`, so the index is right
   const i = tiles.indexOf(tile);
   if (i >= 0) tiles.splice(i, 1);
@@ -3031,7 +4376,7 @@ function addWebTile(url, parsed, state = {}, at = null) {
   const onVideoPlayState = () => { if (tile.group && tile.group === active) renderGroupBar(); };
   for (const ev of ['play', 'pause', 'ended']) video.addEventListener(ev, onVideoPlayState);
   video.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.guard.shouldAct()) return; tile.togglePlay(); });
-  video.addEventListener('dblclick', () => { if (cmp.el.hidden) toggleTileFullscreen(el); });
+  video.addEventListener('dblclick', () => { if (cmp.el.hidden && !sedOpen()) toggleTileFullscreen(el); });
   el.addEventListener('dblclick', (e) => tileDblClick(tile, e)); // board: the tile gets it, not the <video>
 
   // ----- YouTube controls -----
@@ -3215,18 +4560,38 @@ function addImageTile(filePath, state = {}, at = null) {
   };
   const sb = state.board;
   if (sb && isFinite(sb.x) && isFinite(sb.y) && sb.w > 0 && sb.h > 0) tile.board = { x: +sb.x, y: +sb.y, w: +sb.w, h: +sb.h };
+  // a smaller copy of the picture (a Miro import keeps Miro's preview), shown while the tile is small on screen
+  tile.thumb = typeof state.thumb === 'string' && state.thumb ? state.thumb : null;
+  tile.crop = cleanCrop(state.crop); // the part of the picture shown (null: all of it)
   tiles.push(tile);
   el.querySelector('.name').textContent = basename(filePath);
   el.querySelector('.name').title = filePath + '\nRight-click: ' + REVEAL_LABEL;
   el.querySelector('.name').addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); sourceContext(e, 'image', filePath); });
   img.addEventListener('load', () => {
-    if (img.naturalWidth > 0) {
-      const ar = img.naturalWidth / img.naturalHeight;
+    if (tile.thumb && !tile.showingFull && img.naturalHeight > 0) tile.thumbH = img.naturalHeight * (tile.crop ? tile.crop.h : 1); // the small copy's rows that show: a crop shows only part of it, so the full one is wanted sooner
+    if (img.naturalWidth > 0 && !(cropping && cropping.tile === tile)) {
+      const ar = cropAspect(tile, img.naturalWidth, img.naturalHeight); // a cropped picture's shape is its crop's
       if (Math.abs(ar - tile.aspect) > 0.001) { tile.aspect = ar; if (tile.board) tile.board.w = tile.board.h * ar; layoutTiles(); }
     }
     if (pendingFit) scheduleFit();
   });
-  img.src = window.api.videoUrl(filePath);
+  img.src = window.api.videoUrl(tile.thumb || filePath); // the small copy first, when there is one (applyImageLod)
+  applyCrop(tile);
+  // cropping takes the pointer and the wheel over the picture (see beginCrop)
+  el.addEventListener('pointerdown', (e) => { cropPointerDown(tile, e); }, true);
+  el.addEventListener('wheel', (e) => { cropWheel(tile, e); }, { capture: true, passive: false });
+  el.addEventListener('contextmenu', (e) => {
+    if (!isBoard() || IS_VIEW) return;
+    e.preventDefault(); e.stopPropagation();
+    showRowMenu(e, [
+      ['Crop…', () => beginCrop(tile)],
+      [tile.crop && tile.crop.guessed ? 'Reset crop (Miro\'s crop position was guessed)' : 'Reset crop', () => resetCrop(tile), !tile.crop],
+      ...stackMenuItems(tile),
+      lockMenuItem(tile),
+      [REVEAL_LABEL, async () => { if (!(await window.api.showInExplorer(tile.path))) setStatus('File not found: ' + tile.path); }],
+      ['Remove', () => removeTile(tile)],
+    ]);
+  });
   el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
   wireFullscreenButton(el);
   img.addEventListener('dblclick', () => toggleTileFullscreen(el));
@@ -3257,6 +4622,150 @@ function addImageTile(filePath, state = {}, at = null) {
   return tile;
 }
 
+// ---------- cropping a picture (Mark, 2026-11-06) ----------
+// A picture tile can show part of its file: tile.crop = { x, y, w, h }, fractions of the file
+// (null = all of it). Nothing is written to the file. Right-click a picture → Crop… : the whole
+// file shows faintly around the frame; drag inside the frame to slide the picture, wheel to zoom it,
+// drag a corner to change the frame's shape. Enter, Esc or a click elsewhere finishes; one undo
+// step puts it back. A Miro import brings each picture's cropped shape (guessed: true, since
+// Miro does not say which part the crop keeps, so the middle is shown until moved here).
+const CROP_MIN = 0.02; // the smallest crop, as a share of the file's side
+function cleanCrop(c) {
+  if (!c || typeof c !== 'object') return null;
+  const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : NaN);
+  let w = clamp(n(c.w), CROP_MIN, 1), h = clamp(n(c.h), CROP_MIN, 1);
+  if (!(w > 0) || !(h > 0)) return null;
+  const x = clamp(n(c.x) || 0, 0, 1 - w), y = clamp(n(c.y) || 0, 0, 1 - h);
+  if (w > 0.999 && h > 0.999) return null;
+  return { x, y, w, h, ...(c.guessed ? { guessed: true } : {}) };
+}
+// the <img> sized and moved so only the crop shows through the tile
+function applyCrop(tile) {
+  const img = tile.img;
+  if (!img) return;
+  const c = tile.crop;
+  img.classList.toggle('cropped', !!c);
+  if (!c) { img.style.width = img.style.height = img.style.left = img.style.top = ''; return; }
+  img.style.width = (100 / c.w) + '%';
+  img.style.height = (100 / c.h) + '%';
+  img.style.left = (-c.x / c.w * 100) + '%';
+  img.style.top = (-c.y / c.h * 100) + '%';
+}
+// the shape a crop gives, from the file's own shape
+const cropAspect = (tile, natW, natH) => (tile.crop ? (tile.crop.w * natW) / (tile.crop.h * natH) : natW / natH);
+
+let cropping = null; // { tile, ghost, before }
+function beginCrop(tile) {
+  if (IS_VIEW || !isBoard() || tile.type !== 'image' || !tile.board || tile.locked) return;
+  if (cropping) endCrop();
+  const nat = { w: tile.img.naturalWidth || 0, h: tile.img.naturalHeight || 0 };
+  if (!nat.w) { setStatus('The picture is still loading; try again in a moment'); return; }
+  // bringToFront(tile); // DISABLED (Mark, 2026-11-10): lifted only while cropping, see endCrop
+  liftTile(tile, true);
+  selectOnly(tile);
+  const ghost = document.createElement('img');
+  ghost.className = 'crop-ghost';
+  ghost.src = window.api.videoUrl(tile.path); // the full picture (not the small copy): it is being looked at closely
+  ghost.draggable = false;
+  canvas.appendChild(ghost);
+  if (tile.thumb && !tile.showingFull) { tile.showingFull = true; tile.img.src = ghost.src; }
+  cropping = { tile, ghost, before: { crop: tile.crop ? { ...tile.crop } : null, board: { ...tile.board }, aspect: tile.aspect } };
+  tile.el.classList.add('cropping');
+  placeCropGhost();
+  setStatus('Crop: drag the picture to move it, wheel to zoom it, drag a corner to change the shape. Enter or Esc when done.', 8000);
+}
+// the faint whole picture, where it is behind the frame
+function placeCropGhost() {
+  if (!cropping) return;
+  const { tile, ghost } = cropping;
+  const c = tile.crop || { x: 0, y: 0, w: 1, h: 1 };
+  const W = tile.board.w / c.w, H = tile.board.h / c.h;
+  ghost.style.left = (tile.board.x - c.x * W) + 'px';
+  ghost.style.top = (tile.board.y - c.y * H) + 'px';
+  ghost.style.width = W + 'px';
+  ghost.style.height = H + 'px';
+  ghost.style.zIndex = String((Number(tile.el.style.zIndex) || 1) - 1);
+}
+function setCropLive(tile, c) {
+  tile.crop = cleanCrop(c);
+  tile.thumbH = 0; // measured again from the next small copy shown (the full one is up while cropping)
+  if (tile.crop) delete tile.crop.guessed; // moved by hand: no longer a guess
+  applyCrop(tile);
+  placeCropGhost();
+}
+function endCrop(cancel = false) {
+  if (!cropping) return;
+  const { tile, ghost, before } = cropping;
+  cropping = null;
+  ghost.remove();
+  tile.el.classList.remove('cropping');
+  liftTile(tile, false); // back at its own layer
+  if (cancel) { tile.crop = before.crop; tile.board = { ...before.board }; tile.aspect = before.aspect; applyCrop(tile); layoutTile(tile); return; }
+  const after = { crop: tile.crop ? { ...tile.crop } : null, board: { ...tile.board }, aspect: tile.aspect };
+  if (JSON.stringify(after) !== JSON.stringify(before)) undoStack.push({ kind: 'crop', label: `crop ${tileName(tile)}`, tile, before, after });
+  scheduleOffscreen();
+}
+function resetCrop(tile) {
+  if (!tile.crop) return;
+  const before = { crop: { ...tile.crop }, board: { ...tile.board }, aspect: tile.aspect };
+  const nat = { w: tile.img.naturalWidth, h: tile.img.naturalHeight };
+  tile.crop = null; applyCrop(tile);
+  if (nat.w && nat.h) { tile.aspect = nat.w / nat.h; tile.board.w = tile.board.h * tile.aspect; layoutTile(tile); }
+  undoStack.push({ kind: 'crop', label: `uncrop ${tileName(tile)}`, tile, before, after: { crop: null, board: { ...tile.board }, aspect: tile.aspect } });
+}
+// Pointer and wheel while cropping. Everything is worked out against the whole picture's place
+// (W x H board px, fixed while dragging), so the picture stays under the pointer.
+function cropPointerDown(tile, e) {
+  if (!cropping || cropping.tile !== tile) return false;
+  e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+  const corner = e.target.classList.contains('handle') ? e.target.dataset.corner : null;
+  const c0 = tile.crop || { x: 0, y: 0, w: 1, h: 1 };
+  const b0 = { ...tile.board };
+  const W = b0.w / c0.w, H = b0.h / c0.h;               // the whole picture, board px
+  const ox = b0.x - c0.x * W, oy = b0.y - c0.y * H;     // and its corner
+  const sx = e.clientX, sy = e.clientY;
+  try { tile.el.setPointerCapture(e.pointerId); } catch {}
+  const move = (ev) => {
+    const dx = (ev.clientX - sx) / board.zoom, dy = (ev.clientY - sy) / board.zoom;
+    if (!corner) {
+      // slide the picture under the frame: the frame stays, the crop moves the other way
+      setCropLive(tile, { x: c0.x - dx / W, y: c0.y - dy / H, w: c0.w, h: c0.h });
+      return;
+    }
+    // a corner moves the frame's edge over the still picture (never past the picture's own edge)
+    let x0 = b0.x, y0 = b0.y, x1 = b0.x + b0.w, y1 = b0.y + b0.h;
+    const minW = W * CROP_MIN, minH = H * CROP_MIN;
+    if (corner.includes('l')) x0 = clamp(b0.x + dx, ox, x1 - minW); else x1 = clamp(x1 + dx, x0 + minW, ox + W);
+    if (corner.includes('t')) y0 = clamp(b0.y + dy, oy, y1 - minH); else y1 = clamp(y1 + dy, y0 + minH, oy + H);
+    tile.board = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    tile.aspect = tile.board.w / tile.board.h;
+    setCropLive(tile, { x: (x0 - ox) / W, y: (y0 - oy) / H, w: (x1 - x0) / W, h: (y1 - y0) / H });
+    layoutTile(tile);
+  };
+  const up = () => { tile.el.removeEventListener('pointermove', move); tile.el.removeEventListener('pointerup', up); tile.el.removeEventListener('pointercancel', up); };
+  tile.el.addEventListener('pointermove', move);
+  tile.el.addEventListener('pointerup', up);
+  tile.el.addEventListener('pointercancel', up);
+  return true;
+}
+function cropWheel(tile, e) {
+  if (!cropping || cropping.tile !== tile) return false;
+  e.preventDefault(); e.stopPropagation();
+  const c = tile.crop || { x: 0, y: 0, w: 1, h: 1 };
+  const f = Math.pow(1.1, clamp(-e.deltaY / 100, -3, 3)); // up: zoom the picture in (a smaller crop)
+  const r = tile.el.getBoundingClientRect();
+  const px = clamp((e.clientX - r.left) / r.width, 0, 1), py = clamp((e.clientY - r.top) / r.height, 0, 1);
+  // keep the frame's shape: both sides of the crop shrink or grow together, about the pointer
+  let w = c.w / f, h = c.h / f;
+  const k = Math.min(1, 1 / w, 1 / h); w *= k; h *= k; // never past the whole picture
+  if (w < CROP_MIN || h < CROP_MIN) return true;
+  const fx = c.x + px * c.w, fy = c.y + py * c.h;
+  setCropLive(tile, { x: fx - px * w, y: fy - py * h, w, h });
+  return true;
+}
+window.addEventListener('keydown', (e) => { if (cropping && (e.key === 'Enter' || e.key === 'Escape')) { e.preventDefault(); e.stopPropagation(); endCrop(); } }, true);
+window.addEventListener('pointerdown', (e) => { if (cropping && !(e.target instanceof Node && cropping.tile.el.contains(e.target))) endCrop(); }, true);
+
 // ---------- text tiles (board only) ----------
 // Miro-style notes: floating text or a filled bubble. A text tile is the odd one out among tiles –
 // no path, no playback, no overlay – so it carries `freeAspect` and `type: 'text'` and every piece
@@ -3275,7 +4784,8 @@ function addTextTile(record = {}) {
     text: TextTile.sanitize(record.text),
     style: TextTile.normalize(record.style),
     aspect: null, freeAspect: true, editing: false,
-    board: { x: Number(b.x), y: Number(b.y), w: Math.max(TEXT_MIN_W, Number(b.w)), h: Number(b.h) > 0 ? Number(b.h) : 40 },
+    // (a saved box keeps its width, however narrow: a scaled Miro board has small text; TEXT_MIN_W is for dragging)
+    board: { x: Number(b.x), y: Number(b.y), w: Math.max(0.5, Number(b.w)), h: Number(b.h) > 0 ? Number(b.h) : 40 },
     bookmarks: [], sync: null, group: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), id: newTileId(Session.tileId(record)), volume: 0, ownMuted: false,
     galleryH: layout.rowHeight,
   };
@@ -3284,10 +4794,20 @@ function addTextTile(record = {}) {
   el.querySelector('.remove').addEventListener('click', () => removeTile(tile));
   el.addEventListener('pointerenter', () => { hoveredTile = tile; hpEnter(tile); });
   el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; hpLeave(tile); });
-  el.addEventListener('dblclick', (e) => { e.stopPropagation(); beginTextEdit(tile); });
+  el.addEventListener('dblclick', (e) => {
+    e.stopPropagation();
+    // a frame: its title renames it (its own listener); inside it, a new note there, as on the board
+    if (tile.frame) { if (!e.target.closest('.frame-title') && isBoard() && !IS_VIEW) createTextTileAt(toCanvas(e.clientX, e.clientY)); return; }
+    if (tile.links) { linksDblClick(tile, e); return; } // a bookmark block: type in the cell
+    if (tile.todo) return; // a to-do list: its words are typed in with one click
+    beginTextEdit(tile);
+  });
   el.addEventListener('contextmenu', (e) => {
     e.preventDefault(); e.stopPropagation();
-    showRowMenu(e, [['Edit', () => beginTextEdit(tile)], ['Bring to front', () => bringToFront(tile)], ['Remove', () => removeTile(tile)]]);
+    if (tile.frame) { showRowMenu(e, frameMenuItems(tile)); return; }
+    if (tile.links) { showRowMenu(e, linksMenuItems(tile, e)); return; }
+    if (tile.todo) { showRowMenu(e, todoMenuItems(tile, e)); return; }
+    showRowMenu(e, [['Edit', () => beginTextEdit(tile)], ...stackMenuItems(tile), lockMenuItem(tile), ['Remove', () => removeTile(tile)]]);
   });
   el.addEventListener('click', (e) => {
     if (isBoard() || !e.shiftKey || e.target.closest('button')) return;
@@ -3311,6 +4831,9 @@ function addTextTile(record = {}) {
     h.addEventListener('pointerdown', (e) => startResize(tile, h.dataset.corner, e));
     h.addEventListener('dblclick', (e) => e.stopPropagation()); // no aspect to reset to
   }
+  if (record.frame) setFrame(tile, record.frame); // (2026-11-15)
+  if (record.links) setLinks(tile, record.links, { render: false }); // a bookmark block (2026-11-16)
+  if (record.todo) setTodo(tile, record.todo, { render: false }); // a to-do list (2026-11-17)
   attachTileDrag(tile);
   canvas.appendChild(frag);
   el.hidden = !isBoard();
@@ -3325,9 +4848,12 @@ function addTextTile(record = {}) {
 // change; cheap enough (one forced layout) to run inside a resize drag.
 function renderTextTile(tile) {
   applyTextStyleToEl(tile);
+  if (tile.culled) { tile.needsMeasure = true; return; } // off the page it measures nothing: done when it is back
+  // a fixed box (sticky note, shape, frame) keeps its size; the text sits in it (shrunk to fit if asked)
+  if (tile.style.box === 'fixed') { layoutTile(tile); if (tile.style.fit) fitTextTile(tile); return; }
   const bubble = tile.el.querySelector('.text-bubble');
   // the element is already at its board width, so offsetHeight is the wrapped height
-  tile.board.h = Math.max(BOARD_MIN_H, bubble.offsetHeight);
+  tile.board.h = Math.max(Math.min(BOARD_MIN_H, tile.style.size * 1.3), bubble.offsetHeight); // (small text, e.g. on a scaled Miro board, gets a box its own size)
   layoutTile(tile);
 }
 
@@ -3342,20 +4868,62 @@ function applyTextStyleToEl(tile) {
   body.style.fontSize = s.size + 'px';
   body.style.color = s.color;
   body.style.textAlign = s.align;
-  body.style.lineHeight = '1.25';
-  bubble.style.background = s.bubble ? s.fill : 'transparent';
-  bubble.style.border = s.bubble && s.outlineWidth > 0 ? `${s.outlineWidth}px solid ${s.outline}` : 'none';
-  bubble.style.borderRadius = '8px';
-  bubble.style.padding = s.bubble ? '12px' : '0';
+  body.style.lineHeight = String(s.lineHeight || 1.25); // (1.25 for Ozy's own notes; a Miro text: 1.4)
+  // the whole text bold / italic / underlined / struck through (Miro imports, 2026-11-10)
+  body.style.fontWeight = s.bold ? '700' : '';
+  body.style.fontStyle = s.italic ? 'italic' : '';
+  body.style.textDecoration = [s.underline ? 'underline' : '', s.strike ? 'line-through' : ''].filter(Boolean).join(' ');
+  // (2026-11-15) a triangle, diamond, star...: its outline is an SVG behind the text, stretched to the box
+  const poly = s.bubble && TextTile.SHAPES[s.shape];
+  let bg = el.querySelector(':scope > .shape-bg');
+  if (poly) {
+    if (!bg) {
+      bg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      bg.setAttribute('class', 'shape-bg'); bg.setAttribute('viewBox', '0 0 100 100'); bg.setAttribute('preserveAspectRatio', 'none');
+      bg.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'polygon'));
+      el.insertBefore(bg, el.firstChild);
+    }
+    const pg = bg.firstChild;
+    pg.setAttribute('points', poly);
+    pg.style.fill = s.fill;
+    pg.style.stroke = s.outlineWidth > 0 ? s.outline : 'none';
+    pg.style.strokeWidth = s.outlineWidth + 'px';
+    bg.style.filter = s.shadow ? 'drop-shadow(0 4px 6px rgba(0,0,0,0.28))' : '';
+  } else if (bg) bg.remove();
+  bubble.style.background = s.bubble && !poly ? s.fill : 'transparent';
+  bubble.style.border = s.bubble && !poly && s.outlineWidth > 0 ? `${s.outlineWidth}px solid ${s.outline}` : 'none';
+  // (2026-11-06) corner rounding, an ellipse, padding, a shadow and, in a fixed box, where the text sits
+  bubble.style.borderRadius = s.shape === 'ellipse' ? '50%' : s.radius + 'px';
+  bubble.style.padding = s.bubble ? s.padding + 'px' : '0';
+  bubble.style.boxShadow = s.shadow && !poly ? '0 4px 10px rgba(0,0,0,0.28)' : 'none';
+  const fixed = s.box === 'fixed';
+  el.classList.toggle('text-fixed', fixed);
+  bubble.style.justifyContent = fixed ? ({ top: 'flex-start', middle: 'center', bottom: 'flex-end' }[s.valign] || 'flex-start') : '';
+  if (fixed && s.fit && tile.fitSize) body.style.fontSize = tile.fitSize + 'px';
+}
+// A sticky note's text: as big as its style says, smaller until it fits inside the note.
+function fitTextTile(tile) {
+  const bubble = tile.el.querySelector('.text-bubble');
+  const body = tile.el.querySelector('.text-body');
+  if (!tile.el.isConnected || tile.el.hidden) return;
+  const pad = tile.style.bubble ? tile.style.padding * 2 : 0;
+  const availH = tile.board.h - pad, availW = tile.board.w - pad;
+  const fits = (px) => { body.style.fontSize = px + 'px'; return body.scrollHeight <= availH + 1 && body.scrollWidth <= availW + 1; };
+  let lo = 6, hi = Math.max(6, tile.style.size);
+  if (fits(hi)) lo = hi;
+  else { for (let i = 0; i < 9 && hi - lo > 0.5; i++) { const mid = (lo + hi) / 2; if (fits(mid)) lo = mid; else hi = mid; } }
+  tile.fitSize = Math.floor(lo * 2) / 2;
+  body.style.fontSize = tile.fitSize + 'px';
+  void bubble;
 }
 
 function beginTextEdit(tile) {
   if (IS_VIEW) return;
-  if (!isBoard() || tile.editing) return;
+  if (!isBoard() || tile.editing || tile.locked || tile.frame || tile.links || tile.todo) return;
   for (const t of tiles) if (t !== tile && t.editing) endTextEdit(t); // only one at a time
   tile.editing = true;
   tile.el.classList.add('editing');
-  bringToFront(tile);
+  // bringToFront(tile); // DISABLED (Mark, 2026-11-10): editing text keeps it at its layer
   const body = tile.el.querySelector('.text-body');
   tile._textBefore = tile.text;
   body.contentEditable = 'plaintext-only';
@@ -3376,7 +4944,8 @@ function endTextEdit(tile) {
   body.contentEditable = 'false';
   try { body.blur(); } catch {}
   // An empty note is no note, like Miro. One that was never finished isn't worth an undo step.
-  if (!tile.text) { removeTile(tile, { record: !tile.isNew }); return; }
+  // if (!tile.text) { removeTile(tile, { record: !tile.isNew }); return; } // DISABLED (Mark, 2026-11-15): empty shapes and notes stay
+  if (!tile.text && !(tile.style.bubble && tile.style.box === 'fixed')) { removeTile(tile, { record: !tile.isNew }); return; }
   renderTextTile(tile);
   // a brand new note is one undo step ("add"), not "add" plus "edit text"
   if (tile.isNew) { tile.isNew = false; recordAdd([tile]); } else recordTextEdit(tile, before, tile.text);
@@ -3385,7 +4954,8 @@ function endTextEdit(tile) {
 
 // A new tile at a point on the board, straight into edit mode.
 function createTextTileAt(world) {
-  const tile = addTextTile({ text: '', style: TextTile.DEFAULTS, board: { x: world.x, y: world.y, w: TEXT_DEFAULT_W, h: 40 } });
+  const style = layout.background === 'light' ? { ...TextTile.DEFAULTS, color: '#1a1a1a' } : TextTile.DEFAULTS; // readable on a light board
+  const tile = addTextTile({ text: '', style, board: { x: world.x, y: world.y, w: TEXT_DEFAULT_W, h: 40 } });
   if (!tile) return null;
   tile.isNew = true; // the undo entry is pushed once there is something in it (see endTextEdit)
   bringToFront(tile);
@@ -3406,10 +4976,1747 @@ document.getElementById('add-text').addEventListener('click', () => {
 // double-click empty board space makes a note there
 grid.addEventListener('dblclick', (e) => {
   if (!isBoard() || IS_VIEW) return;
-  if (e.target !== grid && e.target !== canvas) return; // not on a tile
+  if (e.target !== grid && e.target !== canvas && !lockedTileAt(e.target)) return; // not on a tile (a locked one is board)
   e.preventDefault();
   createTextTileAt(toCanvas(e.clientX, e.clientY));
 });
+
+// ---------- shapes, sticky notes, duplicate, rotate (Mark, 2026-11-15) ----------
+// Shapes and sticky notes are text tiles in a fixed box (lib/texttile.js SHAPES draws the outline
+// of the ones that are not a box or an ellipse). The ◇ Shapes menu puts one in the middle of the
+// view; N puts a sticky note under the mouse and starts typing in it. Ctrl+D duplicates the
+// selection. A selected tile gets a round handle above it that turns it (Shift: 15° steps; it
+// settles on level within 3°).
+const SHAPE_KINDS = [['box', 'Rectangle'], ['round', 'Rounded rectangle'], ['ellipse', 'Circle'], ['triangle', 'Triangle'], ['diamond', 'Diamond'], ['hexagon', 'Hexagon'], ['star', 'Star'], ['arrow', 'Arrow'], ['parallelogram', 'Parallelogram']];
+// a new shape's look: drawn at the size it should have on screen now
+function shapeLook(kind) {
+  const z = board.zoom, dark = layout.background !== 'light';
+  return TextTile.normalize({
+    font: 'Segoe UI', size: 18 / z, color: dark ? '#e8e8ea' : '#1a1a1a', align: 'center', valign: 'middle',
+    bubble: true, fill: dark ? '#2b2b31' : '#ffffff', outline: dark ? '#cfcfd4' : '#1a1a1a', outlineWidth: 2 / z,
+    box: 'fixed', shape: kind === 'round' ? 'box' : kind, radius: kind === 'round' ? 18 / z : 0, padding: 10 / z,
+  });
+}
+function noteLook(fill) {
+  const z = board.zoom;
+  return TextTile.normalize({
+    font: 'Segoe UI', size: 28 / z, color: fill === '#000000' ? '#ffffff' : '#1a1a1a', align: 'center', valign: 'middle',
+    bubble: true, fill: fill || TextTile.NOTE_COLORS[0], outline: '#00000000', outlineWidth: 0,
+    box: 'fixed', fit: true, shadow: true, radius: 2 / z, padding: 14 / z,
+  });
+}
+let lastNoteColor = TextTile.NOTE_COLORS[0];
+// where a new thing goes: under the mouse when it is over the board, else the middle of the view
+function placePoint() { return pointerOverBoard && lastPointer ? toCanvas(lastPointer.clientX, lastPointer.clientY) : viewCentreWorld(); }
+function addShapeAt(kind, at = viewCentreWorld()) {
+  if (!isBoard() || IS_VIEW) { setStatus('Shapes live on the board – switch to Board mode'); return null; }
+  const note = kind === 'note';
+  const side = (note ? 200 : 160) / board.zoom;
+  const w = kind === 'arrow' || kind === 'parallelogram' ? side * 1.4 : side;
+  const style = note ? noteLook(lastNoteColor) : shapeLook(kind);
+  const tile = addTextTile({ text: '', style, board: { x: at.x - w / 2, y: at.y - side / 2, w, h: side } });
+  if (!tile) return null;
+  bringToFront(tile);
+  selectOnly(tile);
+  if (note) { tile.isNew = true; beginTextEdit(tile); } // a note is for writing in: straight into typing
+  else recordAdd([tile], 'add ' + (SHAPE_KINDS.find((k) => k[0] === kind) || [0, 'shape'])[1].toLowerCase());
+  updateChrome(); markOnBoard();
+  return tile;
+}
+function openShapesMenu(anchor) {
+  const at = menuAt(anchor); // (beside the left rail)
+  showRowMenu(at, [
+    ['Sticky note  (N)', () => addShapeAt('note')],
+    ['Frame', () => addFrame()],
+    ...SHAPE_KINDS.map(([k, label]) => [label, () => addShapeAt(k)]),
+  ]);
+}
+document.getElementById('add-shape').addEventListener('click', (e) => openShapesMenu(e.currentTarget));
+
+// Ctrl+D: a copy of every selected tile, a little down and to the right, selected instead
+function duplicateSelection() {
+  if (!isBoard() || IS_VIEW) return;
+  const all = collectSession().videos;
+  const picked = tiles.map((t, i) => i).filter((i) => selection.has(tiles[i]) && tiles[i].board && !tiles[i].locked);
+  if (!picked.length) { setStatus('Select something to duplicate'); return; }
+  const d = 24 / board.zoom;
+  const added = [];
+  for (const i of picked) {
+    const v = all[i];
+    const t = buildFromRecord({ ...Session.openRecord(v), id: undefined, sync: null, locked: undefined, favorite: undefined, z: undefined, ends: undefined, board: { ...v.board, x: v.board.x + d, y: v.board.y + d } });
+    if (t) added.push(t);
+  }
+  if (!added.length) return;
+  clearSelection();
+  for (const t of added) { if (!t.board) placeOnBoard([t]); bringToFront(t); setSelected(t, true); }
+  layoutTiles();
+  recordAdd(added, `duplicate ${added.length === 1 ? tileName(added[0]) : added.length + ' tiles'}`);
+  updateChrome(); markOnBoard();
+  setStatus(`Duplicated ${added.length} tile${added.length === 1 ? '' : 's'}`, 2500);
+}
+
+// ---- the turn handle: one, over the board, for the one selected tile ----
+const rotHandle = document.createElement('div');
+rotHandle.className = 'rotate-handle';
+rotHandle.title = 'Drag to turn (Shift: 15° steps). Double-click: level again';
+rotHandle.hidden = true;
+grid.appendChild(rotHandle);
+const rotatable = (t) => t && t.board && t.type !== 'line' && !t.locked && !t.editing;
+function rotTarget() { if (!isBoard() || IS_VIEW || selection.size !== 1) return null; const t = [...selection][0]; return tiles.includes(t) && rotatable(t) && !(cropping && cropping.tile === t) ? t : null; }
+function updateRotateHandle() {
+  const t = rotTarget();
+  if (!t) { rotHandle.hidden = true; return; }
+  const b = t.board, a = (t.rotation || 0) * Math.PI / 180;
+  const cx = b.x + b.w / 2, cy = b.y + b.h / 2, off = b.h / 2 + 26 / board.zoom;
+  const x = cx + Math.sin(a) * off, y = cy - Math.cos(a) * off;
+  rotHandle.style.left = (x * board.zoom + board.panX) + 'px';
+  rotHandle.style.top = (y * board.zoom + board.panY) + 'px';
+  rotHandle.hidden = false;
+}
+rotHandle.addEventListener('pointerdown', (e) => {
+  const t = rotTarget();
+  if (!t || e.button !== 0) return;
+  e.preventDefault(); e.stopPropagation();
+  try { rotHandle.setPointerCapture(e.pointerId); } catch {}
+  const before = shapeState(t);
+  const b = t.board, cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+  document.body.classList.add('rotating');
+  const onMove = (ev) => {
+    const p = toCanvas(ev.clientX, ev.clientY);
+    let deg = Math.atan2(p.x - cx, -(p.y - cy)) * 180 / Math.PI;
+    if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
+    else for (const k of [-180, -90, 0, 90, 180]) if (Math.abs(deg - k) < 3) deg = k;
+    t.rotation = ((deg % 360) + 360) % 360;
+    if (t.rotation < 0.05 || t.rotation > 359.95) t.rotation = 0;
+    layoutTile(t);
+    updateRotateHandle();
+    setStatus(`Turned ${Math.round(t.rotation)}°`, 1500);
+  };
+  let ended = false;
+  const onUp = () => {
+    if (ended) return;
+    ended = true;
+    activeInteractions.delete(onUp);
+    rotHandle.removeEventListener('pointermove', onMove);
+    rotHandle.removeEventListener('pointerup', onUp);
+    rotHandle.removeEventListener('pointercancel', onUp);
+    rotHandle.removeEventListener('lostpointercapture', onUp);
+    document.body.classList.remove('rotating');
+    recordStates('turn ' + tileName(t), [t], [before]);
+  };
+  rotHandle.addEventListener('pointermove', onMove);
+  rotHandle.addEventListener('pointerup', onUp);
+  rotHandle.addEventListener('pointercancel', onUp);
+  rotHandle.addEventListener('lostpointercapture', onUp);
+  activeInteractions.add(onUp);
+});
+rotHandle.addEventListener('dblclick', (e) => {
+  e.stopPropagation();
+  const t = rotTarget();
+  if (!t || !t.rotation) return;
+  const before = shapeState(t);
+  t.rotation = 0; layoutTile(t); updateRotateHandle();
+  recordStates('level ' + tileName(t), [t], [before]);
+});
+
+// ---------- frames (Mark, 2026-11-15) ----------
+// A frame is a box (a fixed text tile with tile.frame = { title }) that holds what lies on it:
+// dragging it by its title moves everything whose middle is inside it, and pressing inside it is
+// pressing on the board (the lasso), as in Miro. Its title sits just above it at one size on screen;
+// double-click the title to rename it. The ▣ Frames menu lists them and flies to one; Present steps
+// through them in order (← → or Page Up / Down, Esc ends).
+function setFrame(tile, frame) {
+  tile.frame = frame ? { title: String(frame.title || '').slice(0, 200) } : null;
+  tile.el.classList.toggle('is-frame', !!tile.frame);
+  let pin = tile.el.querySelector(':scope > .frame-title-pin');
+  if (!tile.frame) { if (pin) pin.remove(); return; }
+  if (!pin) {
+    pin = document.createElement('div'); pin.className = 'frame-title-pin';
+    const t = document.createElement('div'); t.className = 'frame-title';
+    t.title = 'Drag to move the frame and what is in it. Double-click to rename';
+    t.addEventListener('dblclick', (e) => { e.stopPropagation(); renameFrame(tile); });
+    pin.appendChild(t); tile.el.appendChild(pin);
+  }
+  pin.firstChild.textContent = tile.frame.title || 'Frame';
+}
+const frameTiles = () => tiles.filter((t) => t.frame && t.board);
+// what a frame holds: every unlocked tile whose middle is inside it
+function frameContents(f) {
+  const b = f.board;
+  return tiles.filter((t) => t !== f && t.board && !t.locked && (() => { const cx = t.board.x + t.board.w / 2, cy = t.board.y + t.board.h / 2; return cx > b.x && cx < b.x + b.w && cy > b.y && cy < b.y + b.h; })());
+}
+// the frame a press landed on, when it was on the frame itself and not its title
+function frameBodyAt(target) {
+  if (!target || !target.closest || target.closest('button, input, select, textarea, .handle, .frame-title')) return null;
+  const el = target.closest('.tile.is-frame');
+  const t = el && tiles.find((x) => x.el === el);
+  return t && t.board && !t.editing ? t : null;
+}
+function renameFrame(tile) {
+  if (IS_VIEW || !tile.frame || tile.locked) return;
+  const el = tile.el.querySelector('.frame-title');
+  const before = tile.frame.title;
+  el.contentEditable = 'plaintext-only';
+  el.focus();
+  try { const r = document.createRange(); r.selectNodeContents(el); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); } catch {}
+  const done = (keep) => {
+    el.removeEventListener('keydown', onKey); el.removeEventListener('blur', onBlur);
+    el.contentEditable = 'false';
+    const title = keep ? el.textContent.replace(/\s+/g, ' ').trim().slice(0, 200) : before;
+    setFrame(tile, { title });
+    if (title !== before) undoStack.push({ kind: 'frame-title', label: 'rename frame', tile, before, after: title });
+  };
+  const onKey = (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); el.blur(); } else if (e.key === 'Escape') { e.preventDefault(); done(false); } };
+  const onBlur = () => done(true);
+  el.addEventListener('keydown', onKey);
+  el.addEventListener('blur', onBlur);
+}
+function frameLook() {
+  const dark = layout.background !== 'light';
+  return TextTile.normalize({ font: 'Segoe UI', size: 14 / board.zoom, color: dark ? '#e8e8ea' : '#1a1a1a', align: 'left', valign: 'top', bubble: true, fill: dark ? '#26262b' : '#ffffff', outline: dark ? '#ffffff22' : '#00000022', outlineWidth: 1 / board.zoom, box: 'fixed', radius: 0, padding: 12 / board.zoom });
+}
+const nextFrameName = () => `Frame ${frameTiles().length + 1}`;
+// a new frame: around the selection (just behind it), or 16:9 in the middle of the view (at the back)
+function addFrame({ aroundSelection = false } = {}) {
+  if (!isBoard() || IS_VIEW) return null;
+  const sel = [...selection].filter((t) => tiles.includes(t) && t.board);
+  let box;
+  if (aroundSelection && sel.length) {
+    const bb = boardBounds(sel), pad = 40 / board.zoom;
+    box = { x: bb.minX - pad, y: bb.minY - pad, w: bb.w + 2 * pad, h: bb.h + 2 * pad };
+  } else {
+    const c = viewCentreWorld(), w = 800 / board.zoom, h = 450 / board.zoom;
+    box = { x: c.x - w / 2, y: c.y - h / 2, w, h };
+  }
+  const tile = addTextTile({ text: '', style: frameLook(), board: box });
+  if (!tile) return null;
+  setFrame(tile, { title: nextFrameName() });
+  if (aroundSelection && sel.length) {
+    // just behind the lowest of what it holds: same layer, one place under it
+    const low = sel.slice().sort((a, b) => stackKey(a) - stackKey(b))[0];
+    tile.z = low.z != null ? low.z : null;
+    tiles.splice(tiles.indexOf(tile), 1); tiles.splice(tiles.indexOf(low), 0, tile);
+    canvas.insertBefore(tile.el, low.el);
+    layoutTile(tile);
+  } else sendToBack(tile);
+  selectOnly(tile);
+  recordAdd([tile], 'add frame');
+  updateChrome(); markOnBoard();
+  setStatus('Frame added – drag it by its title; double-click the title to rename it', 5000);
+  return tile;
+}
+// in reading order: top to bottom, and left to right along a row
+function framesInOrder() {
+  const fs = frameTiles();
+  if (!fs.length) return [];
+  const rowH = Math.min(...fs.map((f) => f.board.h)) / 2;
+  return fs.slice().sort((a, b) => (Math.abs(a.board.y - b.board.y) > rowH ? a.board.y - b.board.y : a.board.x - b.board.x));
+}
+function flyToFrame(f) {
+  const r = gridRect();
+  flyTo(Favorites.camera(f.board, { w: r.width, h: r.height }, { minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM }));
+}
+let presenting = null; // { list, i }
+function presentFrames(start = 0) {
+  const list = framesInOrder();
+  if (!list.length) { setStatus('No frames on this board yet – ◇ ▾ → Frame'); return; }
+  presenting = { list, i: Math.max(0, Math.min(start, list.length - 1)) };
+  document.body.classList.add('presenting');
+  clearSelection();
+  showPresented();
+}
+function showPresented() {
+  const f = presenting.list[presenting.i];
+  flyToFrame(f);
+  setStatus(`${f.frame.title || 'Frame'} – ${presenting.i + 1} of ${presenting.list.length}  (← → to move, Esc to stop)`, 0);
+}
+function stopPresenting() { presenting = null; document.body.classList.remove('presenting'); setStatus('', 1); }
+window.addEventListener('keydown', (e) => {
+  if (!presenting) return;
+  const k = e.key;
+  if (k === 'Escape') { e.preventDefault(); e.stopPropagation(); stopPresenting(); return; }
+  const step = k === 'ArrowRight' || k === 'PageDown' || k === ' ' ? 1 : k === 'ArrowLeft' || k === 'PageUp' ? -1 : 0;
+  if (!step) return;
+  e.preventDefault(); e.stopPropagation();
+  presenting.i = Math.max(0, Math.min(presenting.list.length - 1, presenting.i + step));
+  showPresented();
+}, true);
+function openFramesMenu(anchor) {
+  const list = framesInOrder();
+  showRowMenu(menuAt(anchor), [
+    ['Present  (← → step, Esc ends)', () => presentFrames(0), !list.length],
+    ['New frame', () => addFrame(), !isBoard() || IS_VIEW],
+    ['Frame around the selection', () => addFrame({ aroundSelection: true }), !selection.size || !isBoard() || IS_VIEW],
+    ['Export the view as a picture (PNG)…', () => exportView(), !isBoard()],
+    ['Export the frames as one PDF…', () => exportFrames('pdf'), !list.length],
+    ['Export each frame as a picture (PNG)…', () => exportFrames('pngs'), !list.length],
+    [miniOn ? 'Hide the overview map  (M)' : 'Show the overview map  (M)', () => setMiniMap(!miniOn)],
+    ...list.map((f, i) => [`${i + 1}. ${f.frame.title || 'Frame'}`, () => flyToFrame(f)]),
+  ]);
+}
+document.getElementById('btn-frames').addEventListener('click', (e) => openFramesMenu(e.currentTarget));
+function frameMenuItems(tile) {
+  return [
+    ['Rename', () => renameFrame(tile)],
+    ['Present from here', () => presentFrames(framesInOrder().indexOf(tile))],
+    ['Select what is in it', () => { clearSelection(); for (const t of frameContents(tile)) setSelected(t, true); selectionStatus(); }],
+    ...stackMenuItems(tile),
+    lockMenuItem(tile),
+    ['Remove the frame (keep what is in it)', () => removeTile(tile)],
+  ];
+}
+
+// ---------- find, export, the overview map (Mark, 2026-11-15) ----------
+// Ctrl+F: a box over the board; what is typed is looked for in every text, note, shape, frame
+// title and picture's file name. Enter flies to the next one (Shift+Enter: back), Esc closes.
+const findBox = document.createElement('div');
+findBox.className = 'find-box';
+findBox.hidden = true;
+const findInput = document.createElement('input');
+findInput.type = 'text'; findInput.placeholder = 'Find on the board'; findInput.spellcheck = false;
+const findCount = document.createElement('span');
+findCount.className = 'find-count';
+findBox.append(findInput, findCount);
+findBox.addEventListener('pointerdown', (e) => e.stopPropagation());
+grid.appendChild(findBox);
+let findHits = [], findAt = -1;
+const findText = (t) => (t.type === 'text' ? (t.frame ? t.frame.title + ' ' : '') + t.text : t.type === 'line' ? '' : (t.title || '') + ' ' + basename(t.path || ''));
+function runFind() {
+  const q = findInput.value.trim().toLowerCase();
+  findHits = q ? tiles.filter((t) => t.board && findText(t).toLowerCase().includes(q)).sort((a, b) => (a.board.y - b.board.y) || (a.board.x - b.board.x)) : [];
+  findAt = -1;
+  findCount.textContent = q ? (findHits.length ? `${findHits.length} found` : 'none') : '';
+}
+function findStep(dir) {
+  if (!findHits.length) return;
+  findAt = (findAt + dir + findHits.length) % findHits.length;
+  const t = findHits[findAt];
+  const r = gridRect();
+  flyTo(Favorites.camera(t.board, { w: r.width, h: r.height }, { minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, fill: 0.35 }));
+  selectOnly(t);
+  findCount.textContent = `${findAt + 1} of ${findHits.length}`;
+}
+function openFind() {
+  if (!isBoard()) { setStatus('Find works on the board'); return; }
+  findBox.hidden = false;
+  findInput.focus(); findInput.select();
+}
+function closeFind() { findBox.hidden = true; findInput.blur(); }
+findInput.addEventListener('input', runFind);
+findInput.addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (e.key === 'Enter') { e.preventDefault(); if (findAt < 0 && !findHits.length) runFind(); findStep(e.shiftKey ? -1 : 1); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeFind(); }
+});
+
+// ---- export: the view, or every frame, as pictures or one PDF ----
+// What is on screen is photographed (the window's own drawing, at the screen's pixels): for a
+// frame, the view first fits that frame and waits for its pictures to load at full size.
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+const baseName = () => (sessionPath ? basename(sessionPath).replace(/\.mvp$/i, '') : 'Ozy board');
+async function photographRect(rect) {
+  document.body.classList.add('exporting');
+  await nextFrame();
+  try { return await window.api.captureRect(rect); } finally { document.body.classList.remove('exporting'); }
+}
+async function picturesSettled(list, ms = 4000) {
+  const t0 = Date.now();
+  scheduleOffscreen();
+  await new Promise((r) => setTimeout(r, 400));
+  while (Date.now() - t0 < ms) {
+    if (list.every((t) => !t.img || (t.img.complete && t.img.naturalWidth > 0))) return;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+async function exportView() {
+  if (!isBoard()) { setStatus('Export works on the board'); return; }
+  const g = grid.getBoundingClientRect();
+  const png = await photographRect({ x: g.left, y: g.top, w: g.width, h: g.height });
+  const out = await window.api.saveExport({ kind: 'png', name: baseName() + ' – view.png', pages: [png] });
+  if (out) setStatus('Saved ' + out, 5000);
+}
+async function exportFrames(kind) {
+  const list = framesInOrder();
+  if (!list.length) { setStatus('No frames to export – ▣ Frames ▾ → New frame'); return; }
+  const cam0 = { zoom: board.zoom, panX: board.panX, panY: board.panY };
+  const sel = [...selection];
+  clearSelection();
+  const pages = [];
+  try {
+    for (const [i, f] of list.entries()) {
+      setStatus(`Exporting frame ${i + 1} of ${list.length}…`, 0);
+      const g = grid.getBoundingClientRect();
+      const cam = Favorites.camera(f.board, { w: g.width, h: g.height }, { minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, fill: 0.98 });
+      board.zoom = cam.zoom; board.panX = cam.panX; board.panY = cam.panY;
+      applyBoardView(); setUiScaleNow();
+      await picturesSettled(frameContents(f));
+      const x0 = Math.max(g.left, g.left + f.board.x * board.zoom + board.panX), y0 = Math.max(g.top, g.top + f.board.y * board.zoom + board.panY);
+      const x1 = Math.min(g.right, g.left + (f.board.x + f.board.w) * board.zoom + board.panX), y1 = Math.min(g.bottom, g.top + (f.board.y + f.board.h) * board.zoom + board.panY);
+      pages.push({ png: await photographRect({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }), name: f.frame.title || `Frame ${i + 1}` });
+    }
+  } finally {
+    board.zoom = cam0.zoom; board.panX = cam0.panX; board.panY = cam0.panY;
+    applyBoardView();
+    for (const t of sel) if (tiles.includes(t)) setSelected(t, true);
+  }
+  const out = await window.api.saveExport({ kind, name: baseName() + (kind === 'pdf' ? '.pdf' : ''), pages: pages.map((p) => p.png), names: pages.map((p) => p.name) });
+  setStatus(out ? 'Saved ' + out : 'Export cancelled', 5000);
+}
+
+// ---- the overview map: the whole board small in a corner, the view on it; click or drag to go ----
+const miniMap = document.createElement('canvas');
+miniMap.className = 'mini-map';
+miniMap.width = 220; miniMap.height = 150;
+miniMap.hidden = true; // (until it is turned on: M)
+miniMap.title = 'The whole board: click or drag to go there (M to hide)';
+grid.appendChild(miniMap);
+let miniOn = false;
+try { miniOn = localStorage.getItem('ozy.minimap') === '1'; } catch {}
+let miniFrame = 0, miniMap0 = null; // the mapping last drawn: board -> map pixels
+function setMiniMap(on) {
+  miniOn = !!on;
+  { const b = document.getElementById('btn-map'); if (b) b.classList.toggle('toggled', miniOn); }
+  try { localStorage.setItem('ozy.minimap', miniOn ? '1' : '0'); } catch {}
+  drawMiniMap();
+}
+function drawMiniMap() {
+  miniMap.hidden = !(miniOn && isBoard() && tiles.some((t) => t.board));
+  if (miniMap.hidden || miniFrame) return;
+  miniFrame = requestAnimationFrame(() => {
+    miniFrame = 0;
+    const W = miniMap.width, H = miniMap.height, pad = 6;
+    const bb = boardBounds(tiles.filter((t) => t.board));
+    if (!bb) return;
+    const k = Math.min((W - 2 * pad) / Math.max(1, bb.w), (H - 2 * pad) / Math.max(1, bb.h));
+    const ox = pad + ((W - 2 * pad) - bb.w * k) / 2 - bb.minX * k, oy = pad + ((H - 2 * pad) - bb.h * k) / 2 - bb.minY * k;
+    miniMap0 = { k, ox, oy };
+    const c = miniMap.getContext('2d');
+    const light = layout.background === 'light';
+    c.clearRect(0, 0, W, H);
+    c.fillStyle = light ? 'rgba(255,255,255,0.92)' : 'rgba(24,24,28,0.92)';
+    c.fillRect(0, 0, W, H);
+    for (const t of tiles) {
+      if (!t.board) continue;
+      const b = t.board;
+      c.fillStyle = t.frame ? (light ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)') : t.type === 'line' ? 'rgba(120,120,130,0.8)' : t.type === 'text' ? (light ? 'rgba(200,170,40,0.55)' : 'rgba(255,220,90,0.5)') : (light ? 'rgba(60,60,70,0.55)' : 'rgba(200,200,210,0.5)');
+      c.fillRect(ox + b.x * k, oy + b.y * k, Math.max(1, b.w * k), Math.max(1, b.h * k));
+    }
+    const g = gridRect();
+    const vx = -board.panX / board.zoom, vy = -board.panY / board.zoom;
+    c.strokeStyle = '#4f8cff'; c.lineWidth = 1.5;
+    c.strokeRect(ox + vx * k, oy + vy * k, (g.width / board.zoom) * k, (g.height / board.zoom) * k);
+  });
+}
+function miniGo(e) {
+  if (!miniMap0) return;
+  const r = miniMap.getBoundingClientRect();
+  const x = ((e.clientX - r.left) * (miniMap.width / r.width) - miniMap0.ox) / miniMap0.k;
+  const y = ((e.clientY - r.top) * (miniMap.height / r.height) - miniMap0.oy) / miniMap0.k;
+  const g = gridRect();
+  board.panX = g.width / 2 - x * board.zoom; board.panY = g.height / 2 - y * board.zoom;
+  applyBoardView();
+}
+miniMap.addEventListener('pointerdown', (e) => {
+  e.preventDefault(); e.stopPropagation();
+  try { miniMap.setPointerCapture(e.pointerId); } catch {}
+  miniGo(e);
+  const move = (ev) => miniGo(ev);
+  const up = () => { miniMap.removeEventListener('pointermove', move); miniMap.removeEventListener('pointerup', up); miniMap.removeEventListener('lostpointercapture', up); };
+  miniMap.addEventListener('pointermove', move);
+  miniMap.addEventListener('pointerup', up);
+  miniMap.addEventListener('lostpointercapture', up);
+});
+miniMap.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+setInterval(() => { if (miniOn) drawMiniMap(); }, 1500); // (things added, moved, removed)
+
+// ---------- the floating panels (Mark, 2026-11-15) ----------
+// index.html lays the toolbar out as panels over the board; here every button with data-icon gets
+// its icon (drawn here: no icon font can be downloaded), the board's name follows the file, the
+// zoom − / + and map buttons work, and menus opened from the left rail open beside it.
+const ICON_PATHS = {
+  hand: 'M8 13V5.5a1.5 1.5 0 0 1 3 0V12M11 11V4.5a1.5 1.5 0 0 1 3 0V12M14 11.5V6a1.5 1.5 0 0 1 3 0v8a6 6 0 0 1-6 6h-1.2a6 6 0 0 1-4.6-2.2L3.8 14.6a1.5 1.5 0 0 1 2.3-1.9L8 15',
+  media: 'M12 5v14M5 12h14',
+  text: 'M5 7V5h14v2M12 5v14M9 19h6',
+  shapes: 'M4 13h7v7H4zM14.5 7.5a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0-7 0M8 3l3.5 6h-7z',
+  line: 'M5 19L19 5',
+  pen: 'M4 20l4-1L19 8l-3-3L5 16zM14 7l3 3',
+  frame: 'M8 3v18M16 3v18M3 8h18M3 16h18',
+  folders: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+  star: 'M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z',
+  play: 'M8 5v14l11-7z',
+  pause: 'M8 5h3v14H8zM13 5h3v14h-3z',
+  loop: 'M17 2l3 3-3 3M3 11V9a4 4 0 0 1 4-4h13M7 22l-3-3 3-3M21 13v2a4 4 0 0 1-4 4H4',
+  hover: 'M6 3l5 15 2-6 6-2zM14 14l5 5',
+  tap: 'M9 11l5 10 1.5-4 4-1.5zM4 4l2 2M9 2v3M2 9h3M14 4l-2 2',
+  volume: 'M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11',
+  muted: 'M4 9h4l5-4v14l-5-4H4zM16 9l5 6M21 9l-5 6',
+  gallery: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z',
+  board: 'M3 5h18v12H3zM8 21l4-4 4 4',
+  group: 'M7 7h6v6H7zM11 11h6v6h-6zM3 7V3h4M21 7V3h-4M3 17v4h4M21 17v4h-4',
+  ungroup: 'M4 4h7v7H4zM13 13h7v7h-7z',
+  ab: 'M12 3v18M4 6h5v12H4zM15 6h5v12h-5z',
+  tidy: 'M4 4h7v5H4zM13 4h7v9h-7zM4 11h7v9H4zM13 15h7v5h-7z',
+  link: 'M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1',
+  map: 'M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2zM9 4v14M15 6v14',
+  fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+  minus: 'M5 12h14',
+  plus: 'M12 5v14M5 12h14',
+  open: 'M3 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v1M3 7v10a2 2 0 0 0 2 2h12l3-8H7l-4 8',
+  save: 'M5 4h11l4 4v12H5zM8 4v5h7V4M8 20v-6h8v6',
+  saveas: 'M5 4h11l4 4v4M5 4v16h7M8 4v5h7V4M18 15v6M15 18h6',
+  trash: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3',
+  menu: 'M4 6h16M4 12h16M4 18h16',
+  window: 'M3 6h13v10H3zM8 16v3h13V9h-5',
+  bolt: 'M13 3L5 14h6l-1 7 8-11h-6z',
+  chart: 'M5 20V11M11 20V5M17 20v-7M3 20h18',
+  chevron: 'M6 9l6 6 6-6',
+  front: 'M12 19V6M6 11l6-6 6 6M5 21h14',
+  back: 'M12 5v13M6 13l6 6 6-6M5 3h14',
+  lock: 'M6 11h12v9H6zM9 11V8a3 3 0 0 1 6 0v3',
+  crop: 'M6 2v16h16M2 6h16v16',
+  copy: 'M8 8h12v12H8zM4 16V4h12',
+  remove: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3',
+  close: 'M6 6l12 12M18 6L6 18',
+  bookmark: 'M6 3h12v18l-6-4.5L6 21z',
+  check: 'M5 12.5l4.5 4.5L19 7.5',
+  search: 'M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M15.3 15.3L20 20',
+  photosearch: 'M20 10V5H4v14h7M4 15l4-4 3.5 3.5M14 8.5a.5.5 0 1 0 0 .01M17 13a3 3 0 1 0 0 6a3 3 0 1 0 0-6M19.2 18.2L21.5 20.5',
+  checklist: 'M3.5 6.5l1.5 1.5 3-3M3.5 12.5l1.5 1.5 3-3M3.5 18.5l1.5 1.5 3-3M11 6.5h9.5M11 12.5h9.5M11 18.5h9.5',
+};
+function iconSvg(name) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  p.setAttribute('d', ICON_PATHS[name] || '');
+  svg.appendChild(p);
+  return svg;
+}
+for (const b of document.querySelectorAll('[data-icon]')) {
+  b.prepend(iconSvg(b.dataset.icon));
+  if (b.title && !b.getAttribute('aria-label')) b.setAttribute('aria-label', b.title.split(/[:(.;]| – /)[0].trim());
+}
+// the mute button: a speaker, and a crossed-out one shown once everything is muted
+{
+  const m = document.getElementById('btn-mute-all');
+  const on = iconSvg('volume'); on.classList.add('ic-mute');
+  const off = iconSvg('muted'); off.classList.add('ic-unmute');
+  m.append(on, off);
+  m.setAttribute('aria-label', 'Mute all');
+}
+function updateBoardName() {
+  const el = document.getElementById('board-name');
+  if (el) el.textContent = IS_VIEW ? `View ${window.OZY_VIEW}` : sessionPath ? basename(sessionPath).replace(/\.mvp$/i, '') : 'Untitled board';
+}
+document.getElementById('board-name').addEventListener('click', (e) => { e.stopPropagation(); if (IS_VIEW) return; const r = document.getElementById('btn-open-recent'); if (!r.hidden) r.click(); else document.getElementById('btn-open').click(); });
+document.getElementById('zoom-in').addEventListener('click', () => { if (isBoard()) zoomAtCenter(board.zoom * 1.25); else { noteGalleryScaleChange(); scaleGallery(1.15); } });
+document.getElementById('zoom-out').addEventListener('click', () => { if (isBoard()) zoomAtCenter(board.zoom / 1.25); else { noteGalleryScaleChange(); scaleGallery(1 / 1.15); } });
+document.getElementById('btn-map').addEventListener('click', () => { setMiniMap(!miniOn); document.getElementById('btn-map').classList.toggle('toggled', miniOn); });
+// where a menu opened from a toolbar button goes: beside the left rail, else under the button
+function menuAt(anchor) {
+  const r = anchor.getBoundingClientRect();
+  return anchor.closest('.hud-rail') ? { clientX: r.right + 10, clientY: r.top } : { clientX: r.left, clientY: r.bottom + 6 };
+}
+
+// ---- the selection bar: what can be done to the selected pictures and videos ----
+// Over the selection, as the text and line bars are over theirs (shown when neither of those is):
+// to the front or back, lock, crop (one picture), duplicate, a frame around them, group, remove.
+const selBar = document.createElement('div');
+selBar.className = 'sel-bar';
+selBar.hidden = true;
+selBar.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); });
+document.body.appendChild(selBar);
+const selPicked = () => [...selection].filter((t) => tiles.includes(t) && t.board);
+const SEL_ACTIONS = [
+  ['front', 'Bring to front (PgUp)', () => stackToFront(null), (l) => l.length > 0],
+  ['back', 'Send to back (PgDn)', () => stackToBack(null), (l) => l.length > 0],
+  ['lock', 'Lock / unlock (Ctrl+Shift+L)', () => toggleLock(null), (l) => l.length > 0],
+  ['crop', 'Crop the picture', () => { const t = selPicked()[0]; if (t) beginCrop(t); }, (l) => l.length === 1 && l[0].type === 'image' && !l[0].locked],
+  ['copy', 'Duplicate (Ctrl+D)', () => duplicateSelection(), (l) => l.some((t) => !t.locked)],
+  ['frame', 'Put a frame around them', () => addFrame({ aroundSelection: true }), (l) => l.length > 0],
+  ['group', 'Group (Ctrl+G)', () => toggleGroupFromSelection(), (l) => l.filter((t) => t.pb || t.video || t.yt).length >= 2],
+  ['remove', 'Remove', () => { const l = selPicked().filter((t) => !t.locked); for (const t of l) removeTile(t); setStatus(l.length === 1 ? 'Removed – Ctrl+Z puts it back' : `Removed ${l.length} – Ctrl+Z puts them back`, 4000); }, (l) => l.some((t) => !t.locked)],
+];
+const selButtons = SEL_ACTIONS.map(([icon, title, act]) => {
+  const b = document.createElement('button');
+  b.title = title; b.setAttribute('aria-label', title);
+  b.appendChild(iconSvg(icon));
+  b.addEventListener('click', () => { act(); updateTextToolbar(); });
+  if (icon === 'remove') b.classList.add('danger');
+  selBar.appendChild(b);
+  return b;
+});
+function updateSelBar() {
+  const list = selPicked();
+  const otherBar = (textToolbar && !textToolbar.el.hidden) || (lineBar && !lineBar.el.hidden);
+  if (!list.length || !isBoard() || IS_VIEW || otherBar || document.body.classList.contains('tile-dragging') || cropping) { selBar.hidden = true; return; }
+  SEL_ACTIONS.forEach(([, , , ok], i) => { selButtons[i].hidden = !ok(list); });
+  const rects = list.map((t) => t.el.getBoundingClientRect());
+  const left = Math.min(...rects.map((r) => r.left)), right = Math.max(...rects.map((r) => r.right));
+  const top = Math.min(...rects.map((r) => r.top)), bottom = Math.max(...rects.map((r) => r.bottom));
+  selBar.hidden = false;
+  const r = selBar.getBoundingClientRect();
+  let y = top - r.height - 10 - (rotHandle.hidden ? 0 : 34);
+  const g = grid.getBoundingClientRect();
+  if (y < g.top + 56) y = bottom + 10; // (under the top panels: below the selection instead)
+  const x = (left + right) / 2 - r.width / 2;
+  selBar.style.left = Math.max(8, Math.min(x, document.documentElement.clientWidth - r.width - 8)) + 'px';
+  selBar.style.top = Math.max(8, Math.min(y, document.documentElement.clientHeight - r.height - 8)) + 'px';
+  try { clearSelBarOfSyncBars(); } catch {} // (above a synced group's play bar, not over it)
+}
+
+// ---------- bookmark blocks (Mark, 2026-11-16) ----------
+// A list of links on the board, laid out like a small spreadsheet: Name, Site, Notes, Added. It is a
+// text tile with tile.links = { title, rows } (lib/linktable.js has the rules). Links go in by
+// pasting them into its box at the bottom, Ctrl+V while it is selected, dropping a link from a
+// browser on it, or pasting / dropping a link on empty board (a new block). Each new link's page
+// title, site name and icon are looked up (main.js 'link-info'); a name you typed yourself is never
+// replaced. Click a name to open it in the browser; double-click a cell to type in it (Tab goes to
+// the next one, Enter keeps it, Esc puts it back); click a column's heading to sort by it (again:
+// the other way); right-click a row for the rest. The tile's text is the list as lines: what an
+// older Ozy shows in its place, and what Find (Ctrl+F) searches.
+const linkInfoCache = new Map(); // url → what its lookup found (an undo can bring back a row without it)
+const linkLoading = new Set();   // urls being looked up now
+let linkEdit = null;             // the cell being typed in: { tile, id, field, ed }
+const newLinkRowId = () => 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const isLinksTile = (t) => !!(t && t.links && tiles.includes(t));
+
+function setLinks(tile, links, { render = true } = {}) {
+  tile.links = LinkTable.withInfo(LinkTable.normalize(links), linkInfoCache);
+  tile.text = LinkTable.summary(tile.links);
+  tile.el.classList.add('is-links');
+  addEdgeHandles(tile);
+  renderLinkTable(tile);
+  if (render && tile.el.isConnected && isBoard()) renderTextTile(tile);
+}
+// one change to a list, as one undo step; fn gets a copy and returns the new list (or null: no change)
+function changeLinks(tile, label, fn) {
+  if (IS_VIEW || tile.locked) return false;
+  const before = LinkTable.clone(tile.links);
+  const next = fn(LinkTable.clone(tile.links));
+  if (!next) return false;
+  setLinks(tile, next);
+  const after = LinkTable.clone(tile.links);
+  if (JSON.stringify(before) !== JSON.stringify(after)) undoStack.push({ kind: 'links', label, tile, before, after });
+  return true;
+}
+const linkRow = (tile, id) => tile.links.rows.find((r) => r.id === id) || null;
+// the rows in the order shown: the list's own, or S / A / B first when it keeps top tiers at the top
+const shownLinkRows = (tile) => (tile.links.topFirst ? LinkTable.sortRows(tile.links.rows, 'tier') : tile.links.rows);
+function setLinkTier(tile, id, tier) {
+  const t = LinkTable.okTier(tier);
+  changeLinks(tile, t ? `tier ${t}` : 'clear tier', (l) => { const r = l.rows.find((x) => x.id === id); if (!r || r.tier === t) return null; r.tier = t; return l; });
+}
+
+function linksLook() {
+  const z = board.zoom, dark = layout.background !== 'light';
+  return TextTile.normalize({
+    font: 'Segoe UI', size: 14 / z, color: dark ? '#e8e8ea' : '#1d1d26', align: 'left', valign: 'top',
+    bubble: true, fill: dark ? '#232328' : '#ffffff', outline: dark ? '#ffffff1f' : '#00000017', outlineWidth: 1 / z,
+    box: 'auto', radius: 10 / z, padding: 14 / z, shadow: true,
+  });
+}
+function addLinksBlock(at = placePoint(), urls = []) {
+  if (!isBoard() || IS_VIEW) { setStatus('Bookmark blocks live on the board – switch to Board mode'); return null; }
+  const z = board.zoom, w = 680 / z;
+  const tile = addTextTile({ text: '', style: linksLook(), board: { x: at.x - w / 2, y: at.y - 30 / z, w, h: 120 / z }, links: { title: LinkTable.DEFAULT_TITLE, rows: [] } });
+  if (!tile) return null;
+  bringToFront(tile);
+  selectOnly(tile);
+  if (urls.length) {
+    const res = LinkTable.addUrls(tile.links, urls, Date.now(), newLinkRowId);
+    setLinks(tile, res.links);
+    for (const r of tile.links.rows) lookUpLink(r.url);
+    setStatus(`New bookmark block with ${res.added.length} link${res.added.length === 1 ? '' : 's'}`, 3000);
+  } else {
+    const input = tile.el.querySelector('.lt-add input');
+    if (input) setTimeout(() => input.focus(), 0);
+    setStatus('Paste links into the box at the bottom of the list', 4000);
+  }
+  recordAdd([tile], 'add bookmarks');
+  updateChrome();
+  return tile;
+}
+// new links at the end of a list; each is looked up
+function addLinks(tile, urls) {
+  if (IS_VIEW) return 0;
+  if (tile.locked) { setStatus('This list is locked (Ctrl+Shift+L unlocks it)', 4000); return 0; }
+  let res = null;
+  changeLinks(tile, urls.length === 1 ? 'add link' : `add ${urls.length} links`, (l) => {
+    res = LinkTable.addUrls(l, urls, Date.now(), newLinkRowId);
+    return res.added.length ? res.links : null;
+  });
+  if (!res || !res.added.length) {
+    setStatus(res && res.dupes ? (res.dupes === 1 ? 'That link is already in this list' : 'Those links are already in this list') : 'No web links in that (they start with http://, https:// or www.)', 4000);
+    return 0;
+  }
+  tile.linkSort = null; // (new rows at the end: the list is no longer in a sorted order)
+  for (const id of res.added) { const r = linkRow(tile, id); if (r) lookUpLink(r.url); }
+  const n = res.added.length;
+  setStatus(`Added ${n} link${n === 1 ? '' : 's'}${res.dupes ? ` (${res.dupes} already listed)` : ''}`, 3000);
+  return n;
+}
+// a link's page title, site name and icon; every list showing it is filled in when it comes back
+async function lookUpLink(url) {
+  if (linkInfoCache.has(url) || linkLoading.has(url) || !window.api.linkInfo) { refreshLinkTiles(url); return; }
+  linkLoading.add(url);
+  refreshLinkTiles(url);
+  let info = null;
+  try { info = await window.api.linkInfo(url); } catch {}
+  linkLoading.delete(url);
+  if (info && info.ok) linkInfoCache.set(url, info);
+  refreshLinkTiles(url);
+}
+function refreshLinkTiles(url) {
+  for (const t of tiles) {
+    if (!t.links || !t.links.rows.some((r) => r.url === url)) continue;
+    if (linkEdit && linkEdit.tile === t) { t.linksStale = true; continue; } // (not under the typing: when it ends)
+    setLinks(t, t.links);
+  }
+}
+function openLinkRow(r) {
+  if (!window.api.openLink) return;
+  Promise.resolve(window.api.openLink(r.url)).then((ok) => setStatus(ok ? `Opening ${r.site || LinkTable.hostOf(r.url)} in your browser` : 'Could not open that link', 2500));
+}
+
+// ---- drawing the list ----
+function renderLinkTable(tile) {
+  if (linkEdit && linkEdit.tile === tile) { tile.linksStale = true; return; }
+  tile.linksStale = false;
+  const bubble = tile.el.querySelector('.text-bubble');
+  let root = bubble.querySelector(':scope > .lt');
+  if (!root) { root = document.createElement('div'); root.className = 'lt'; bubble.appendChild(root); wireLinkTable(tile, root); wireLinkCols(tile, root); }
+  const s = tile.style, l = tile.links, now = Date.now();
+  const canEdit = !IS_VIEW && !tile.locked;
+  root.style.fontSize = s.size + 'px';
+  root.style.fontFamily = s.font;
+  root.style.color = s.color;
+  // on a dark list the site icons get a light backing (GitHub's black cat would vanish otherwise)
+  { const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(s.fill || ''); root.classList.toggle('lt-dark', !!m && (0.299 * parseInt(m[1], 16) + 0.587 * parseInt(m[2], 16) + 0.114 * parseInt(m[3], 16)) < 128); }
+  const mk = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const head = mk('div', 'lt-head');
+  const title = mk('div', 'lt-title', l.title || LinkTable.DEFAULT_TITLE);
+  title.title = canEdit ? 'Double-click to rename the list' : '';
+  const tc = LinkTable.tierCounts(l.rows);
+  const tierNote = LinkTable.TIERS.filter((k) => tc[k]).map((k) => ` · ${tc[k]} ${k}`).join('');
+  head.append(title, mk('div', 'lt-count', `${l.rows.length} link${l.rows.length === 1 ? '' : 's'}${tierNote}`));
+  const table = mk('table', 'lt-table');
+  const cg = mk('colgroup');
+  for (const c of ['ic', 'tier', 'name', 'site', 'note', 'added', 'x']) { const col = mk('col', 'lt-c-' + c); if (l.cols && l.cols[c]) col.style.width = l.cols[c] + 'em'; cg.appendChild(col); }
+  const thead = mk('thead'), hr = mk('tr');
+  hr.appendChild(mk('th'));
+  for (const [key, label] of LinkTable.COLUMNS) {
+    const th = mk('th');
+    const b = mk('button', 'lt-sort', label);
+    b.dataset.sort = key;
+    b.title = key === 'tier' ? 'Sort by tier: S first (click again: the other way)' : `Sort by ${label.toLowerCase()} (click again: the other way)`;
+    if (tile.linkSort && tile.linkSort.key === key) b.dataset.dir = tile.linkSort.desc ? 'desc' : 'asc';
+    th.appendChild(b);
+    // a divider on its right edge (Notes has none: it takes what is left)
+    if (canEdit && key !== 'note') { const g = mk('span', 'lt-grip'); g.dataset.col = key; g.title = "Drag to change this column's width · double-click: fit it to what is in it"; th.appendChild(g); }
+    hr.appendChild(th);
+  }
+  hr.appendChild(mk('th'));
+  thead.appendChild(hr);
+  const tbody = mk('tbody');
+  for (const r of shownLinkRows(tile)) {
+    const tr = mk('tr', r.tier ? 'tier-' + r.tier : 'tier-none'); tr.dataset.id = r.id;
+    const ic = mk('td', 'lt-ic');
+    if (linkLoading.has(r.url)) ic.appendChild(mk('span', 'lt-spin'));
+    else if (r.icon) { const img = mk('img'); img.src = r.icon; img.alt = ''; img.draggable = false; img.addEventListener('error', () => img.replaceWith(iconSvg('link'))); ic.appendChild(img); }
+    else ic.appendChild(iconSvg('link'));
+    // the tier badge (2026-11-17): S, A, B or none; a click goes on to the next
+    const tierTd = mk('td', 'lt-tier-td');
+    const tb = mk('button', 'lt-tier', r.tier || '+');
+    tb.title = canEdit ? 'Tier: click for S (the best), A, B or none. Keys 1 2 3, 0 to clear, over the row' : (r.tier ? `Tier ${r.tier}` : '');
+    if (!canEdit) tb.disabled = true;
+    tierTd.appendChild(tb);
+    const name = mk('td', 'lt-name'); name.dataset.k = 'name';
+    const open = mk('button', 'lt-open', r.name); open.title = `${r.url}\nClick: open in your browser. Double-click beside it to rename`;
+    name.appendChild(open);
+    const site = mk('td', 'lt-site', r.site); site.dataset.k = 'site'; site.title = r.url;
+    const note = mk('td', 'lt-note', r.note); note.dataset.k = 'note'; note.title = r.note;
+    const added = mk('td', 'lt-added', LinkTable.fmtDate(r.added, now)); added.title = r.added ? new Date(r.added).toLocaleString() : '';
+    const x = mk('td', 'lt-x');
+    if (canEdit) { const del = mk('button', 'lt-del'); del.title = 'Remove this link'; del.appendChild(iconSvg('close')); x.appendChild(del); }
+    tr.append(ic, tierTd, name, site, note, added, x);
+    tbody.appendChild(tr);
+  }
+  if (!l.rows.length) {
+    const tr = mk('tr', 'lt-empty-row'), td = mk('td', 'lt-empty', 'No links yet. Paste one (or a whole list) below: each gets its page name and icon by itself.');
+    td.colSpan = 7; tr.appendChild(td); tbody.appendChild(tr);
+  }
+  table.append(cg, thead, tbody);
+  const parts = [head, table];
+  if (canEdit) {
+    const add = mk('div', 'lt-add');
+    const input = mk('input');
+    input.type = 'text';
+    input.placeholder = 'Paste a link here (or several), or type one and press Enter';
+    input.spellcheck = false;
+    add.appendChild(input);
+    parts.push(add);
+  }
+  // keep the box's focus and typing when a lookup redraws the list under it
+  const old = root.querySelector('.lt-add input');
+  const keep = old && document.activeElement === old ? { v: old.value, a: old.selectionStart, b: old.selectionEnd } : null;
+  root.replaceChildren(...parts);
+  if (keep) { const ni = root.querySelector('.lt-add input'); if (ni) { ni.value = keep.v; ni.focus(); try { ni.setSelectionRange(keep.a, keep.b); } catch {} } }
+}
+// once per list: its clicks, typing, pastes and drops (delegated: the rows are redrawn often)
+// ---------- a bookmark block's column widths, dragged like Explorer's (2026-11-17) ----------
+// Each heading but Notes has a divider on its right: drag it to change that column, double-click
+// it to fit the column to what is in it. Notes takes what is left; when it would get too thin the
+// block widens instead, so nothing is ever cut off. Widths are in em of the block's text, so they
+// scale with the block. One undo step per drag.
+const LT_COLS = LinkTable.COL_KEYS;
+// the widths it has now, in em: the saved ones, or measured off the default proportions
+function linkColsNow(tile) {
+  if (tile.links.cols) return { ...tile.links.cols };
+  const size = tile.style.size, out = {};
+  // (layout px are board units, and the text is size px there: px / size = em)
+  for (const k of LT_COLS) { const c = tile.el.querySelector('.lt-table th:nth-child(' + (2 + LinkTable.COLUMNS.findIndex(([x]) => x === k)) + ')'); out[k] = c ? Math.max(LinkTable.COL_MIN, c.offsetWidth / size) : 6; }
+  return LinkTable.normCols(out);
+}
+function applyLinkCols(tile, cols) {
+  for (const k of LT_COLS) { const c = tile.el.querySelector('.lt-c-' + k); if (c) c.style.width = cols ? cols[k] + 'em' : ''; }
+}
+// the block's width for these columns: at least what they need (never narrower than it was, b0w)
+function linkWidthFor(tile, cols, b0w) {
+  const s = tile.style;
+  const need = LinkTable.minTableEm(cols) * s.size + 2 * (s.padding + s.outlineWidth);
+  return Math.max(b0w, need);
+}
+// one undo step: the list and the block's rect together
+function pushLinkColsUndo(tile, label, before, b0) {
+  const after = LinkTable.clone(tile.links);
+  const b1 = { ...tile.board };
+  if (JSON.stringify(before) === JSON.stringify(after) && b0.w === b1.w) return;
+  undoStack.push({ kind: 'links', label, tile, before, after, boards: { before: b0, after: b1 } });
+}
+function wireLinkCols(tile, root) {
+  root.addEventListener('pointerdown', (e) => {
+    const grip = e.target.closest && e.target.closest('.lt-grip');
+    if (!grip || e.button !== 0) return;
+    e.preventDefault(); e.stopPropagation();
+    if (IS_VIEW || tile.locked || !isBoard()) return;
+    const key = grip.dataset.col;
+    // a second press on the same divider soon after: fit the column (the header is redrawn after a
+    // drag, so the browser would not see the two clicks as one double-click)
+    const now = performance.now();
+    if (tile.ltGripLast && tile.ltGripLast.key === key && now - tile.ltGripLast.t < 450) { tile.ltGripLast = null; fitLinkCol(tile, key); return; }
+    tile.ltGripLast = { key, t: now };
+    const cols0 = linkColsNow(tile);
+    if (!cols0) return;
+    const before = LinkTable.clone(tile.links), b0 = { ...tile.board };
+    const emPx = tile.style.size * board.zoom, x0 = e.clientX;
+    let cols = cols0, moved = false;
+    try { grip.setPointerCapture(e.pointerId); } catch {}
+    document.body.classList.add('lt-col-drag');
+    const move = (ev) => {
+      if (!moved && Math.abs(ev.clientX - x0) < 2) return;
+      moved = true;
+      cols = { ...cols0, [key]: clamp(cols0[key] + (ev.clientX - x0) / emPx, LinkTable.COL_MIN, 200) };
+      applyLinkCols(tile, cols);
+      const w = linkWidthFor(tile, cols, b0.w);
+      if (w !== tile.board.w) { tile.board.w = w; layoutTile(tile); }
+    };
+    const up = () => {
+      grip.removeEventListener('pointermove', move);
+      grip.removeEventListener('pointerup', up);
+      grip.removeEventListener('lostpointercapture', up);
+      document.body.classList.remove('lt-col-drag');
+      if (!moved) return; // a click: nothing to redraw (and the next click may make it a double-click)
+      tile.ltGripLast = null;
+      const c = LinkTable.normCols(cols);
+      if (c) tile.links.cols = c;
+      setLinks(tile, tile.links);
+      pushLinkColsUndo(tile, 'column width', before, b0);
+    };
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', up);
+    grip.addEventListener('lostpointercapture', up);
+  });
+  root.addEventListener('dblclick', (e) => { if (e.target.closest && e.target.closest('.lt-grip')) { e.preventDefault(); e.stopPropagation(); } }, true); // (fitting is done on the second press)
+}
+// a column as wide as its widest cell (heading included), like double-clicking Explorer's divider
+function fitLinkCol(tile, key) {
+  const cols = linkColsNow(tile);
+  if (!cols) return;
+  const i = 1 + LinkTable.COLUMNS.findIndex(([k]) => k === key); // (the icon column is first)
+  const table = tile.el.querySelector('.lt-table');
+  if (!table || i < 1) return;
+  let px = 0;
+  for (const tr of table.querySelectorAll('tr')) {
+    const cell = tr.children[i];
+    if (!cell || tr.children.length < 3) continue;
+    const inner = cell.querySelector('.lt-sort, .lt-open') || cell;
+    // the content's natural width plus the cell's padding, in layout px (= board units)
+    const pad = inner === cell ? 0 : cell.clientWidth - inner.clientWidth;
+    px = Math.max(px, inner.scrollWidth + Math.max(0, pad) + 2);
+  }
+  if (!px) return;
+  const before = LinkTable.clone(tile.links), b0 = { ...tile.board };
+  cols[key] = Math.min(200, Math.max(LinkTable.COL_MIN, px / tile.style.size));
+  const c = LinkTable.normCols(cols);
+  if (!c) return;
+  tile.links.cols = c;
+  tile.board.w = linkWidthFor(tile, c, b0.w);
+  layoutTile(tile);
+  setLinks(tile, tile.links);
+  pushLinkColsUndo(tile, 'fit column', before, b0);
+  setStatus(`${LinkTable.COLUMNS.find(([k]) => k === key)[1]} column fits what is in it`, 2500);
+}
+function resetLinkCols(tile) {
+  if (!tile.links.cols) return;
+  const before = LinkTable.clone(tile.links), b0 = { ...tile.board };
+  delete tile.links.cols;
+  setLinks(tile, tile.links);
+  pushLinkColsUndo(tile, 'reset column widths', before, b0);
+}
+// left and right edges: the width only, the text keeping its size (a bookmark block or to-do list)
+function addEdgeHandles(tile) {
+  if (tile.el.querySelector(':scope > .handle.ml')) return;
+  for (const side of ['l', 'r']) {
+    const h = document.createElement('div');
+    h.className = 'handle edge m' + side;
+    h.dataset.corner = side;
+    h.title = 'Drag to change the width (the text keeps its size)';
+    h.addEventListener('pointerdown', (e) => startResize(tile, side, e));
+    h.addEventListener('dblclick', (e) => e.stopPropagation());
+    tile.el.appendChild(h);
+  }
+}
+// the narrowest a block may be pulled: a bookmark block keeps its columns whole
+function blockMinW(tile) {
+  const s = tile.style;
+  if (!tile.links) return TEXT_MIN_W;
+  const em = tile.links.cols ? LinkTable.minTableEm(tile.links.cols) : 24;
+  return em * s.size + 2 * (s.padding + s.outlineWidth);
+}
+function wireLinkTable(tile, root) {
+  // where a press began: a drag of the block takes the pointer, so its double-click comes to the tile
+  root.addEventListener('pointerdown', (e) => { tile.ltDown = e.target; }, true);
+  root.addEventListener('click', (e) => {
+    const t = e.target instanceof Element ? e.target : null;
+    if (!t) return;
+    const open = t.closest('.lt-open');
+    if (open) { e.stopPropagation(); const r = linkRow(tile, open.closest('tr').dataset.id); if (r) openLinkRow(r); return; }
+    const del = t.closest('.lt-del');
+    if (del) {
+      e.stopPropagation();
+      const id = del.closest('tr').dataset.id;
+      if (changeLinks(tile, 'remove link', (l) => { l.rows = l.rows.filter((x) => x.id !== id); return l; })) setStatus('Removed – Ctrl+Z puts it back', 3000);
+      return;
+    }
+    const tierB = t.closest('.lt-tier');
+    if (tierB) { e.stopPropagation(); const r = linkRow(tile, tierB.closest('tr').dataset.id); if (r) setLinkTier(tile, r.id, LinkTable.nextTier(r.tier)); return; }
+    const sort = t.closest('.lt-sort');
+    if (sort) {
+      e.stopPropagation();
+      const key = sort.dataset.sort;
+      const desc = !!(tile.linkSort && tile.linkSort.key === key && !tile.linkSort.desc);
+      if (IS_VIEW || tile.locked) return;
+      tile.linkSort = { key, desc };
+      if (!changeLinks(tile, 'sort links', (l) => { l.rows = LinkTable.sortRows(l.rows, key, desc); return l; })) renderLinkTable(tile);
+    }
+  });
+  // the row under the mouse, for the 1 2 3 / 0 tier keys
+  root.addEventListener('pointerover', (e) => { const tr = e.target instanceof Element && e.target.closest('tr[data-id]'); tile.ltHoverRow = tr ? tr.dataset.id : null; });
+  root.addEventListener('pointerleave', () => { tile.ltHoverRow = null; });
+  root.addEventListener('keydown', (e) => {
+    const input = e.target instanceof Element && e.target.closest('.lt-add input');
+    if (!input) return;
+    e.stopPropagation(); // typing, not shortcuts
+    if (e.key === 'Escape') { input.value = ''; input.blur(); return; }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const v = input.value.trim();
+    if (!v) return;
+    const urls = LinkTable.findUrls(v);
+    if (!urls.length) { const u = LinkTable.cleanUrl(v); if (u) urls.push(u); }
+    if (!urls.length) { setStatus('That is not a web link (it needs http://, https:// or www.)', 4000); return; }
+    input.value = '';
+    addLinks(tile, urls);
+  });
+  root.addEventListener('paste', (e) => {
+    const input = e.target instanceof Element && e.target.closest('.lt-add input');
+    if (!input) return;
+    const urls = LinkTable.findUrls(e.clipboardData ? e.clipboardData.getData('text/plain') : '');
+    if (!urls.length) return; // (not a link: it goes into the box as typing)
+    e.preventDefault(); e.stopPropagation();
+    addLinks(tile, urls);
+  });
+}
+
+// ---- typing in a cell (and in the list's title) ----
+const LINK_FIELDS = ['name', 'site', 'note'];
+function editLinkCell(tile, id, field) {
+  if (IS_VIEW || tile.locked || !isBoard() || !isLinksTile(tile)) return;
+  finishLinkEdit(true);
+  let host, start;
+  if (field === 'title') {
+    host = tile.el.querySelector('.lt-title');
+    start = tile.links.title;
+  } else {
+    const r = linkRow(tile, id);
+    const tr = r && [...tile.el.querySelectorAll('tr[data-id]')].find((x) => x.dataset.id === id);
+    host = tr && tr.querySelector(`td[data-k="${field === 'url' ? 'site' : field}"]`);
+    if (!host) return;
+    start = r[field] || '';
+  }
+  if (!host) return;
+  const ed = document.createElement('div');
+  ed.className = 'lt-ed';
+  ed.contentEditable = 'plaintext-only';
+  ed.textContent = start;
+  host.replaceChildren(ed);
+  host.classList.add('lt-editing');
+  linkEdit = { tile, id, field, ed };
+  ed.focus();
+  try { const rg = document.createRange(); rg.selectNodeContents(ed); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(rg); } catch {}
+  ed.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); finishLinkEdit(false); }
+    else if (e.key === 'Enter' && !(field === 'note' && e.shiftKey)) { e.preventDefault(); finishLinkEdit(true); }
+    else if (e.key === 'Tab' && field !== 'title') {
+      e.preventDefault();
+      const next = nextLinkCell(tile, id, field === 'url' ? 'site' : field, e.shiftKey);
+      finishLinkEdit(true);
+      if (next) editLinkCell(tile, next.id, next.field);
+    }
+  });
+  ed.addEventListener('blur', () => { if (linkEdit && linkEdit.ed === ed) finishLinkEdit(true); });
+}
+function nextLinkCell(tile, id, field, back) {
+  const rows = shownLinkRows(tile);
+  let i = rows.findIndex((r) => r.id === id), f = LINK_FIELDS.indexOf(field);
+  if (i < 0 || f < 0) return null;
+  f += back ? -1 : 1;
+  if (f >= LINK_FIELDS.length) { f = 0; i++; }
+  if (f < 0) { f = LINK_FIELDS.length - 1; i--; }
+  return rows[i] ? { id: rows[i].id, field: LINK_FIELDS[f] } : null;
+}
+function finishLinkEdit(keep) {
+  const le = linkEdit;
+  if (!le) return;
+  linkEdit = null;
+  const { tile, id, field, ed } = le;
+  const raw = ed.textContent || '';
+  if (!tiles.includes(tile)) return;
+  let bad = false, newUrl = null;
+  const changed = keep && changeLinks(tile, field === 'url' ? 'edit link' : field === 'title' ? 'rename list' : `edit ${field === 'note' ? 'note' : field}`, (l) => {
+    if (field === 'title') { const v = raw.replace(/\s+/g, ' ').trim(); if (v === l.title) return null; l.title = v || LinkTable.DEFAULT_TITLE; return l; }
+    const r = l.rows.find((x) => x.id === id);
+    if (!r) return null;
+    if (field === 'url') {
+      const u = LinkTable.cleanUrl(raw.trim());
+      if (!u) { bad = true; return null; }
+      if (u === r.url) return null;
+      r.url = u; r.icon = ''; r.site = LinkTable.hostOf(u);
+      if (r.auto) r.name = LinkTable.guessName(u);
+      newUrl = u;
+      return l;
+    }
+    if (field === 'name') {
+      const v = raw.replace(/\s+/g, ' ').trim();
+      if (!v) { r.auto = true; r.name = ''; return l; } // emptied: the page's own name again
+      if (v === r.name) return null;
+      r.name = v; r.auto = false;
+      return l;
+    }
+    const v = field === 'note' ? raw.trim() : raw.replace(/\s+/g, ' ').trim();
+    if (v === (r[field] || '')) return null;
+    r[field] = v || (field === 'site' ? LinkTable.hostOf(r.url) : '');
+    return l;
+  });
+  if (!changed) { renderLinkTable(tile); if (isBoard()) renderTextTile(tile); }
+  if (bad) setStatus('That is not a web link (it needs http:// or https://)', 4000);
+  if (newUrl) lookUpLink(newUrl);
+  else if (changed && field === 'name') { const r = linkRow(tile, id); if (r && r.auto) lookUpLink(r.url); }
+}
+// a double-click on the list: type in the cell (or the title) it landed on
+function linksDblClick(tile, e) {
+  const t = tile.ltDown instanceof Element && tile.el.contains(tile.ltDown) ? tile.ltDown : e.target;
+  if (!(t instanceof Element)) return;
+  if (t.closest('.lt-title')) { editLinkCell(tile, null, 'title'); return; }
+  const cell = t.closest('td[data-k]');
+  const tr = cell && cell.closest('tr[data-id]');
+  if (tr) { editLinkCell(tile, tr.dataset.id, cell.dataset.k); return; }
+  if (t.closest('.lt-add, .lt-empty')) { const i = tile.el.querySelector('.lt-add input'); if (i) i.focus(); }
+}
+// ---------- scaling a bookmark block or to-do list as a whole (2026-11-17) ----------
+// Their look is all in board units (made at the zoom they were added at), so one added while far
+// out is huge next to everything else. Scaling multiplies the width and every size in the style;
+// the height follows from the re-wrapped content.
+const isScalableBlock = (t) => !!(t && (t.links || t.todo) && t.style);
+const blockName = (t) => (t.links ? 'bookmark block' : 'to-do list');
+const blockBaseSize = (t) => (t.links ? 14 : 15); // its text size on screen when added (linksLook / todoLook)
+function rerenderBlock(tile) {
+  if (tile.links) renderLinkTable(tile);
+  else if (tile.todo) renderTodo(tile);
+  if (isBoard()) renderTextTile(tile); else applyTextStyleToEl(tile);
+}
+// k from the style and rect it started at; the corner opposite the handle stays put
+function scaleBlockTo(tile, st0, b0, k, corner = 'br') {
+  const lo = Math.max(0.5 / st0.size, TEXT_MIN_W / b0.w);
+  const hi = Math.min(4000 / st0.size, 2000 / Math.max(st0.padding, 1e-6), 200 / Math.max(st0.outlineWidth, 1e-6), 400000 / b0.w);
+  k = clamp(Number.isFinite(k) ? k : 1, lo, Math.max(lo, hi));
+  tile.style = { ...st0, size: st0.size * k, padding: st0.padding * k, radius: st0.radius * k, outlineWidth: st0.outlineWidth * k };
+  const b = tile.board;
+  b.w = b0.w * k;
+  b.x = corner.includes('l') ? b0.x + b0.w - b.w : b0.x;
+  rerenderBlock(tile);
+  b.y = corner.includes('t') ? b0.y + b0.h - b.h : b0.y;
+  layoutTile(tile);
+  return k;
+}
+// from a menu: one undo step
+function scaleBlockBy(tile, k, how) {
+  if (IS_VIEW || tile.locked || !isScalableBlock(tile) || !tile.board) return;
+  const entry = recordResize(tiles.filter((t) => t.board));
+  const st0 = { ...tile.style };
+  scaleBlockTo(tile, st0, { ...tile.board }, k);
+  if (board.linked) resolveOverlaps(new Set([tile]));
+  entry.styles = [{ tile, before: st0, after: { ...tile.style } }];
+  entry.label = 'scale ' + blockName(tile);
+  finishRects(entry);
+  setStatus(`${how}: text now ${Math.round(tile.style.size * board.zoom)} px on screen at this zoom`, 3500);
+}
+function blockSizeMenuItems(tile) {
+  const can = !IS_VIEW && !tile.locked && isBoard();
+  const norm = (blockBaseSize(tile) / board.zoom) / tile.style.size;
+  return [
+    ['Smaller (half size)', () => scaleBlockBy(tile, 0.5, 'Half size'), !can],
+    ['Larger (double size)', () => scaleBlockBy(tile, 2, 'Double size'), !can],
+    ['Normal size at this zoom', () => scaleBlockBy(tile, norm, 'Normal size at this zoom'), !can || Math.abs(norm - 1) < 0.02],
+  ];
+}
+function linksMenuItems(tile, e) {
+  const t = e.target instanceof Element ? e.target : null;
+  const tr = t && t.closest('tr[data-id]');
+  const r = tr && linkRow(tile, tr.dataset.id);
+  const can = !IS_VIEW && !tile.locked;
+  const items = [];
+  if (r) {
+    const i = tile.links.rows.indexOf(r);
+    items.push(
+      ['Open in browser', () => openLinkRow(r)],
+      ['Copy link', () => { window.api.copyText(r.url); setStatus('Copied ' + r.url, 3000); }],
+      ['Rename', () => editLinkCell(tile, r.id, 'name'), !can],
+      ['Edit link', () => editLinkCell(tile, r.id, 'url'), !can],
+      ['Edit note', () => editLinkCell(tile, r.id, 'note'), !can],
+      ['Get its name from the page again', () => {
+        linkInfoCache.delete(r.url);
+        changeLinks(tile, 'name from page', (l) => { const x = l.rows.find((y) => y.id === r.id); if (!x) return null; x.auto = true; x.name = ''; x.icon = ''; return l; });
+        lookUpLink(r.url);
+      }, !can],
+      ...[['S', 'Tier S (the best)'], ['A', 'Tier A'], ['B', 'Tier B'], ['', 'No tier']].filter(([k]) => k !== r.tier).map(([k, label]) => [label, () => setLinkTier(tile, r.id, k), !can]),
+      ['Move up', () => changeLinks(tile, 'move link', (l) => { l.rows = LinkTable.moveRow(l.rows, r.id, -1); return l; }), !can || i <= 0],
+      ['Move down', () => changeLinks(tile, 'move link', (l) => { l.rows = LinkTable.moveRow(l.rows, r.id, 1); return l; }), !can || i >= tile.links.rows.length - 1],
+      ['Remove link', () => changeLinks(tile, 'remove link', (l) => { l.rows = l.rows.filter((x) => x.id !== r.id); return l; }), !can],
+    );
+  }
+  items.push(
+    ['Rename the list', () => editLinkCell(tile, null, 'title'), !can],
+    ['Reset column widths', () => resetLinkCols(tile), !can || !tile.links.cols],
+    [tile.links.topFirst ? '✓ Top tiers at the top' : 'Keep top tiers at the top', () => changeLinks(tile, 'top tiers first', (l) => { l.topFirst = !l.topFirst; if (!l.topFirst) delete l.topFirst; return l; }), !can],
+    ['Copy all links', () => { window.api.copyText(tile.links.rows.map((x) => x.url).join('\n')); setStatus(`Copied ${tile.links.rows.length} links`, 3000); }, !tile.links.rows.length],
+    ...blockSizeMenuItems(tile),
+    ...stackMenuItems(tile), lockMenuItem(tile), ['Remove the block', () => removeTile(tile)],
+  );
+  return items;
+}
+// the links in what was pasted or dropped (a browser drag carries text/uri-list)
+function linksInTransfer(dt) {
+  if (!dt) return [];
+  const uri = dt.getData('text/uri-list') || '';
+  const list = uri.split(/\r?\n/).filter((l) => l && !l.startsWith('#')).join('\n');
+  return LinkTable.findUrls(list || dt.getData('text/plain') || '');
+}
+const linksTileAt = (x, y) => {
+  for (const el of document.elementsFromPoint(x, y)) { const te = el.closest && el.closest('.text-tile.is-links'); if (te) return tiles.find((t) => t.el === te) || null; }
+  return null;
+};
+document.getElementById('add-links').addEventListener('click', () => addLinksBlock(viewCentreWorld()));
+// 1 2 3 give the row under the mouse tier S A B, 0 clears it (ahead of the board's own keys)
+window.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey || !/^[0-3]$/.test(e.key)) return;
+  const tag = (e.target && e.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target && e.target.isContentEditable)) return;
+  const t = hoveredTile;
+  if (!t || !t.links || !t.ltHoverRow || !linkRow(t, t.ltHoverRow) || IS_VIEW || t.locked) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  setLinkTier(t, t.ltHoverRow, e.key === '0' ? '' : LinkTable.TIERS[Number(e.key) - 1]);
+}, true);
+
+// ---------- to-do blocks (Mark, 2026-11-17) ----------
+// A goal at the top and the tasks that get it done under it, each with as many sub-tasks as it
+// needs (lib/todolist.js has the rules). It is a text tile with tile.todo = { title, color, items }.
+// Click a task's words to type; Enter adds the next task (from the caret on, the words go with it),
+// Tab makes it a sub-task of the one above, Shift+Tab takes it back out, Backspace on an empty one
+// removes it, ↑ ↓ go between tasks, Alt+↑ ↓ move it, Ctrl+Enter ticks it. Pasting several lines
+// makes several tasks (their indents become sub-tasks). The box ticks a task; a goal is ticked when
+// all its sub-tasks are, and ticking it ticks them all. Each task can have a colour, and so can the
+// list (its band, its bar and its boxes). ▸ folds a task's sub-tasks away. The tile's text is the list
+// as lines (☐ / ☑): what an older Ozy shows in its place, and what Find (Ctrl+F) searches.
+let todoEdit = null; // the words being typed: { tile, id ('title' or a task's id), before }
+const TODO_DEFAULT_COLOR = '#4f8cff';
+
+function setTodo(tile, todo, { render = true } = {}) {
+  tile.todo = TodoList.normalize(todo);
+  tile.text = TodoList.summary(tile.todo);
+  tile.el.classList.add('is-todo');
+  addEdgeHandles(tile);
+  renderTodo(tile);
+  if (render && tile.el.isConnected && isBoard()) renderTextTile(tile);
+}
+// one change as one undo step; fn changes the copy it gets and returns what it made (falsy: nothing)
+function changeTodo(tile, label, fn) {
+  if (IS_VIEW || tile.locked || !tile.todo) return null;
+  commitTodoText(); // what was being typed is its own step first
+  const before = TodoList.clone(tile.todo);
+  const m = TodoList.clone(tile.todo);
+  const res = fn(m);
+  if (!res) return null;
+  setTodo(tile, m);
+  if (JSON.stringify(before) !== JSON.stringify(tile.todo)) undoStack.push({ kind: 'todo', label, tile, before, after: TodoList.clone(tile.todo) });
+  return res;
+}
+function commitTodoText() {
+  const e = todoEdit;
+  if (!e) return;
+  todoEdit = null;
+  if (!tiles.includes(e.tile) || !e.tile.todo) return;
+  e.tile.todo = TodoList.normalize(e.tile.todo); // (trims the title)
+  e.tile.text = TodoList.summary(e.tile.todo);
+  if (JSON.stringify(e.before) !== JSON.stringify(e.tile.todo)) undoStack.push({ kind: 'todo', label: e.id === 'title' ? 'rename goal' : 'edit task', tile: e.tile, before: e.before, after: TodoList.clone(e.tile.todo) });
+}
+function todoLook() {
+  const z = board.zoom, dark = layout.background !== 'light';
+  return TextTile.normalize({
+    font: 'Segoe UI', size: 15 / z, color: dark ? '#e8e8ea' : '#1d1d26', align: 'left', valign: 'top',
+    bubble: true, fill: dark ? '#232328' : '#ffffff', outline: dark ? '#ffffff1f' : '#00000017', outlineWidth: 1 / z,
+    box: 'auto', radius: 12 / z, padding: 16 / z, shadow: true,
+  });
+}
+function addTodoBlock(at = placePoint(), items = null) {
+  if (!isBoard() || IS_VIEW) { setStatus('To-do lists live on the board – switch to Board mode'); return null; }
+  const z = board.zoom, w = 460 / z;
+  const tile = addTextTile({ text: '', style: todoLook(), board: { x: at.x - w / 2, y: at.y - 40 / z, w, h: 160 / z }, todo: { title: '', items: items || [] } });
+  if (!tile) return null;
+  bringToFront(tile);
+  selectOnly(tile);
+  recordAdd([tile], 'add to-do list');
+  updateChrome();
+  setTimeout(() => focusTodo(tile, 'title', 'end'), 0);
+  setStatus('Name the goal, then Enter for its first task (Tab: a sub-task)', 5000);
+  return tile;
+}
+
+// ---- the caret ----
+function caretOffset(el) {
+  const s = window.getSelection();
+  if (!s || !s.rangeCount) return 0;
+  const r = s.getRangeAt(0);
+  if (!el.contains(r.startContainer)) return 0;
+  const pre = document.createRange();
+  pre.selectNodeContents(el);
+  pre.setEnd(r.startContainer, r.startOffset);
+  return pre.toString().length;
+}
+function placeCaret(el, at) {
+  const s = window.getSelection();
+  if (!s) return;
+  const r = document.createRange();
+  const tn = el.firstChild;
+  const len = el.textContent.length;
+  const n = at === 'end' ? len : Math.max(0, Math.min(len, at | 0));
+  if (tn && tn.nodeType === 3) { r.setStart(tn, Math.min(n, tn.length)); } else { r.selectNodeContents(el); r.collapse(n > 0 ? false : true); }
+  r.collapse(true);
+  s.removeAllRanges(); s.addRange(r);
+}
+const todoEditEl = (tile, id) => [...tile.el.querySelectorAll('.td-edit')].find((x) => x.dataset.id === id) || null;
+function focusTodo(tile, id, at = 'end') {
+  const el = todoEditEl(tile, id);
+  if (!el || el.contentEditable !== 'plaintext-only') return;
+  el.focus();
+  placeCaret(el, at);
+}
+
+// ---- drawing the list ----
+function renderTodo(tile) {
+  const bubble = tile.el.querySelector('.text-bubble');
+  let root = bubble.querySelector(':scope > .td');
+  if (!root) { root = document.createElement('div'); root.className = 'td'; bubble.appendChild(root); wireTodo(tile, root); }
+  const m = tile.todo, s = tile.style;
+  const can = !IS_VIEW && !tile.locked;
+  root.style.fontSize = s.size + 'px';
+  root.style.fontFamily = s.font;
+  root.style.color = s.color;
+  root.style.setProperty('--td-color', m.color || TODO_DEFAULT_COLOR);
+  { const mm = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(s.fill || ''); root.classList.toggle('td-dark', !!mm && (0.299 * parseInt(mm[1], 16) + 0.587 * parseInt(mm[2], 16) + 0.114 * parseInt(mm[3], 16)) < 128); }
+  const mk = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const editable = (el, id, text, ph) => {
+    el.classList.add('td-edit'); el.dataset.id = id; el.textContent = text; el.dataset.ph = ph;
+    if (can) { el.contentEditable = 'plaintext-only'; el.spellcheck = true; }
+    return el;
+  };
+  const head = mk('div', 'td-head');
+  head.appendChild(editable(mk('div', 'td-title'), 'title', m.title, 'What is the goal?'));
+  const p = TodoList.progress(m.items);
+  const prog = mk('div', 'td-prog');
+  const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+  prog.append(mk('span', 'td-prog-text', p.total ? `${p.done} of ${p.total} done` : 'No tasks yet'), mk('span', 'td-pct', p.total ? `${pct}%` : ''));
+  const bar = mk('div', 'td-bar'); const fill = mk('div', 'td-fill'); fill.style.width = pct + '%'; bar.appendChild(fill);
+  head.append(prog, bar);
+  root.classList.toggle('td-complete', p.total > 0 && p.done === p.total);
+  const list = mk('div', 'td-list');
+  for (const { item: it, depth } of TodoList.visible(m.items)) {
+    const row = mk('div', 'td-row'); row.dataset.id = it.id;
+    row.style.setProperty('--d', depth);
+    if (it.done) row.classList.add('done');
+    if (it.color) { row.classList.add('colored'); row.style.setProperty('--c', it.color); }
+    if (it.kids.length) row.classList.add('has-kids');
+    if (it.kids.length) { const f = mk('button', 'td-fold', it.open ? '▾' : '▸'); f.title = it.open ? 'Fold its sub-tasks away' : 'Show its sub-tasks'; row.appendChild(f); }
+    else row.appendChild(mk('span', 'td-fold-sp'));
+    const box = mk('button', 'td-check');
+    box.title = it.kids.length ? (it.done ? 'Untick it and all its sub-tasks' : 'Tick it and all its sub-tasks') : (it.done ? 'Not done' : 'Done (Ctrl+Enter)');
+    box.setAttribute('role', 'checkbox'); box.setAttribute('aria-checked', String(it.done));
+    if (!can) box.disabled = true;
+    if (it.done) box.appendChild(iconSvg('check'));
+    row.appendChild(box);
+    row.appendChild(editable(mk('div', 'td-text'), it.id, it.text, depth ? 'Sub-task' : 'Task'));
+    if (it.kids.length) { const kp = TodoList.progress(it.kids); row.appendChild(mk('span', 'td-kcount', `${kp.done}/${kp.total}`)); }
+    if (can) {
+      const tools = mk('span', 'td-tools');
+      const add = mk('button', 'td-addsub'); add.title = 'Add a sub-task'; add.appendChild(iconSvg('plus'));
+      const col = mk('button', 'td-color'); col.title = 'Colour'; col.appendChild(mk('span', 'td-dot'));
+      const del = mk('button', 'td-del'); del.title = it.kids.length ? 'Delete it and its sub-tasks' : 'Delete'; del.appendChild(iconSvg('close'));
+      tools.append(add, col, del);
+      row.appendChild(tools);
+    }
+    list.appendChild(row);
+  }
+  if (!m.items.length) list.appendChild(mk('div', 'td-empty', can ? 'Add the first task below, or paste a list of them.' : 'No tasks.'));
+  const parts = [head, list];
+  if (can) { const add = mk('button', 'td-add'); add.appendChild(iconSvg('plus')); add.append(' Add a task'); parts.push(add); }
+  root.replaceChildren(...parts);
+}
+
+// once per list: its clicks and typing (delegated: the rows are redrawn after every change)
+function wireTodo(tile, root) {
+  const rowId = (el) => { const r = el.closest('.td-row'); return r ? r.dataset.id : null; };
+  root.addEventListener('click', (e) => {
+    const t = e.target instanceof Element ? e.target : null;
+    if (!t) return;
+    const btn = t.closest('button');
+    if (!btn) return;
+    e.stopPropagation();
+    const id = rowId(btn);
+    if (btn.classList.contains('td-check')) changeTodo(tile, 'tick', (m) => TodoList.toggle(m, id));
+    else if (btn.classList.contains('td-fold')) changeTodo(tile, 'fold', (m) => TodoList.setOpen(m, id));
+    else if (btn.classList.contains('td-addsub')) { const n = changeTodo(tile, 'add sub-task', (m) => TodoList.addChild(m, id, '')); if (n) focusTodo(tile, n, 0); else setStatus('That is as deep as sub-tasks go', 3000); }
+    else if (btn.classList.contains('td-del')) changeTodo(tile, 'delete task', (m) => TodoList.remove(m, id));
+    else if (btn.classList.contains('td-color')) pickTodoColor(tile, id, btn);
+    else if (btn.classList.contains('td-add')) { const n = changeTodo(tile, 'add task', (m) => TodoList.addAfter(m, null, '')); if (n) focusTodo(tile, n, 0); }
+  });
+  // typing: the model follows each key (the height too); the undo step is made when the typing ends
+  root.addEventListener('input', (e) => {
+    const el = e.target instanceof Element && e.target.closest('.td-edit');
+    if (!el || !tile.todo) return;
+    const id = el.dataset.id;
+    if (!todoEdit || todoEdit.tile !== tile || todoEdit.id !== id) { commitTodoText(); todoEdit = { tile, id, before: TodoList.clone(tile.todo) }; }
+    if (id === 'title') tile.todo.title = el.textContent.slice(0, 300);
+    else TodoList.setText(tile.todo, id, el.textContent);
+    tile.text = TodoList.summary(tile.todo);
+    if (isBoard()) renderTextTile(tile);
+  });
+  root.addEventListener('focusout', (e) => { if (e.target instanceof Element && e.target.closest('.td-edit')) commitTodoText(); });
+  root.addEventListener('paste', (e) => {
+    const el = e.target instanceof Element && e.target.closest('.td-edit');
+    if (!el) return;
+    const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+    if (!/\n/.test(text.trim())) return; // one line: it goes in as typing
+    e.preventDefault(); e.stopPropagation();
+    const items = TodoList.fromText(text);
+    if (!items.length) return;
+    const id = el.dataset.id;
+    changeTodo(tile, `paste ${items.length} tasks`, (m) => {
+      const f = id !== 'title' && TodoList.find(m.items, id);
+      if (f) f.list.splice(f.index + 1, 0, ...items); else m.items.push(...items);
+      TodoList.settle(m.items);
+      return true;
+    });
+    setStatus(`Added ${TodoList.count(items)} tasks`, 3000);
+  });
+  root.addEventListener('keydown', (e) => {
+    const el = e.target instanceof Element && e.target.closest('.td-edit');
+    if (!el) return;
+    e.stopPropagation(); // typing, not the board's shortcuts
+    const id = el.dataset.id;
+    const m = tile.todo;
+    if (e.key === 'Escape') { e.preventDefault(); el.blur(); return; }
+    if (id === 'title') {
+      if (e.key === 'Enter' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (m.items.length && e.key === 'ArrowDown') { focusTodo(tile, m.items[0].id, 'end'); return; }
+        const n = changeTodo(tile, 'add task', (mm) => (mm.items.length ? TodoList.addBefore(mm, mm.items[0].id, '') : TodoList.addAfter(mm, null, '')));
+        if (n) focusTodo(tile, n, 0);
+      }
+      return;
+    }
+    const at = caretOffset(el), text = el.textContent;
+    const f = TodoList.find(m.items, id);
+    if (!f) return;
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); changeTodo(tile, 'tick', (mm) => TodoList.toggle(mm, id)); focusTodo(tile, id, at); return; }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const depth = TodoList.depthOf(m.items, id);
+      if (!text.trim() && depth > 0) { changeTodo(tile, 'outdent', (mm) => TodoList.outdent(mm, id)); focusTodo(tile, id, 0); return; }
+      if (!text.trim() && !f.item.kids.length) { el.blur(); return; } // an empty task at the top: done adding
+      if (at === 0 && text) { changeTodo(tile, 'add task', (mm) => TodoList.addBefore(mm, id, '')); focusTodo(tile, id, 0); return; }
+      const n = changeTodo(tile, 'add task', (mm) => {
+        TodoList.setText(mm, id, text.slice(0, at));
+        const it = TodoList.find(mm.items, id).item;
+        return TodoList.addAfter(mm, id, text.slice(at), { asFirstChild: it.kids.length > 0 && it.open });
+      });
+      if (n) focusTodo(tile, n, 0);
+      return;
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const ok = changeTodo(tile, e.shiftKey ? 'outdent' : 'indent', (mm) => (e.shiftKey ? TodoList.outdent(mm, id) : TodoList.indent(mm, id)));
+      focusTodo(tile, id, at);
+      if (!ok && !e.shiftKey) setStatus(f.index === 0 ? 'Tab makes it a sub-task of the task above it: there is none at this level' : 'That is as deep as sub-tasks go', 3000);
+      return;
+    }
+    if (e.key === 'Backspace' && !text && !f.item.kids.length && window.getSelection().isCollapsed) {
+      e.preventDefault();
+      const prev = TodoList.neighbour(m.items, id, -1);
+      changeTodo(tile, 'delete task', (mm) => TodoList.remove(mm, id));
+      if (prev) focusTodo(tile, prev, 'end'); else focusTodo(tile, 'title', 'end');
+      return;
+    }
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && e.altKey) {
+      e.preventDefault();
+      changeTodo(tile, 'move task', (mm) => TodoList.move(mm, id, e.key === 'ArrowUp' ? -1 : 1));
+      focusTodo(tile, id, at);
+      return;
+    }
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.ctrlKey) {
+      const n = TodoList.neighbour(m.items, id, e.key === 'ArrowUp' ? -1 : 1);
+      if (n || e.key === 'ArrowUp') { e.preventDefault(); focusTodo(tile, n || 'title', e.key === 'ArrowUp' ? 'end' : Math.min(at, 9999)); }
+    }
+  });
+}
+function pickTodoColor(tile, id, anchor) {
+  const cur = id ? (TodoList.find(tile.todo.items, id) || {}).item : null;
+  const now = id ? (cur && cur.color) || '' : tile.todo.color;
+  openColorPop(anchor, now || TODO_DEFAULT_COLOR, (c) => {
+    if (id) changeTodo(tile, 'task colour', (m) => TodoList.setColor(m, id, c));
+    else changeTodo(tile, 'list colour', (m) => { m.color = TodoList.okColor(c); return true; });
+  });
+}
+function todoMenuItems(tile, e) {
+  const t = e.target instanceof Element ? e.target : null;
+  const rowEl = t && t.closest('.td-row');
+  const f = rowEl && TodoList.find(tile.todo.items, rowEl.dataset.id);
+  const can = !IS_VIEW && !tile.locked;
+  const items = [];
+  if (f) {
+    const id = f.item.id, it = f.item;
+    items.push(
+      [it.done ? 'Mark not done' : 'Mark done', () => changeTodo(tile, 'tick', (m) => TodoList.toggle(m, id)), !can],
+      ['Add a sub-task', () => { const n = changeTodo(tile, 'add sub-task', (m) => TodoList.addChild(m, id, '')); if (n) focusTodo(tile, n, 0); }, !can],
+      ['Add a task below', () => { const n = changeTodo(tile, 'add task', (m) => TodoList.addAfter(m, id, '')); if (n) focusTodo(tile, n, 0); }, !can],
+      ['Make it a sub-task (Tab)', () => changeTodo(tile, 'indent', (m) => TodoList.indent(m, id)), !can || f.index === 0],
+      ['Take it out a level (Shift+Tab)', () => changeTodo(tile, 'outdent', (m) => TodoList.outdent(m, id)), !can || !f.parent],
+      ['Move up (Alt+↑)', () => changeTodo(tile, 'move task', (m) => TodoList.move(m, id, -1)), !can || f.index === 0],
+      ['Move down (Alt+↓)', () => changeTodo(tile, 'move task', (m) => TodoList.move(m, id, 1)), !can || f.index >= f.list.length - 1],
+      ['Colour…', () => pickTodoColor(tile, id, rowEl.querySelector('.td-color') || rowEl), !can],
+      ...(it.color ? [['No colour', () => changeTodo(tile, 'task colour', (m) => TodoList.setColor(m, id, '')), !can]] : []),
+      [it.kids.length ? 'Delete it and its sub-tasks' : 'Delete task', () => changeTodo(tile, 'delete task', (m) => TodoList.remove(m, id)), !can],
+    );
+  }
+  const hasKids = TodoList.visible(tile.todo.items).some((v) => v.item.kids.length);
+  items.push(
+    ['Rename the goal', () => focusTodo(tile, 'title', 'end'), !can],
+    ['Colour of the list…', () => pickTodoColor(tile, null, tile.el.querySelector('.td-title')), !can],
+    ['Fold all sub-tasks away', () => changeTodo(tile, 'fold all', (m) => TodoList.setAllOpen(m, false)), !can || !hasKids],
+    ['Show all sub-tasks', () => changeTodo(tile, 'unfold all', (m) => TodoList.setAllOpen(m, true)), !can || !hasKids],
+    ['Clear the done tasks', () => { const n = changeTodo(tile, 'clear done', (m) => TodoList.clearDone(m)); setStatus(n ? `Cleared ${n} done task${n === 1 ? '' : 's'} – Ctrl+Z puts them back` : 'Nothing done yet', 3000); }, !can],
+    ['Untick everything', () => changeTodo(tile, 'untick all', (m) => TodoList.uncheckAll(m)), !can],
+    ['Copy as text', () => { window.api.copyText(TodoList.summary(tile.todo)); setStatus('Copied the list as text', 3000); }],
+    ...blockSizeMenuItems(tile),
+    ...stackMenuItems(tile), lockMenuItem(tile), ['Remove the block', () => removeTile(tile)],
+  );
+  return items;
+}
+document.getElementById('add-todo').addEventListener('click', () => addTodoBlock(viewCentreWorld()));
+
+// ---------- search: Ozy's features, and the pictures and videos (Mark, 2026-11-17) ----------
+// Two searches that look nothing alike on purpose.
+// ⌕ Search features (Ctrl+K, the top of the left rail): every button and menu item in the panels
+// (read from them each time it opens, so a new button is found without being listed here) and the
+// features that only have a key. Type a few letters; Enter or a click does it. The ones used last
+// come first when nothing is typed.
+// Pictures and videos (Ctrl+Shift+F, the rail's picture-search button): the tiles by name, as
+// thumbnails; a click flies to one (the board) or scrolls to it (the gallery).
+const FEATURE_EXTRA = [
+  ['Find words on the board', 'In notes, text, frame titles and file names; Enter goes to the next', 'Ctrl+F', () => openFind(), 'search'],
+  ['Search pictures and videos', 'By their names, as thumbnails', 'Ctrl+Shift+F', () => openMediaSearch(), 'photosearch'],
+  ['Overview map', 'The small map of the whole board, bottom right', 'M', () => setMiniMap(!miniOn), 'map'],
+  ['Duplicate', 'A copy of what is selected, beside it', 'Ctrl+D', () => duplicateSelection(), 'copy'],
+  ['Lock or unlock', 'Locked things stay put and the lasso goes over them', 'Ctrl+Shift+L', () => toggleLock(null), 'lock'],
+  ['Bring to front', 'The selection above everything', 'PgUp', () => stackToFront(null), 'front'],
+  ['Send to back', 'The selection behind everything', 'PgDn', () => stackToBack(null), 'back'],
+  ['Undo', 'The last change', 'Ctrl+Z', () => undo(), 'back'],
+  ['Redo', 'The change just undone', 'Ctrl+Y', () => redo(), 'front'],
+  ['Paste', 'Pictures, links (a bookmark block) or tiles copied here', 'Ctrl+V', () => pasteClipboard(), 'copy'],
+  ['Put a frame around the selection', 'A frame that holds what is selected', '', () => addFrame({ aroundSelection: true }), 'frame'],
+  ['Present the frames', 'One frame after another, full view (← → to step, Esc ends)', '', () => presentFrames(), 'frame'],
+  ['Export the view as a picture', 'What is on screen now, as a PNG', '', () => exportView(), 'save'],
+  ['Export the frames as one PDF', 'Each frame a page', '', () => exportFrames('pdf'), 'save'],
+  ['Export each frame as a picture', 'One PNG per frame', '', () => exportFrames('pngs'), 'save'],
+  ['Crop the selected picture', 'Drag its edges to crop; Enter or a click outside keeps it', '', () => { const t = [...selection].find((x) => x.type === 'image' && tiles.includes(x)); if (t) beginCrop(t); else setStatus('Select a picture first, then crop', 4000); }, 'crop'],
+  ['Select all', 'Everything on the board (not the locked things)', 'Ctrl+A', () => { if (!isBoard()) { setStatus('Select all works on the board'); return; } for (const t of tiles) if (!t.locked) setSelected(t, true); selectionStatus(); }, 'group'],
+  ['Rotate', 'Select something, then drag the round handle above it (Shift: 15° steps)', '', () => setStatus('Select something, then drag the round handle above it to turn it (Shift: 15° steps)', 6000), 'loop'],
+  ['Master volume', 'The volume slider, top right', '', () => { const v = document.getElementById('master-vol'); if (v) v.focus(); }, 'volume'],
+  ['Light board', 'A white board', '', () => setBoardBackground('light'), 'board'],
+  ['Dark board', 'A dark board', '', () => setBoardBackground('dark'), 'board'],
+];
+// other words people look for things by
+const FEATURE_WORDS = {
+  'btn-hand': 'pan move scroll drag around', 'add-text': 'type words write label', 'add-shape': 'rectangle circle square triangle star sticky note post-it',
+  'add-line': 'arrow connector divider rule', 'btn-pen': 'draw sketch freehand highlighter brush', 'btn-frames': 'section area slides present export pdf',
+  'add-links': 'links urls websites web favourites tier', 'add-todo': 'tasks checklist todo to do goals plan', 'btn-sidebar': 'folders files library browse import',
+  'btn-favs': 'starred star best', 'btn-map': 'minimap overview navigator', 'btn-fit': 'zoom fit all everything whole board', 'zoom-in': 'bigger magnify closer',
+  'zoom-out': 'smaller further', 'btn-clear': 'delete remove everything empty new', 'btn-save': 'store keep', 'btn-tidy': 'arrange align organise organize rows grid',
+  'btn-mute-all': 'sound audio silence quiet volume', 'btn-loop-all': 'repeat', 'btn-link': 'push neighbours overlap',
+};
+const FEATURE_RECENT_KEY = 'ozy-feature-recent';
+const featureRecent = () => { try { return JSON.parse(localStorage.getItem(FEATURE_RECENT_KEY) || '[]'); } catch { return []; } };
+function noteFeatureUsed(name) {
+  try { localStorage.setItem(FEATURE_RECENT_KEY, JSON.stringify([name, ...featureRecent().filter((n) => n !== name)].slice(0, 8))); } catch {}
+}
+// the keys in a title like "Line (D): drag on the board" or "Find (Ctrl+F)"
+function keysIn(title) {
+  const all = [...String(title || '').matchAll(/\(([^()]{1,24})\)/g)].map((m) => m[1].trim());
+  return all.find((k) => /^(ctrl|shift|alt|pgup|pgdn|esc|space|`|[a-z0-9[\]]$|[a-z]:)/i.test(k) && !/\s{2}|[.,]$/.test(k)) || '';
+}
+function featureList() {
+  const out = [], seen = new Set();
+  const push = (f) => { const k = f.name.toLowerCase(); if (!f.name || seen.has(k)) return; seen.add(k); out.push(f); };
+  const nameOf = (b) => (b.getAttribute('aria-label') || (b.title || '').split(/[:(;]|\. | – /)[0] || b.textContent).replace(/\s+/g, ' ').trim();
+  const where = (b) => (b.closest('.hud-rail') ? 'Left bar' : b.closest('.hud-file') ? 'Top left' : b.closest('.hud-play') ? 'Top right' : b.closest('.hud-arrange') ? 'Bottom left' : b.closest('.hud-view') ? 'Bottom right' : 'Toolbar');
+  const shown = (b) => !b.disabled && !b.closest('[hidden]:not(.menu-list)') && getComputedStyle(b).display !== 'none';
+  for (const b of document.querySelectorAll('#toolbar button')) {
+    if (b.id === 'btn-search' || b.closest('.menu-list') || b.closest('#url-bar') || !shown(b)) continue;
+    const name = nameOf(b);
+    if (!name || name.length < 2) continue;
+    push({ name, desc: b.title && b.title !== name ? b.title : '', keys: keysIn(b.title), icon: b.querySelector('svg'), run: () => b.click(), where: where(b), words: FEATURE_WORDS[b.id] || '' });
+  }
+  for (const b of document.querySelectorAll('#toolbar .menu-list button, #toolbar .menu-list label.menu-check')) {
+    if (b.disabled || b.closest('[hidden]:not(.menu-list)')) continue;
+    const name = b.textContent.replace(/\s+/g, ' ').trim();
+    if (!name || name.length < 2) continue;
+    const owner = b.closest('.menu') && b.closest('.menu').querySelector('button[title]');
+    const input = b.tagName === 'LABEL' ? b.querySelector('input') : null;
+    push({ name: input && input.type === 'checkbox' ? `${name} (${input.checked ? 'on' : 'off'})` : name, desc: b.title || '', keys: keysIn(b.title), icon: owner && owner.querySelector('svg'),
+      run: () => (input ? input.click() : b.click()), where: owner ? `${nameOf(owner)} menu` : 'Menu', words: '' });
+  }
+  for (const [name, desc, keys, run, icon] of FEATURE_EXTRA) push({ name, desc, keys, run, iconName: icon, where: keys ? 'Shortcut' : 'Board', words: '' });
+  return out;
+}
+const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function featureScore(f, words) {
+  const name = f.name.toLowerCase();
+  const hay = `${f.name} ${f.desc} ${f.words} ${f.where} ${f.keys}`.toLowerCase();
+  let s = 0;
+  for (const w of words) {
+    if (name.startsWith(w)) s += 30;
+    else if (new RegExp('\\b' + reEsc(w)).test(name)) s += 20;
+    else if (name.includes(w)) s += 12;
+    else if (new RegExp('\\b' + reEsc(w)).test(hay)) s += 6;
+    else return 0;
+  }
+  return s;
+}
+
+let featurePal = null;
+function openFeatureSearch() {
+  if (IS_VIEW) return;
+  if (featurePal) { featurePal.input.focus(); featurePal.input.select(); return; }
+  closeMediaSearch();
+  const el = document.createElement('div');
+  el.className = 'fs-pal';
+  el.innerHTML = '<div class="fs-top"><span class="fs-badge"></span><input class="fs-input" type="text" spellcheck="false" placeholder="Search Ozy\'s features: crop, export, loop, lock…"><kbd class="fs-esc">Esc</kbd></div><div class="fs-list" role="listbox"></div><div class="fs-foot">↑ ↓ to choose · Enter to do it · this searches what Ozy can do — for pictures and videos use <b>Ctrl+Shift+F</b></div>';
+  el.querySelector('.fs-badge').appendChild(iconSvg('search'));
+  el.addEventListener('pointerdown', (e) => e.stopPropagation());
+  document.body.appendChild(el);
+  const input = el.querySelector('.fs-input'), listEl = el.querySelector('.fs-list');
+  const all = featureList();
+  let shown = [], at = 0;
+  const draw = () => {
+    const q = input.value.trim().toLowerCase();
+    const words = q.split(/\s+/).filter(Boolean);
+    if (!words.length) {
+      const rec = featureRecent();
+      const recent = rec.map((n) => all.find((f) => f.name === n)).filter(Boolean);
+      shown = [...recent.map((f) => ({ ...f, recent: true })), ...all.filter((f) => !recent.includes(f))];
+    } else {
+      shown = all.map((f) => ({ f, s: featureScore(f, words) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s).map((x) => x.f);
+    }
+    at = Math.min(at, Math.max(0, shown.length - 1));
+    listEl.replaceChildren();
+    if (!shown.length) { const n = document.createElement('div'); n.className = 'fs-none'; n.textContent = `No feature called "${input.value.trim()}". Looking for a picture or video? Ctrl+Shift+F`; listEl.appendChild(n); return; }
+    shown.slice(0, 80).forEach((f, i) => {
+      const row = document.createElement('div');
+      row.className = 'fs-row' + (i === at ? ' on' : '');
+      row.setAttribute('role', 'option');
+      const ic = document.createElement('span'); ic.className = 'fs-ic';
+      ic.appendChild(f.icon ? f.icon.cloneNode(true) : iconSvg(f.iconName || 'bolt'));
+      const tx = document.createElement('span'); tx.className = 'fs-tx';
+      const nm = document.createElement('span'); nm.className = 'fs-name'; nm.textContent = f.name;
+      const ds = document.createElement('span'); ds.className = 'fs-desc'; ds.textContent = f.recent ? 'Used lately' : f.desc && f.desc !== f.name ? f.desc : '';
+      tx.append(nm, ds);
+      const wh = document.createElement('span'); wh.className = 'fs-where'; wh.textContent = f.where;
+      row.append(ic, tx, wh);
+      if (f.keys) { const k = document.createElement('kbd'); k.className = 'fs-key'; k.textContent = f.keys; row.appendChild(k); }
+      row.addEventListener('pointermove', () => { if (at !== i) { at = i; for (const [j, r] of [...listEl.children].entries()) r.classList.toggle('on', j === i); } });
+      row.addEventListener('click', () => runFeature(f));
+      listEl.appendChild(row);
+    });
+  };
+  const runFeature = (f) => {
+    noteFeatureUsed(f.name.replace(/ \((on|off)\)$/, ''));
+    closeFeatureSearch();
+    try { f.run(); } catch (err) { setStatus('Could not do that here: ' + (err && err.message || err), 4000); }
+  };
+  input.addEventListener('input', () => { at = 0; draw(); listEl.scrollTop = 0; });
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); closeFeatureSearch(); }
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      at = Math.max(0, Math.min(Math.min(shown.length, 80) - 1, at + (e.key === 'ArrowDown' ? 1 : -1)));
+      [...listEl.children].forEach((r, j) => r.classList.toggle('on', j === at));
+      const r = listEl.children[at]; if (r) r.scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter') { e.preventDefault(); if (shown[at]) runFeature(shown[at]); }
+  });
+  featurePal = { el, input };
+  document.getElementById('btn-search').classList.add('toggled');
+  draw();
+  input.focus();
+}
+function closeFeatureSearch() {
+  if (!featurePal) return;
+  featurePal.el.remove();
+  featurePal = null;
+  const b = document.getElementById('btn-search'); if (b) b.classList.remove('toggled');
+}
+
+// ---- pictures and videos, by name ----
+const MEDIA_KINDS = { file: 'Video', image: 'Picture', sequence: 'Sequence', youtube: 'YouTube', twitch: 'Twitch' };
+let mediaPanel = null;
+const mediaKind = (t) => (t.type == null ? 'file' : MEDIA_KINDS[t.type] ? t.type : null); // (a local video's tile has no type)
+const mediaTiles = () => tiles.filter((t) => mediaKind(t));
+const mediaSearchText = (t) => `${tileName(t)} ${t.title || ''} ${t.path ? t.path.replace(/[\\/]+/g, ' ') : ''} ${t.url || ''}`.toLowerCase();
+function mediaThumb(t, img) {
+  const k = mediaKind(t);
+  const fail = () => img.classList.add('none');
+  img.addEventListener('error', fail);
+  if (k === 'youtube' && t.url) { const p = WebUrl.parse(t.url); if (p && p.id && p.kind !== 'playlist') { img.src = `https://i.ytimg.com/vi/${p.id}/mqdefault.jpg`; return; } }
+  if ((k === 'image' || k === 'file') && t.path) {
+    Promise.resolve(window.api.thumb(t.path)).then((p) => { if (p) img.src = window.api.videoUrl(p); else if (k === 'image') img.src = window.api.videoUrl(t.thumb || t.path); else fail(); }).catch(fail);
+    return;
+  }
+  fail();
+}
+function openMediaSearch() {
+  if (mediaPanel) { mediaPanel.input.focus(); mediaPanel.input.select(); return; }
+  closeFeatureSearch();
+  const el = document.createElement('div');
+  el.className = 'ms-panel';
+  el.innerHTML = '<div class="ms-head"><span class="ms-badge"></span><div class="ms-titles"><div class="ms-title">Pictures and videos</div><div class="ms-sub"></div></div><button class="ms-x" title="Close (Esc)"></button></div>'
+    + '<input class="ms-input" type="text" spellcheck="false" placeholder="Search by name or folder…"><div class="ms-chips"></div><div class="ms-grid"></div>';
+  el.querySelector('.ms-badge').appendChild(iconSvg('photosearch'));
+  el.querySelector('.ms-x').appendChild(iconSvg('close'));
+  el.addEventListener('pointerdown', (e) => e.stopPropagation());
+  document.body.appendChild(el);
+  const input = el.querySelector('.ms-input'), grid2 = el.querySelector('.ms-grid'), chips = el.querySelector('.ms-chips'), sub = el.querySelector('.ms-sub');
+  let kind = 'all';
+  const present = new Set(mediaTiles().map(mediaKind));
+  for (const [k, label] of [['all', 'All'], ...Object.entries(MEDIA_KINDS).filter(([k]) => present.has(k)).map(([k, l]) => [k, l === 'Video' ? 'Videos' : l === 'Picture' ? 'Pictures' : l])]) {
+    const c = document.createElement('button'); c.className = 'ms-chip' + (k === 'all' ? ' on' : ''); c.textContent = label; c.dataset.k = k;
+    c.addEventListener('click', () => { kind = k; for (const x of chips.children) x.classList.toggle('on', x === c); draw(); });
+    chips.appendChild(c);
+  }
+  const io = new IntersectionObserver((entries) => {
+    for (const en of entries) if (en.isIntersecting) { const img = en.target; io.unobserve(img); const t = tiles.find((x) => x.id === img.dataset.tile); if (t) mediaThumb(t, img); }
+  }, { root: grid2 });
+  let shown = [];
+  const draw = () => {
+    const words = input.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const all = mediaTiles();
+    shown = all.filter((t) => (kind === 'all' || mediaKind(t) === kind) && words.every((w) => mediaSearchText(t).includes(w)));
+    shown.sort((a, b) => { const an = tileName(a).toLowerCase(), bn = tileName(b).toLowerCase(); const w = words[0] || ''; return (w && an.startsWith(w) ? 0 : 1) - (w && bn.startsWith(w) ? 0 : 1) || an.localeCompare(bn, undefined, { numeric: true }); });
+    sub.textContent = words.length || kind !== 'all' ? `${shown.length} of ${all.length}` : `${all.length} on this board`;
+    io.disconnect();
+    grid2.replaceChildren();
+    if (!shown.length) { const n = document.createElement('div'); n.className = 'ms-none'; n.textContent = all.length ? 'Nothing by that name.' : 'No pictures or videos on this board yet.'; grid2.appendChild(n); return; }
+    for (const t of shown.slice(0, 300)) {
+      const card = document.createElement('button');
+      card.className = 'ms-card';
+      card.title = t.path || t.url || tileName(t);
+      const th = document.createElement('div'); th.className = 'ms-th';
+      const img = document.createElement('img'); img.alt = ''; img.draggable = false; img.dataset.tile = t.id;
+      th.appendChild(img);
+      const kb = document.createElement('span'); kb.className = 'ms-kind k-' + mediaKind(t); kb.textContent = MEDIA_KINDS[mediaKind(t)];
+      th.appendChild(kb);
+      const nm = document.createElement('div'); nm.className = 'ms-name'; nm.textContent = tileName(t);
+      card.append(th, nm);
+      card.addEventListener('click', () => {
+        if (isBoard() && t.board) selectOnly(t);
+        focusTile(t);
+        for (const c of grid2.querySelectorAll('.ms-card.on')) c.classList.remove('on');
+        card.classList.add('on');
+      });
+      grid2.appendChild(card);
+      io.observe(img);
+    }
+  };
+  input.addEventListener('input', draw);
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); closeMediaSearch(); }
+    else if (e.key === 'Enter') { e.preventDefault(); const c = grid2.querySelector('.ms-card'); if (c) c.click(); }
+  });
+  el.querySelector('.ms-x').addEventListener('click', closeMediaSearch);
+  mediaPanel = { el, input, io };
+  document.getElementById('btn-media-search').classList.add('toggled');
+  draw();
+  input.focus();
+}
+function closeMediaSearch() {
+  if (!mediaPanel) return;
+  mediaPanel.io.disconnect();
+  mediaPanel.el.remove();
+  mediaPanel = null;
+  const b = document.getElementById('btn-media-search'); if (b) b.classList.remove('toggled');
+}
+document.getElementById('btn-search').addEventListener('click', () => (featurePal ? closeFeatureSearch() : openFeatureSearch()));
+document.getElementById('btn-media-search').addEventListener('click', () => (mediaPanel ? closeMediaSearch() : openMediaSearch()));
+// a click elsewhere closes the feature search (the picture search stays until Esc or ✕: you click through it)
+window.addEventListener('pointerdown', (e) => { if (featurePal && !(e.target instanceof Node && (featurePal.el.contains(e.target) || e.target.closest && e.target.closest('#btn-search')))) closeFeatureSearch(); }, true);
+window.addEventListener('keydown', (e) => {
+  const ctrl = e.ctrlKey || e.metaKey;
+  if (!ctrl || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === 'k' && !e.shiftKey) { e.preventDefault(); e.stopImmediatePropagation(); featurePal ? closeFeatureSearch() : openFeatureSearch(); }
+  else if (k === 'f' && e.shiftKey) { e.preventDefault(); e.stopImmediatePropagation(); mediaPanel ? closeMediaSearch() : openMediaSearch(); }
+}, true);
 
 // ---------- the floating text style toolbar ----------
 // One toolbar for the whole app, shown whenever the selection holds a text tile and parked just
@@ -3419,7 +6726,7 @@ let textToolbar = null;   // { el, ...controls }
 let colorPop = null;
 let styleTimer = null, styleBefores = null;
 
-function selectedTextTiles() { return [...selection].filter((t) => t.type === 'text' && tiles.includes(t)); }
+function selectedTextTiles() { return [...selection].filter((t) => t.type === 'text' && tiles.includes(t) && !t.locked && !t.links && !t.todo); } // (a bookmark block or to-do list has no text style bar)
 
 function applyTextStyle(patch, { debounce = false } = {}) {
   const list = selectedTextTiles();
@@ -3477,15 +6784,22 @@ function buildTextToolbar() {
   const bubble = mk('button', 'bubble', 'Bubble');
   bubble.title = 'Draw the text inside a filled box';
   bubble.addEventListener('click', () => applyTextStyle({ bubble: !textToolbar.state().bubble }));
-  const fill = mk('button', 'swatch'); fill.title = 'Bubble fill';
-  fill.addEventListener('click', () => openColorPop(fill, textToolbar.state().fill, (c) => applyTextStyle({ fill: c })));
+  const fill = mk('button', 'swatch'); fill.title = 'Fill (the second row: sticky note colours)';
+  fill.addEventListener('click', () => openColorPop(fill, textToolbar.state().fill, (c) => { if (selectedTextTiles().some((t) => t.style.fit)) lastNoteColor = c; applyTextStyle({ fill: c }); }, TextTile.NOTE_COLORS));
   const outline = mk('button', 'swatch'); outline.title = 'Bubble outline';
   outline.addEventListener('click', () => openColorPop(outline, textToolbar.state().outline, (c) => applyTextStyle({ outline: c })));
   const ow = mk('input'); ow.type = 'number'; ow.min = '0'; ow.max = '20'; ow.step = '1'; ow.title = 'Outline width';
   ow.addEventListener('input', () => applyTextStyle({ outlineWidth: Number(ow.value) }, { debounce: true }));
 
   document.body.appendChild(el);
-  textToolbar = { el, font, size, color, aligns, bubble, fill, outline, ow, state: () => (selectedTextTiles()[0] || { style: TextTile.DEFAULTS }).style || TextTile.DEFAULTS };
+  // (2026-11-15) the shape: any text can become one (it keeps the box it has)
+  const shape = mk('select', 'shape-pick'); shape.title = 'Shape';
+  for (const [k, label] of SHAPE_KINDS) { const o = document.createElement('option'); o.value = k; o.textContent = label; shape.appendChild(o); }
+  shape.addEventListener('change', () => {
+    const z = board.zoom;
+    applyTextStyle({ bubble: true, box: 'fixed', valign: 'middle', shape: shape.value === 'round' ? 'box' : shape.value, radius: shape.value === 'round' ? 18 / z : 0 });
+  });
+  textToolbar = { el, font, size, color, aligns, bubble, fill, outline, ow, shape, state: () => (selectedTextTiles()[0] || { style: TextTile.DEFAULTS }).style || TextTile.DEFAULTS };
   return textToolbar;
 }
 
@@ -3503,6 +6817,7 @@ function fillTextToolbar() {
   textToolbar.outline.style.background = s.outline;
   if (document.activeElement !== textToolbar.ow) textToolbar.ow.value = String(s.outlineWidth);
   for (const c of [textToolbar.fill, textToolbar.outline, textToolbar.ow]) c.disabled = !s.bubble;
+  if (textToolbar.shape) textToolbar.shape.value = !s.bubble ? 'box' : s.shape === 'box' && s.radius * board.zoom > 4 ? 'round' : s.shape;
 }
 
 function positionTextToolbar() {
@@ -3515,13 +6830,16 @@ function positionTextToolbar() {
   const el = textToolbar.el;
   const r = el.getBoundingClientRect();
   const maxX = document.documentElement.clientWidth - r.width - 8;
-  let y = top - r.height - 8;
+  let y = top - r.height - 8 - (rotHandle.hidden ? 0 : 34); // (clear of the turn handle above the tile)
   if (y < 40) y = bottom + 8; // under the app toolbar: flip below the tiles
   el.style.left = Math.max(8, Math.min(left, maxX)) + 'px';
   el.style.top = Math.max(8, Math.min(y, document.documentElement.clientHeight - r.height - 8)) + 'px';
 }
 
 function updateTextToolbar() {
+  updateLineToolbar(); // (the line bar comes and goes with the selection too)
+  updateRotateHandle(); // (and the turn handle)
+  try { updateSelBar(); } catch {} // (and the selection bar; not yet set up while the app starts)
   const list = selectedTextTiles();
   if (!list.length || !isBoard() || IS_VIEW) {
     if (textToolbar) textToolbar.el.hidden = true;
@@ -3536,7 +6854,7 @@ function updateTextToolbar() {
 
 function closeColorPop() { if (colorPop) { colorPop.remove(); colorPop = null; } }
 // The 8 group colours plus a full picker, anchored under the swatch that opened it.
-function openColorPop(anchor, current, onPick) {
+function openColorPop(anchor, current, onPick, extra = []) {
   const wasMine = colorPop && colorPop._anchor === anchor;
   closeColorPop();
   if (wasMine) return;
@@ -3545,6 +6863,15 @@ function openColorPop(anchor, current, onPick) {
   pop._anchor = anchor;
   pop.addEventListener('pointerdown', (e) => e.stopPropagation());
   for (const hex of Object.values(Groups.PALETTE)) {
+    const b = document.createElement('button');
+    b.style.background = hex;
+    b.title = hex;
+    b.addEventListener('click', () => { onPick(hex); closeColorPop(); });
+    pop.appendChild(b);
+  }
+  // (2026-11-15) a second row of colours, when asked (the sticky note colours)
+  if (extra.length) { const br = document.createElement('div'); br.className = 'color-pop-break'; pop.appendChild(br); }
+  for (const hex of extra) {
     const b = document.createElement('button');
     b.style.background = hex;
     b.title = hex;
@@ -3564,6 +6891,612 @@ function openColorPop(anchor, current, onPick) {
   colorPop = pop;
 }
 window.addEventListener('pointerdown', (e) => { if (colorPop && !colorPop.contains(e.target)) closeColorPop(); }, true);
+// the floating text and line bars sit over the board in screen space: when the app's toolbar changes
+// height (a status message coming or going wraps it), the board moves down or up under them, so they
+// follow (2026-11-10)
+try { new ResizeObserver(() => updateTextToolbar()).observe(document.getElementById('toolbar')); } catch {}
+
+// ---------- lines (Mark, 2026-11-10) ----------
+// Dividers and arrows on the board; the rules are in lib/linetile.js. A line tile's element is its
+// box. Inside, an SVG draws the stroke, a wider see-through copy of it takes the clicks (so the empty
+// parts of the box let clicks through to whatever is under them), and a highlight shows it selected.
+// Its two ends get round handles to drag. The floating line bar sets the thickness (− / + / the
+// slider / a number), colour, dashes and arrowheads; [ and ] make the selected lines thinner and
+// thicker. Level lines are also guides: picture edges snap to them while moving or resizing, and
+// the pictures between a stack of them can be lined up in one go (lib/rows.js).
+const SVGNS = 'http://www.w3.org/2000/svg';
+let lineLook = null; // the look the next drawn line gets: the last one set (null: the default)
+
+function addLineTile(record = {}) {
+  const b = record.board;
+  const points = LineTile.cleanPoints(record.points);
+  if (!b || ![b.x, b.y, b.w, b.h].every((n) => isFinite(Number(n))) || !(Number(b.w) > 0) || !(Number(b.h) > 0) || !points) return null;
+  const el = document.createElement('div');
+  el.className = 'tile line-tile';
+  const svg = document.createElementNS(SVGNS, 'svg');
+  svg.setAttribute('class', 'line-svg');
+  const part = (cls) => { const p = document.createElementNS(SVGNS, 'path'); p.setAttribute('class', cls); svg.appendChild(p); return p; };
+  const sel = part('line-sel'), stroke = part('line-stroke'), headA = part('line-head'), headB = part('line-head'), hit = part('line-hit');
+  el.appendChild(svg);
+  const ends = [0, 1].map((i) => {
+    const pin = document.createElement('div'); pin.className = 'line-end-pin';
+    const h = document.createElement('div'); h.className = 'line-end'; h.dataset.end = String(i); h.title = 'Drag to move this end (Shift: in steps of 15°, Alt: no snapping)';
+    pin.appendChild(h); el.appendChild(pin);
+    return { pin, h };
+  });
+  const tile = {
+    type: 'line', el, video: null, yt: null, img: null,
+    points, style: LineTile.normalize(record.style),
+    aspect: null, freeAspect: true, editing: false,
+    board: { x: Number(b.x), y: Number(b.y), w: Number(b.w), h: Number(b.h) },
+    bookmarks: [], sync: null, group: null, suppressClick: false, /* kept for older code paths */ guard: ClickGuard.create(), id: newTileId(Session.tileId(record)), volume: 0, ownMuted: false,
+    galleryH: layout.rowHeight,
+    lineParts: { svg, sel, stroke, headA, headB, hit, ends }, drawnKey: '',
+    ends: null, freehand: record.freehand === true,
+  };
+  // (2026-11-15) its ends on tiles: [{ id, fx, fy } | null, same]
+  if (Array.isArray(record.ends)) {
+    const ok = (x) => x && typeof x.id === 'string' && Number.isFinite(x.fx) && Number.isFinite(x.fy) ? { id: x.id, fx: x.fx, fy: x.fy } : null;
+    const ends = [ok(record.ends[0]), ok(record.ends[1])];
+    if (ends.some(Boolean)) tile.ends = ends;
+  }
+  if (tile.freehand) el.classList.add('freehand');
+  tiles.push(tile);
+  if (tile.ends) attachDirty();
+  el.addEventListener('pointerenter', () => { hoveredTile = tile; });
+  el.addEventListener('pointerleave', () => { if (hoveredTile === tile) hoveredTile = null; });
+  // (added before attachTileDrag's own menu, which then leaves this one alone)
+  el.addEventListener('contextmenu', (e) => {
+    if (!isBoard() || IS_VIEW) return;
+    e.preventDefault(); e.stopPropagation();
+    if (!selection.has(tile)) selectOnly(tile);
+    showRowMenu(e, lineMenuItems(tile));
+  });
+  ends.forEach(({ h }, i) => h.addEventListener('pointerdown', (e) => startLineEndDrag(tile, i, e)));
+  attachTileDrag(tile);
+  canvas.appendChild(el);
+  el.hidden = !isBoard();
+  layoutTile(tile);
+  return tile;
+}
+
+// draw the line into its box (only when its size, points or look changed: layoutTile runs on every
+// step of a drag)
+function drawLine(t) {
+  const { w, h } = t.board;
+  const key = `${w},${h},${JSON.stringify(t.points)},${JSON.stringify(t.style)}`;
+  if (key === t.drawnKey) return;
+  t.drawnKey = key;
+  const P = t.lineParts, s = t.style;
+  const local = t.points.map(([u, v]) => ({ x: u * w, y: v * h }));
+  const n = local.length;
+  // with an arrowhead, the stroke stops inside the head so its square end never pokes out of the tip
+  const body = local.slice();
+  if (s.start === 'arrow') body[0] = LineTile.shorten(local[1], local[0], s.width * 3);
+  if (s.end === 'arrow') body[n - 1] = LineTile.shorten(local[n - 2], local[n - 1], s.width * 3);
+  const d = LineTile.pathD(local);
+  P.stroke.setAttribute('d', LineTile.pathD(body));
+  P.sel.setAttribute('d', d);
+  P.hit.setAttribute('d', d);
+  P.headA.setAttribute('d', s.start === 'arrow' ? LineTile.arrowD(local[1], local[0], s.width) : '');
+  P.headB.setAttribute('d', s.end === 'arrow' ? LineTile.arrowD(local[n - 2], local[n - 1], s.width) : '');
+  P.svg.setAttribute('width', String(w));
+  P.svg.setAttribute('height', String(h));
+  t.el.style.setProperty('--lw', s.width + 'px');
+  t.el.style.setProperty('--lc', s.color);
+  P.stroke.style.strokeDasharray = LineTile.dashArray(s);
+  P.stroke.style.strokeLinecap = s.start === 'arrow' || s.end === 'arrow' ? 'butt' : 'round';
+  const a = local[0], z = local[n - 1];
+  P.ends[0].pin.style.left = a.x + 'px'; P.ends[0].pin.style.top = a.y + 'px';
+  P.ends[1].pin.style.left = z.x + 'px'; P.ends[1].pin.style.top = z.y + 'px';
+}
+
+const lineAbs = (t) => LineTile.toAbs(t.board, t.points);
+// put a line through new board points (its box follows)
+function setLineAbs(t, abs) {
+  const r = LineTile.fromAbs(abs, t.style);
+  if (!r) return;
+  t.board = r.board; t.points = r.points;
+  layoutTile(t);
+}
+// a new look, with the line's points where they were (a thicker line needs a bigger box)
+function setLineStyle(t, style) {
+  const abs = lineAbs(t);
+  t.style = LineTile.normalize(style);
+  setLineAbs(t, abs);
+}
+// What a tile's edges are for snapping: its box; for a line, its stroke when it is level or
+// upright (a picture stops right at the line), else nothing.
+function snapBoxOf(t) {
+  if (t.type !== 'line') return t.board;
+  return LineTile.strokeBox(lineAbs(t), t.style.width);
+}
+
+// ---- undo: a tile's shape (box, crop, a line's points and look) before and after ----
+// { kind: 'state', label, changes: [{ tile, before, after }] }
+function shapeState(t) {
+  return {
+    board: t.board ? { ...t.board } : null, aspect: t.aspect, crop: t.crop ? { ...t.crop } : null, rotation: t.rotation || 0,
+    ...(t.type === 'line' ? { points: t.points.map((p) => p.slice()), style: { ...t.style }, ends: t.ends ? t.ends.map((e) => (e ? { ...e } : null)) : null } : {}),
+  };
+}
+function setShapeState(t, s) {
+  if (s.board) t.board = { ...s.board };
+  t.rotation = s.rotation || 0;
+  if (t.type === 'line') { t.points = s.points.map((p) => p.slice()); t.style = { ...s.style }; if ('ends' in s) setLineEnds(t, s.ends); }
+  else if (t.type === 'image') { t.crop = s.crop ? { ...s.crop } : null; t.aspect = s.aspect; applyCrop(t); }
+  layoutTile(t);
+  if (t.type === 'text') renderTextTile(t);
+}
+function recordStates(label, list, befores) {
+  const changes = list.map((t, i) => ({ tile: t, before: befores[i], after: shapeState(t) })).filter((c) => JSON.stringify(c.before) !== JSON.stringify(c.after));
+  if (changes.length) undoStack.push({ kind: 'state', label, changes });
+  return changes.length;
+}
+
+// ---- dragging an end, and drawing a new line ----
+// Where an end may snap besides level / upright: the ends of other lines and the edges of other
+// tiles, within SNAP_PX on screen (so dividers start and stop in line with each other).
+function snapLineEnd(p, fixed, exclude) {
+  const th = SNAP_PX / board.zoom;
+  const level = Math.abs(p.y - fixed.y) < 1e-9, upright = Math.abs(p.x - fixed.x) < 1e-9;
+  let bx = null, by = null;
+  const tryX = (x) => { const d = Math.abs(x - p.x); if (d <= th && (!bx || d < bx.d)) bx = { d, x }; };
+  const tryY = (y) => { const d = Math.abs(y - p.y); if (d <= th && (!by || d < by.d)) by = { d, y }; };
+  for (const t of tiles) {
+    if (!t.board || t === exclude) continue;
+    if (t.type === 'line') { for (const q of lineAbs(t)) { tryX(q.x); tryY(q.y); } continue; }
+    const b = t.board;
+    tryX(b.x); tryX(b.x + b.w); tryY(b.y); tryY(b.y + b.h);
+  }
+  hideGuides();
+  const out = { ...p };
+  if (bx && !upright) { out.x = bx.x; showGuideV(bx.x); }
+  if (by && !level) { out.y = by.y; showGuideH(by.y); }
+  return out;
+}
+function startLineEndDrag(tile, end, e) {
+  if (IS_VIEW || !isBoard() || e.button !== 0 || tile.locked) return;
+  e.preventDefault(); e.stopPropagation();
+  const handle = e.currentTarget;
+  try { handle.setPointerCapture(e.pointerId); } catch {}
+  const before = shapeState(tile);
+  const abs0 = lineAbs(tile);
+  const idx = end === 0 ? 0 : abs0.length - 1;
+  const fixed = abs0[end === 0 ? 1 : abs0.length - 2];
+  const ends0 = tile.ends ? tile.ends.slice() : [null, null];
+  let onEnd = null; // the tile this end is over: it goes on it when dropped
+  document.body.classList.add('resizing');
+  const onMove = (ev) => {
+    let p = toCanvas(ev.clientX, ev.clientY);
+    const target = ev.altKey ? null : attachTargetAt(ev.clientX, ev.clientY, tile);
+    onEnd = target ? attachEnd(target, p) : null;
+    showAttachTarget(target);
+    if (onEnd) { p = { x: onEnd.x, y: onEnd.y }; hideGuides(); }
+    else if (!ev.altKey) { p = LineTile.snapEnd(fixed, p, ev.shiftKey ? { step: 15 } : {}); p = snapLineEnd(p, fixed, tile); } else hideGuides();
+    const ends = ends0.slice(); ends[end] = null; // (loose while it moves; on a tile once dropped)
+    tile.ends = ends.some(Boolean) ? ends : null;
+    const abs = abs0.slice(); abs[idx] = p;
+    setLineAbs(tile, abs);
+    updateLineToolbar();
+  };
+  let ended = false;
+  const onUp = () => {
+    if (ended) return;
+    ended = true;
+    activeInteractions.delete(onUp);
+    handle.removeEventListener('pointermove', onMove);
+    handle.removeEventListener('pointerup', onUp);
+    handle.removeEventListener('pointercancel', onUp);
+    handle.removeEventListener('lostpointercapture', onUp);
+    document.body.classList.remove('resizing');
+    hideGuides();
+    showAttachTarget(null);
+    const ends = tile.ends ? tile.ends.slice() : [null, null];
+    ends[end] = onEnd ? { id: onEnd.id, fx: onEnd.fx, fy: onEnd.fy } : null;
+    setLineEnds(tile, ends);
+    reattachLine(tile); // (an elbowed or curved line is routed again)
+    if (recordStates(onEnd ? 'attach line end' : 'move line end', [tile], [before])) scheduleOffscreen();
+  };
+  handle.addEventListener('pointermove', onMove);
+  handle.addEventListener('pointerup', onUp);
+  handle.addEventListener('pointercancel', onUp);
+  handle.addEventListener('lostpointercapture', onUp);
+  activeInteractions.add(onUp);
+}
+
+// The line tool (the ╱ button, or D): press and drag on the board to draw one line; a click
+// without a drag draws a level one. Esc, or the button again, puts the tool away.
+let lineTool = false;
+function setLineTool(on) {
+  lineTool = !!on && isBoard() && !IS_VIEW;
+  document.body.classList.toggle('line-tool', lineTool);
+  const btn = document.getElementById('add-line');
+  if (btn) btn.classList.toggle('toggled', lineTool);
+  if (lineTool) setStatus('Line: drag on the board to draw it (Shift: 15° steps). Esc: done', 6000);
+}
+function newLineLook() {
+  const dark = layout.background !== 'light';
+  // about 3 px on screen at the zoom it is drawn at, unless a look was set since
+  const base = { color: dark ? '#e6e6e6' : '#1a1a1a', width: LineTile.tidy(3 / board.zoom), dash: 'solid', start: 'none', end: 'none' };
+  return LineTile.normalize(lineLook ? { ...base, ...lineLook } : base);
+}
+grid.addEventListener('pointerdown', (e) => {
+  if (!lineTool || e.button !== 0 || !isBoard() || IS_VIEW) return;
+  if (e.target.closest && e.target.closest('.text-toolbar, .ctx')) return;
+  e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+  try { grid.setPointerCapture(e.pointerId); } catch {}
+  let p0 = toCanvas(e.clientX, e.clientY);
+  const s0 = { x: e.clientX, y: e.clientY };
+  const style = newLineLook();
+  // (2026-11-15) started on a tile: the line starts on it (the middle of its side nearest the press)
+  const startOn = e.altKey ? null : attachTargetAt(e.clientX, e.clientY, null);
+  const startEnd = startOn ? attachEnd(startOn, p0) : null;
+  if (startEnd) p0 = { x: startEnd.x, y: startEnd.y };
+  let endOn = null;
+  let tile = null;
+  const onMove = (ev) => {
+    if (!tile && Math.hypot(ev.clientX - s0.x, ev.clientY - s0.y) < 4) return;
+    let p = toCanvas(ev.clientX, ev.clientY);
+    const target = ev.altKey ? null : attachTargetAt(ev.clientX, ev.clientY, tile);
+    endOn = target && target !== startOn ? attachEnd(target, p) : null;
+    showAttachTarget(endOn ? target : null);
+    if (endOn) { p = { x: endOn.x, y: endOn.y }; hideGuides(); }
+    else if (!ev.altKey) { p = LineTile.snapEnd(p0, p, ev.shiftKey ? { step: 15 } : {}); p = snapLineEnd(p, p0, tile); } else hideGuides();
+    const r = LineTile.fromAbs([p0, p], style);
+    if (!r) return;
+    if (!tile) { tile = addLineTile({ board: r.board, points: r.points, style }); if (!tile) return; bringToFront(tile); }
+    else { tile.board = r.board; tile.points = r.points; layoutTile(tile); }
+  };
+  let ended = false;
+  const onUp = () => {
+    if (ended) return;
+    ended = true;
+    activeInteractions.delete(onUp);
+    grid.removeEventListener('pointermove', onMove);
+    grid.removeEventListener('pointerup', onUp);
+    grid.removeEventListener('pointercancel', onUp);
+    grid.removeEventListener('lostpointercapture', onUp);
+    hideGuides();
+    if (!tile) { // a click: a level line 200 px long on screen, from where it was clicked
+      const r = LineTile.fromAbs([p0, { x: p0.x + 200 / board.zoom, y: p0.y }], style);
+      tile = r && addLineTile({ board: r.board, points: r.points, style });
+      if (tile) bringToFront(tile);
+    }
+    setLineTool(false);
+    showAttachTarget(null);
+    if (!tile) return;
+    if (startEnd || endOn) { setLineEnds(tile, [startEnd, endOn]); reattachLine(tile); }
+    selectOnly(tile);
+    recordAdd([tile], 'draw line');
+    updateChrome(); markOnBoard();
+    setStatus('Line drawn – drag its ends to change it; [ ] thinner / thicker', 5000);
+  };
+  grid.addEventListener('pointermove', onMove);
+  grid.addEventListener('pointerup', onUp);
+  grid.addEventListener('pointercancel', onUp);
+  grid.addEventListener('lostpointercapture', onUp);
+  activeInteractions.add(onUp);
+}, true);
+document.getElementById('add-line').addEventListener('click', () => {
+  if (!isBoard()) { setStatus('Lines live on the board – switch to Board mode'); return; }
+  setLineTool(!lineTool);
+});
+window.addEventListener('keydown', (e) => { if (lineTool && e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setLineTool(false); } }, true);
+
+// ---------- arrows that stay on what they point at; the pen (Mark, 2026-11-15) ----------
+// A line's end dropped on a picture, shape or note stays on it: line.ends[i] = { id, fx, fy } (where
+// on that tile's box, at the middle of the side it was dropped nearest). When that tile moves,
+// resizes or is undone, the line follows; an elbowed or curved line is routed again
+// (lib/linetile.js route). Alt while dropping: a loose end. Frames, locked tiles and other lines are
+// never ends. An arrow held at both ends is changed by its ends, not dragged on its own.
+let attachIndex = null; // Map(tile id -> Set(lines with an end on it)); null: to be worked out again
+function attachDirty() { attachIndex = null; }
+function attachedLinesOf(t) {
+  if (!attachIndex) {
+    attachIndex = new Map();
+    for (const ln of tiles) if (ln.type === 'line' && ln.ends) for (const e of ln.ends) if (e && e.id) { if (!attachIndex.has(e.id)) attachIndex.set(e.id, new Set()); attachIndex.get(e.id).add(ln); }
+  }
+  return attachIndex.get(t.id) || null;
+}
+// where an end on a tile is now (null when that tile is gone or off the board)
+function endPoint(e) {
+  const t = e && e.id ? tileById(e.id) : null;
+  if (!t || !t.board) return null;
+  const b = t.board;
+  return { x: b.x + e.fx * b.w, y: b.y + e.fy * b.h, dir: LineTile.sideDir(e.fx, e.fy) };
+}
+function reattachLine(ln) {
+  if (!ln.ends || !tiles.includes(ln)) return;
+  const A0 = endPoint(ln.ends[0]), B0 = endPoint(ln.ends[1]);
+  if (!A0 && !B0) return;
+  const abs = lineAbs(ln);
+  const A = A0 || { ...abs[0], dir: null }, B = B0 || { ...abs[abs.length - 1], dir: null };
+  let pts;
+  if (ln.style.route !== 'straight' || abs.length === 2) pts = LineTile.route(A, B, ln.style.route);
+  else { pts = abs.map((p) => ({ x: p.x, y: p.y })); pts[0] = { x: A.x, y: A.y }; pts[pts.length - 1] = { x: B.x, y: B.y }; }
+  setLineAbs(ln, pts);
+}
+// the tile under a point that an end can go on
+function attachTargetAt(clientX, clientY, exclude) {
+  for (const el of document.elementsFromPoint(clientX, clientY)) {
+    const te = el.closest && el.closest('.tile');
+    if (!te) continue;
+    const t = tiles.find((x) => x.el === te);
+    if (!t || t === exclude || t.type === 'line' || t.frame || t.locked || !t.board) continue;
+    return t;
+  }
+  return null;
+}
+// the middle of the target's side nearest p: { id, fx, fy, x, y }
+function attachEnd(t, p) {
+  const b = t.board;
+  const sides = [[0, 0.5], [1, 0.5], [0.5, 0], [0.5, 1]].map(([fx, fy]) => ({ fx, fy, x: b.x + fx * b.w, y: b.y + fy * b.h }));
+  sides.sort((u, v) => Math.hypot(u.x - p.x, u.y - p.y) - Math.hypot(v.x - p.x, v.y - p.y));
+  return { id: t.id, ...sides[0] };
+}
+let attachShown = null;
+function showAttachTarget(t) { if (attachShown === t) return; if (attachShown) attachShown.el.classList.remove('attach-target'); attachShown = t; if (t) t.el.classList.add('attach-target'); }
+function setLineEnds(ln, ends) { ln.ends = ends && ends.some(Boolean) ? ends.map((e) => (e ? { id: e.id, fx: e.fx, fy: e.fy } : null)) : null; attachDirty(); }
+
+// ---- the pen and the highlighter ----
+// P draws with the pen, Shift+P with the highlighter (or the ✎ menu); it stays on for stroke after
+// stroke until Esc or P again. Each stroke is a line (lib/linetile.js) of many points, smoothed a
+// little, one undo each; select one to change its colour or thickness in the line bar.
+let penTool = null; // null | 'pen' | 'highlighter'
+function setPenTool(kind) {
+  penTool = kind && isBoard() && !IS_VIEW ? kind : null;
+  if (penTool && lineTool) setLineTool(false);
+  document.body.classList.toggle('pen-tool', !!penTool);
+  const btn = document.getElementById('btn-pen');
+  if (btn) btn.classList.toggle('toggled', !!penTool);
+  if (penTool) setStatus(`${penTool === 'pen' ? 'Pen' : 'Highlighter'}: draw on the board. Esc or ${penTool === 'pen' ? 'P' : 'Shift+P'} to stop`, 6000);
+}
+let penLook = { pen: null, highlighter: null }; // the last look set on a stroke of each kind
+function newPenLook(kind) {
+  const z = board.zoom, dark = layout.background !== 'light';
+  const base = kind === 'highlighter'
+    ? { color: '#ffe14d80', width: LineTile.tidy(22 / z), dash: 'solid', start: 'none', end: 'none', route: 'straight' }
+    : { color: dark ? '#e6e6e6' : '#1a1a1a', width: LineTile.tidy(3 / z), dash: 'solid', start: 'none', end: 'none', route: 'straight' };
+  return LineTile.normalize(penLook[kind] ? { ...base, ...penLook[kind] } : base);
+}
+grid.addEventListener('pointerdown', (e) => {
+  if (!penTool || e.button !== 0 || !isBoard() || IS_VIEW) return;
+  if (e.target.closest && e.target.closest('.text-toolbar, .ctx')) return;
+  e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+  try { grid.setPointerCapture(e.pointerId); } catch {}
+  const kind = penTool;
+  const style = newPenLook(kind);
+  const pts = [toCanvas(e.clientX, e.clientY)];
+  let last = { x: e.clientX, y: e.clientY };
+  let tile = null;
+  const onMove = (ev) => {
+    if (Math.hypot(ev.clientX - last.x, ev.clientY - last.y) < 1.5) return; // (a point every pixel and a half is plenty)
+    last = { x: ev.clientX, y: ev.clientY };
+    pts.push(toCanvas(ev.clientX, ev.clientY));
+    const r = LineTile.fromAbs(pts, style);
+    if (!r) return;
+    if (!tile) { tile = addLineTile({ board: r.board, points: r.points, style, freehand: true }); if (tile) bringToFront(tile); }
+    else { tile.board = r.board; tile.points = r.points; layoutTile(tile); }
+  };
+  let ended = false;
+  const onUp = () => {
+    if (ended) return;
+    ended = true;
+    activeInteractions.delete(onUp);
+    grid.removeEventListener('pointermove', onMove);
+    grid.removeEventListener('pointerup', onUp);
+    grid.removeEventListener('pointercancel', onUp);
+    grid.removeEventListener('lostpointercapture', onUp);
+    if (!tile) { // a click: a dot
+      const p = pts[0], d = style.width * 0.01;
+      const r = LineTile.fromAbs([p, { x: p.x + d, y: p.y }], style);
+      tile = r && addLineTile({ board: r.board, points: r.points, style, freehand: true });
+      if (tile) bringToFront(tile);
+    } else setLineAbs(tile, LineTile.simplify(pts, 0.6 / board.zoom)); // fewer points, the same stroke
+    if (!tile) return;
+    recordAdd([tile], kind === 'pen' ? 'draw' : 'highlight');
+    updateChrome(); markOnBoard();
+  };
+  grid.addEventListener('pointermove', onMove);
+  grid.addEventListener('pointerup', onUp);
+  grid.addEventListener('pointercancel', onUp);
+  grid.addEventListener('lostpointercapture', onUp);
+  activeInteractions.add(onUp);
+}, true);
+window.addEventListener('keydown', (e) => { if (penTool && e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setPenTool(null); } }, true);
+document.getElementById('btn-pen').addEventListener('click', (e) => {
+  showRowMenu(menuAt(e.currentTarget), [
+    [penTool === 'pen' ? 'Pen  (P) – on' : 'Pen  (P)', () => setPenTool(penTool === 'pen' ? null : 'pen')],
+    [penTool === 'highlighter' ? 'Highlighter  (Shift+P) – on' : 'Highlighter  (Shift+P)', () => setPenTool(penTool === 'highlighter' ? null : 'highlighter')],
+    ['Stop drawing  (Esc)', () => setPenTool(null), !penTool],
+  ]);
+});
+
+// ---- what the menu and keys act on ----
+function selectedLines() { return [...selection].filter((t) => t.type === 'line' && tiles.includes(t) && !t.locked); }
+// the selected lines when this one is among them, else just this one
+function linesFor(tile) { const sel = selectedLines(); return tile && !selection.has(tile) ? [tile] : sel.length ? sel : tile ? [tile] : []; }
+
+let lineStyleTimer = null, lineStyleBefores = null, lineStyleList = null;
+// restyle lines (patch: some of the style, or a function of each line's style); one undo per burst
+function applyLineStyle(list, patch, { debounce = false } = {}) {
+  if (!list.length) return;
+  if (!lineStyleBefores || lineStyleList.length !== list.length || lineStyleList.some((t, i) => t !== list[i])) {
+    commitLineStyle();
+    lineStyleList = list.slice(); lineStyleBefores = list.map(shapeState);
+  }
+  for (const t of list) setLineStyle(t, { ...t.style, ...(typeof patch === 'function' ? patch(t.style) : patch) });
+  lineLook = { ...list[list.length - 1].style }; // the next line drawn looks like this
+  updateLineToolbar();
+  clearTimeout(lineStyleTimer);
+  if (debounce) lineStyleTimer = setTimeout(commitLineStyle, 400); else commitLineStyle();
+}
+function commitLineStyle() {
+  clearTimeout(lineStyleTimer);
+  const list = lineStyleList, befores = lineStyleBefores;
+  lineStyleList = null; lineStyleBefores = null;
+  if (list) recordStates(list.length === 1 ? 'line look' : `look of ${list.length} lines`, list.filter((t) => tiles.includes(t)), befores.filter((_, i) => tiles.includes(list[i])));
+}
+function stepLines(dir, tile) {
+  const list = linesFor(tile);
+  if (!list.length) return;
+  applyLineStyle(list, (s) => ({ width: LineTile.step(s.width, dir) }), { debounce: true });
+  const w = list[0].style.width;
+  setStatus(`${list.length === 1 ? 'Line' : list.length + ' lines'}: ${+w.toPrecision(3)} px thick`, 2000);
+}
+// every line with the same colour and thickness as this one (the dividers of a board, say), so they
+// can all be changed at once
+function selectLinesLike(tile) {
+  const same = tiles.filter((t) => t.type === 'line' && t.board && t.style.color === tile.style.color && Math.abs(t.style.width - tile.style.width) <= tile.style.width * 0.02);
+  clearSelection();
+  for (const t of same) setSelected(t, true);
+  setStatus(`${same.length} line${same.length === 1 ? '' : 's'} selected – the line bar changes them all`, 5000);
+}
+function removeLines(tile) {
+  const list = linesFor(tile).filter((t) => !t.locked);
+  for (const t of list) removeTile(t);
+  setStatus(list.length === 1 ? 'Line removed' : `${list.length} lines removed`, 2500);
+}
+
+// ---- rows between level lines ----
+function levelGuides() {
+  const out = [];
+  for (const t of tiles) {
+    if (t.type !== 'line' || !t.board) continue;
+    const sb = snapBoxOf(t);
+    if (sb && sb.axis === 'h') out.push({ id: t.id, y: sb.y + sb.h / 2, x1: sb.x, x2: sb.x + sb.w, width: t.style.width });
+  }
+  return out;
+}
+const isLevelLine = (t) => { const sb = t && t.type === 'line' ? snapBoxOf(t) : null; return !!sb && sb.axis === 'h'; };
+function rowItems({ picturesOnly = false } = {}) {
+  return tiles.filter((t) => t.board && !t.rotation && !t.locked && !t.frame && t.type !== 'line' && (t.type === 'text' ? !picturesOnly : (picturesOnly ? t.type === 'image' : t.aspect > 0)))
+    .map((t) => ({ id: t.id, kind: t.type === 'text' ? 'text' : 'picture', board: { ...t.board }, aspect: t.aspect, crop: t.crop || null }));
+}
+function rowsPicked(tile) { return linesFor(tile).filter(isLevelLine).map((t) => t.id); }
+function lineUpRows(tile) {
+  const { boxes, report } = Rows.tidy(levelGuides(), rowItems(), { picked: rowsPicked(tile) });
+  if (!boxes.size) {
+    setStatus(report.skippedStacked ? 'Those rows have pictures stacked above each other; left as they are' : 'No pictures between these lines (draw a line above and below a row)', 5000);
+    return;
+  }
+  const list = [...boxes.keys()].map(tileById).filter(Boolean);
+  const befores = list.map(shapeState);
+  for (const t of list) { t.board = { ...boxes.get(t.id) }; layoutTile(t); if (t.type === 'text') renderTextTile(t); }
+  recordStates('line up pictures', list, befores);
+  scheduleOffscreen();
+  const left = [];
+  if (report.skippedTall) left.push(`${report.skippedTall} spanning rows`);
+  if (report.skippedStacked) left.push(`${report.skippedStacked} row${report.skippedStacked === 1 ? '' : 's'} of stacked pictures`);
+  setStatus(`Lined up ${report.pictures} picture${report.pictures === 1 ? '' : 's'} in ${report.rows} row${report.rows === 1 ? '' : 's'}` + (report.texts ? `, with ${report.texts} caption${report.texts === 1 ? '' : 's'}` : '') + (left.length ? ` (left alone: ${left.join(', ')})` : '') + ' – Ctrl+Z undoes', 8000);
+}
+function trimAtLines(tile) {
+  const { changes, report } = Rows.trim(levelGuides(), rowItems({ picturesOnly: true }), { picked: rowsPicked(tile) });
+  if (!changes.size) { setStatus('No picture crosses these lines', 4000); return; }
+  const list = [...changes.keys()].map(tileById).filter(Boolean);
+  const befores = list.map(shapeState);
+  for (const t of list) {
+    const c = changes.get(t.id);
+    t.crop = { ...c.crop }; t.board = { ...c.board }; t.aspect = c.board.w / c.board.h;
+    t.thumbH = 0; applyCrop(t); layoutTile(t);
+  }
+  recordStates('trim pictures at lines', list, befores);
+  scheduleOffscreen();
+  setStatus(`Trimmed ${report.pictures} picture${report.pictures === 1 ? '' : 's'} at the lines (a crop: right-click → Reset crop brings a picture back) – Ctrl+Z undoes`, 8000);
+}
+function lineMenuItems(tile) {
+  const level = isLevelLine(tile);
+  return [
+    ['Thicker  ( ] )', () => stepLines(1, tile)],
+    ['Thinner  ( [ )', () => stepLines(-1, tile)],
+    ['Select lines like this one', () => selectLinesLike(tile)],
+    ['Line up the pictures between these lines', () => lineUpRows(tile), !level],
+    ['Trim pictures at these lines', () => trimAtLines(tile), !level],
+    ...stackMenuItems(tile),
+    lockMenuItem(tile),
+    ['Remove', () => removeLines(tile)],
+  ];
+}
+
+// ---- the floating line bar ----
+let lineBar = null;
+function buildLineBar() {
+  const el = document.createElement('div');
+  el.className = 'text-toolbar line-toolbar';
+  el.addEventListener('pointerdown', (e) => { e.stopPropagation(); if (e.target.closest('button') && !e.target.closest('input, select')) e.preventDefault(); });
+  const mk = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; el.appendChild(n); return n; };
+  const label = mk('span', 'lb-label', 'Line');
+  const thinner = mk('button', null, '−'); thinner.title = 'Thinner ( [ )';
+  const slider = mk('input', 'lb-slider'); slider.type = 'range'; slider.min = '0'; slider.max = '1000'; slider.step = '1'; slider.title = 'Thickness';
+  const thicker = mk('button', null, '+'); thicker.title = 'Thicker ( ] )';
+  const width = mk('input', 'lb-width'); width.type = 'number'; width.min = String(LineTile.MIN_W); width.max = String(LineTile.MAX_W); width.step = 'any'; width.title = 'Thickness (board pixels)';
+  const lines = () => selectedLines();
+  thinner.addEventListener('click', () => stepLines(-1));
+  thicker.addEventListener('click', () => stepLines(1));
+  slider.addEventListener('input', () => applyLineStyle(lines(), { width: LineTile.fromSlider(Number(slider.value)) }, { debounce: true }));
+  width.addEventListener('input', () => { const v = Number(width.value); if (v > 0) applyLineStyle(lines(), { width: v }, { debounce: true }); });
+  mk('div', 'sep');
+  const color = mk('button', 'swatch'); color.title = 'Colour';
+  color.addEventListener('click', () => openColorPop(color, (lines()[0] || {}).style ? lines()[0].style.color : '#1a1a1a', (c) => applyLineStyle(lines(), { color: c })));
+  mk('div', 'sep');
+  const dash = mk('select', 'lb-dash'); dash.title = 'Solid, dashed or dotted';
+  for (const [v, t] of [['solid', 'Solid'], ['dashed', 'Dashed'], ['dotted', 'Dotted']]) { const o = document.createElement('option'); o.value = v; o.textContent = t; dash.appendChild(o); }
+  dash.addEventListener('change', () => applyLineStyle(lines(), { dash: dash.value }));
+  const route = mk('select', 'lb-route'); route.title = 'Straight, elbowed or curved';
+  for (const [v, t] of [['straight', 'Straight'], ['elbow', 'Elbow'], ['curve', 'Curved']]) { const o = document.createElement('option'); o.value = v; o.textContent = t; route.appendChild(o); }
+  route.addEventListener('change', () => {
+    const list = lines().filter((t) => !t.freehand);
+    applyLineStyle(list, { route: route.value });
+    // routed again now, between its ends where they are
+    for (const t of list) {
+      const abs = lineAbs(t), en = t.ends || [];
+      const A = endPoint(en[0]) || { ...abs[0], dir: null }, B = endPoint(en[1]) || { ...abs[abs.length - 1], dir: null };
+      setLineAbs(t, LineTile.route(A, B, route.value));
+    }
+  });
+  const startCap = mk('button', 'lb-cap', '◀'); startCap.title = 'Arrowhead at the start';
+  const endCap = mk('button', 'lb-cap', '▶'); endCap.title = 'Arrowhead at the end';
+  startCap.addEventListener('click', () => { const on = (lines()[0] || {}).style && lines()[0].style.start === 'arrow'; applyLineStyle(lines(), { start: on ? 'none' : 'arrow' }); });
+  endCap.addEventListener('click', () => { const on = (lines()[0] || {}).style && lines()[0].style.end === 'arrow'; applyLineStyle(lines(), { end: on ? 'none' : 'arrow' }); });
+  mk('div', 'sep');
+  const like = mk('button', null, 'Select alike'); like.title = 'Select every line with this colour and thickness, to change them all at once';
+  like.addEventListener('click', () => { const t = lines()[0]; if (t) selectLinesLike(t); });
+  const tidy = mk('button', null, 'Line up rows'); tidy.title = 'Line up the pictures between these lines: same height, side by side, tops level';
+  tidy.addEventListener('click', () => { const t = lines()[0]; if (t) lineUpRows(t); });
+  const trim = mk('button', null, 'Trim'); trim.title = 'Cut pictures where they cross these lines (a crop: nothing is lost)';
+  trim.addEventListener('click', () => { const t = lines()[0]; if (t) trimAtLines(t); });
+  document.body.appendChild(el);
+  lineBar = { el, label, slider, width, color, dash, route, startCap, endCap, tidy, trim };
+  return lineBar;
+}
+function updateLineToolbar() {
+  const list = selectedLines();
+  if (!list.length || !isBoard() || IS_VIEW) { if (lineBar) lineBar.el.hidden = true; return; }
+  if (!lineBar) buildLineBar();
+  const b = lineBar, s = list[0].style;
+  b.el.hidden = false;
+  b.label.textContent = list.length === 1 ? 'Line' : `${list.length} lines`;
+  if (document.activeElement !== b.slider) b.slider.value = String(LineTile.toSlider(s.width));
+  if (document.activeElement !== b.width) b.width.value = String(+s.width.toPrecision(3));
+  b.color.style.background = s.color;
+  b.dash.value = s.dash;
+  b.route.value = s.route || 'straight';
+  b.route.disabled = list.every((t) => t.freehand);
+  b.startCap.classList.toggle('on', s.start === 'arrow');
+  b.endCap.classList.toggle('on', s.end === 'arrow');
+  const level = list.some(isLevelLine);
+  b.tidy.disabled = !level; b.trim.disabled = !level;
+  // above the selected lines, or under them when the text bar is up there too
+  const rects = list.map((t) => t.el.getBoundingClientRect());
+  const left = Math.min(...rects.map((r) => r.left)), top = Math.min(...rects.map((r) => r.top)), bottom = Math.max(...rects.map((r) => r.bottom));
+  const r = b.el.getBoundingClientRect();
+  const textUp = textToolbar && !textToolbar.el.hidden;
+  let y = textUp ? bottom + 8 : top - r.height - 8;
+  if (y < 40) y = bottom + 8;
+  b.el.style.left = Math.max(8, Math.min(left, document.documentElement.clientWidth - r.width - 8)) + 'px';
+  b.el.style.top = Math.max(8, Math.min(y, document.documentElement.clientHeight - r.height - 8)) + 'px';
+}
 
 // ---------- image sequences: a Nuke-style frame player ----------
 // A sequence tile draws frame N into a <canvas> from an in-memory bitmap cache; frames are never
@@ -3874,7 +7807,7 @@ function addSequenceTile(dir, seq, state = {}, at = null) {
   });
   rateSel.addEventListener('change', () => { pb.rate = Number(rateSel.value); broadcast(tile, 'rate', pb.rate); });
   cv.addEventListener('click', (e) => { if (e.shiftKey) return; if (!tile.guard.shouldAct()) return; tile.togglePlay(); });
-  cv.addEventListener('dblclick', () => { if (!cmp.el.hidden) return; toggleTileFullscreen(el); });
+  cv.addEventListener('dblclick', () => { if (!cmp.el.hidden || sedOpen()) return; toggleTileFullscreen(el); });
   el.addEventListener('dblclick', (e) => tileDblClick(tile, e)); // board: the tile gets it, not the canvas
   el.addEventListener('click', (e) => {
     tileClick(tile, e);
@@ -4054,9 +7987,12 @@ setInterval(() => { if (navigator.onLine) for (const t of tiles) if (t.offline &
 function clearAll() {
   if (!viewMayEdit()) return; // (removeTile refuses in a view: the loop below would never end)
   while (tiles.length) removeTile(tiles[tiles.length - 1], { record: false });
+  zTop = 1; zBottom = 0; // a new scene starts a new stack
+  favFolders = []; scheduleFavorites(); // a new scene has no favorite folders
   undoStack.clear();
   clearTimeout(rowTimer); rowEntry = null;
   layout.quality = 'full'; syncQualityRadios(); // a new scene starts at full resolution
+  setBoardBackground('dark'); // and dark
 }
 
 function addVideos(paths, at = null) {
@@ -4119,6 +8055,13 @@ window.api.onProxyProgress((p, frac, tier) => {
   }
 });
 // yt-dlp download progress for web tiles in Local mode
+// main tells us when a drive or share that answered too slowly has answered after all (see
+// guardedFs in main.js): every video that failed to load meanwhile gets another go
+if (window.api.onPathsRecovered) window.api.onPathsRecovered(() => {
+  const failed = tiles.filter((t) => t.retryAfterRecovery && t.video && t.video.error);
+  for (const t of failed) t.retryAfterRecovery();
+  if (failed.length) setStatus(`Reloading ${failed.length} video${failed.length === 1 ? '' : 's'} that could not be read while the PC was busy`, 6000);
+});
 window.api.onDownloadProgress((pageUrl, frac) => { for (const t of tiles) if (t.url === pageUrl && t.onDownloadProgress) t.onDownloadProgress(frac); });
 
 // smooth seek-bar updates for every tile (timeupdate alone is too coarse)
@@ -4128,6 +8071,128 @@ window.api.onDownloadProgress((pageUrl, frac) => { for (const t of tiles) if (t.
   if (cmp.tick) cmp.tick();
   requestAnimationFrame(loop);
 })();
+
+// ---------- Import from Miro (Mark, 2026-11-06) ----------
+// App ▾ → Import from Miro…: a board link, the user's own Miro access token and a folder. The main
+// process reads the board, downloads its pictures into that folder and writes an Ozy board there
+// (lib/miroimport.js); this window only asks, shows the progress and opens the result.
+const miroDlg = document.getElementById('miro-dialog');
+const miroQ = (sel) => miroDlg.querySelector(sel);
+let miroRunning = false;
+let miroHasToken = false;
+async function openMiroDialog() {
+  if (IS_VIEW) return;
+  document.querySelectorAll('.menu-list').forEach((m) => { if (m.id !== 'recent-list') m.hidden = true; });
+  miroDlg.hidden = false;
+  if (!miroRunning) {
+    miroQ('.miro-result').hidden = true;
+    miroQ('.miro-progress').hidden = true;
+    miroQ('#miro-go').disabled = false;
+    miroQ('#miro-go').textContent = 'Import';
+  }
+  try {
+    const d = await window.api.miroDefaults();
+    if (!miroQ('#miro-root').value) miroQ('#miro-root').value = d.root || '';
+    miroHasToken = !!d.hasToken;
+  } catch {}
+  miroQ('.miro-saved').hidden = !miroHasToken;
+  miroQ('#miro-token').placeholder = miroHasToken ? 'Saved on this PC (paste a new one to replace it)' : 'Paste your Miro access token';
+  (miroQ('#miro-url').value ? miroQ('#miro-token') : miroQ('#miro-url')).focus();
+}
+function closeMiroDialog() { if (!miroRunning) miroDlg.hidden = true; }
+function miroShowResult(text, kind) {
+  const r = miroQ('.miro-result');
+  r.hidden = false; r.textContent = text; r.className = 'miro-result ' + (kind || '');
+}
+async function runMiroImport() {
+  if (miroRunning) { window.api.miroCancel(); miroQ('#miro-go').textContent = 'Stopping…'; return; }
+  const boardUrl = miroQ('#miro-url').value.trim();
+  const token = miroQ('#miro-token').value.trim();
+  const root = miroQ('#miro-root').value.trim();
+  if (!boardUrl) { miroShowResult('Paste the board link first (open the board in Miro and copy the address).', 'bad'); miroQ('#miro-url').focus(); return; }
+  if (!token && !miroHasToken) { miroShowResult('Paste your Miro access token first.', 'bad'); miroQ('#miro-token').focus(); return; }
+  miroRunning = true;
+  miroQ('.miro-result').hidden = true;
+  miroQ('.miro-progress').hidden = false;
+  miroQ('.miro-note').textContent = 'Starting…';
+  miroQ('.miro-progress .fill').style.width = '0%';
+  miroQ('#miro-go').textContent = 'Stop';
+  miroQ('#miro-close').disabled = true;
+  logUi('info', 'miro import requested', { root });
+  let r;
+  try { r = await window.api.miroImport({ boardUrl, token, root, remember: miroQ('#miro-remember').checked }); }
+  catch (e) { r = { error: String(e && e.message || e) }; }
+  miroRunning = false;
+  miroQ('#miro-go').textContent = 'Import';
+  miroQ('#miro-close').disabled = false;
+  miroQ('#miro-token').value = ''; // not left sitting in the window
+  if (r.error) { miroShowResult(r.error, 'bad'); return; }
+  if (miroQ('#miro-remember').checked) miroHasToken = true;
+  miroQ('.miro-progress .fill').style.width = '100%';
+  miroQ('.miro-note').textContent = `Done: ${r.items} item${r.items === 1 ? '' : 's'} read. Saved in ${r.dir}`;
+  miroShowResult(r.summary || 'Imported.', r.failed ? 'warn' : 'good');
+  setStatus('Miro board imported: ' + r.sessionPath, 6000);
+  if (tiles.length && !confirm('Open the imported board now? The board that is open here will be closed (save it first if you want to keep changes).')) return;
+  await openSession(r.sessionPath);
+}
+if (!IS_VIEW) {
+  document.getElementById('btn-miro').addEventListener('click', (e) => { e.stopPropagation(); openMiroDialog(); });
+  miroQ('#miro-go').addEventListener('click', runMiroImport);
+  miroQ('#miro-close').addEventListener('click', closeMiroDialog);
+  miroQ('#miro-browse').addEventListener('click', async () => { const p = await window.api.miroPickRoot(miroQ('#miro-root').value); if (p) miroQ('#miro-root').value = p; });
+  miroQ('#miro-forget').addEventListener('click', async () => { await window.api.miroForgetToken(); miroHasToken = false; miroQ('.miro-saved').hidden = true; miroQ('#miro-token').placeholder = 'Paste your Miro access token'; setStatus('Miro token forgotten on this PC'); });
+  miroQ('#miro-help').addEventListener('click', () => { const h = miroQ('.miro-howto'); h.hidden = !h.hidden; });
+  // typing in the dialog is not a shortcut; Enter imports, Escape closes
+  miroDlg.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') closeMiroDialog(); if (e.key === 'Enter' && e.target.tagName === 'INPUT') runMiroImport(); });
+  miroDlg.addEventListener('pointerdown', (e) => { if (e.target === miroDlg) closeMiroDialog(); });
+  window.api.onMiroProgress((p) => {
+    if (!miroRunning || !p) return;
+    miroQ('.miro-note').textContent = p.note || '';
+    const share = p.phase === 'board' ? 0.02 : p.phase === 'items' ? 0.02 + 0.08 * (p.total ? Math.min(1, p.done / p.total) : 0.5) : p.phase === 'images' ? 0.1 + 0.88 * (p.total ? p.done / p.total : 1) : 0.99;
+    miroQ('.miro-progress .fill').style.width = (share * 100).toFixed(1) + '%';
+  });
+}
+
+// ---------- light or dark board ----------
+// A board is dark unless it is set light (right-click on empty board space). A Miro import starts
+// light, since everything on a Miro board was made to be read on white. Saved with the session.
+function setBoardBackground(bg) {
+  layout.background = bg === 'light' ? 'light' : 'dark';
+  document.body.classList.toggle('board-light', layout.background === 'light');
+}
+
+// ---------- pictures: a small copy while small on screen ----------
+// A picture that has a smaller copy (a Miro import keeps Miro's own preview beside each picture)
+// shows that copy until it is big enough on screen to need the full one, and goes back to it once
+// it is small or off screen again. A board of a thousand photos then never decodes them all at
+// full size. The full one is decoded off to the side first, so the swap never flashes.
+function applyImageLod() {
+  if (!isBoard()) return;
+  const r = gridRect();
+  const view = { x: r.left, y: r.top, w: r.width, h: r.height };
+  const dpr = window.devicePixelRatio || 1;
+  const fsEl = document.fullscreenElement;
+  for (const t of tiles) {
+    if (t.type !== 'image' || !t.thumb || !t.img || !t.board) continue;
+    // where it is on screen, worked out from the board (measuring a thousand elements would make the page lay itself out)
+    const b = t.culled ? { left: -1e6, top: -1e6, width: 0, height: 0 } : { left: r.left + board.panX + t.board.x * board.zoom, top: r.top + board.panY + t.board.y * board.zoom, width: t.board.w * board.zoom, height: t.board.h * board.zoom };
+    const onScreen = Lod.seen({ x: b.left, y: b.top, w: b.width, h: b.height }, view, 0);
+    const thumbH = t.thumbH || 600;
+    // up when it is drawn taller than the small copy has pixels; down again a little below that
+    const want = (fsEl && fsEl === t.el) || (onScreen && b.height * dpr > thumbH * (t.showingFull ? 0.8 : 1.05));
+    if (want === !!t.showingFull || t.lodBusy) continue;
+    const url = window.api.videoUrl(want ? t.path : t.thumb);
+    t.lodBusy = true;
+    const pre = new Image();
+    pre.src = url;
+    pre.decode().catch(() => {}).then(() => {
+      t.lodBusy = false;
+      if (!tiles.includes(t)) return;
+      t.showingFull = want;
+      t.img.src = url;
+    });
+  }
+}
 
 // ---------- session save / load ----------
 
@@ -4147,12 +8212,19 @@ function collectSession() {
       timelineHeight: layout.timelineHeight,
       views: viewsForSession(), // the extra view windows open now, where they are and their camera
       quality: layout.quality, // v6: the scene's playback resolution
+      background: layout.background, // 2026-11-06: 'dark' or 'light'
     },
     masterVolume,
     // every record leads with the tile's stable id (v6, additive: older builds ignore it)
-    videos: tiles.map((t) => ({ id: t.id, ...(t.type === 'text' ? {
+    favFolders: favFolders.map((f) => ({ id: f.id, name: f.name, color: f.color, open: f.open !== false })), // the Favorites tab's folders
+    videos: tiles.map((t) => ({ id: t.id, ...(t.rotation ? { rotation: t.rotation } : {}), ...(t.z != null ? { z: t.z } : {}), ...(t.locked ? { locked: true } : {}), ...(t.favorite ? { favorite: true, ...(t.favFolder ? { favFolder: t.favFolder } : {}) } : {}), ...(t.type === 'line' ? {
+      // a line: its points (fractions of its box) and look; older builds skip it (no path)
+      type: 'line', points: t.points.map((p) => p.slice()), style: { ...t.style },
+      ...(t.ends ? { ends: t.ends.map((e) => (e ? { ...e } : null)) } : {}), ...(t.freehand ? { freehand: true } : {}),
+      board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
+    } : t.type === 'text' ? {
       // a text tile is only its words, its look and its box; older builds skip it (no path)
-      type: 'text', text: t.text, style: { ...t.style },
+      type: 'text', text: t.text, style: { ...t.style }, ...(t.frame ? { frame: { ...t.frame } } : {}), ...(t.links ? { links: LinkTable.clone(t.links) } : {}), ...(t.todo ? { todo: TodoList.clone(t.todo) } : {}),
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
     } : t.type === 'sequence' ? {
       // image sequence: folder + run description + its look; the decoded-frame cache is found again by key
@@ -4161,9 +8233,9 @@ function collectSession() {
       color: t.hue, loop: !!t.loop, currentTime: t.pb.time, volume: 0, muted: false, playbackRate: t.pb.rate, paused: Session.savedPaused(t.pb.paused, t.autoPaused), aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
-      sync: t.sync ? { start: t.sync.start } : null,
+      sync: syncRecord(t),
     } : t.type === 'image' ? {
-      type: 'image', path: t.path, aspect: t.aspect, galleryH: Math.round(galleryHOf(t)),
+      type: 'image', path: t.path, ...(t.thumb ? { thumb: t.thumb } : {}), ...(t.crop ? { crop: { ...t.crop } } : {}), aspect: t.aspect, galleryH: Math.round(galleryHOf(t)),
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: [], sync: null, volume: 0, muted: false, playbackRate: 1, paused: true, currentTime: 0,
     } : (t.type === 'youtube' || t.type === 'twitch') ? {
@@ -4175,7 +8247,7 @@ function collectSession() {
       color: t.hue, loop: !!t.loop, // YouTube only
       webMode: t.webMode || 'stream', webQuality: t.webQuality || 0,
       bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
-      sync: t.sync && t.pb ? { start: t.sync.start } : null,
+      sync: t.pb ? syncRecord(t) : null,
     } : {
       type: 'file',
       path: t.path,
@@ -4193,12 +8265,13 @@ function collectSession() {
       aspect: t.aspect,
       board: t.board ? { x: t.board.x, y: t.board.y, w: t.board.w, h: t.board.h } : null,
       bookmarks: t.bookmarks.map((b) => ({ t: b.t, label: b.label, color: b.color })),
-      sync: t.sync ? { start: t.sync.start } : null,
+      sync: syncRecord(t),
     }) })),
     groups: groups.map((g) => ({
       id: g.id, name: g.name, color: g.color,
       members: [...g.members].map((t) => tiles.indexOf(t)).filter((i) => i >= 0),
       sync: g.sync, sticky: g.sticky, loop: g.loop, range: g.range, volume: g.volume, muted: g.muted, rate: g.rate,
+      ...(g.main && g.members.has(g.main) ? { main: tiles.indexOf(g.main) } : {}), ...(g.ctrl ? { ctrl: { ...g.ctrl } } : {}),
     })),
   };
 }
@@ -4207,6 +8280,15 @@ function collectSession() {
 // kind of tile, shared by opening a session, undoing a remove, and pasting. Returns the tile (null
 // when the record can't build one) and whether its file is currently unreachable.
 function buildFromRecord(v) {
+  const t = buildTileFromRecord(v);
+  if (t && Favorites.fromRecord(v)) { t.favFolder = Favorites.folderOf(v, favFolders); setFavorite(t, true, { quiet: true }); } // starred (and filed) when saved / removed / copied
+  // turned on the board (degrees clockwise; 2026-11-06, for Miro imports): drawn turned, about its middle
+  if (t) applySavedZ(t, v); // its place in the stack
+  if (t && v && v.locked === true) setLocked(t, true, { quiet: true });
+  if (t) { const deg = Number(v && v.rotation); t.rotation = Number.isFinite(deg) && Math.abs(deg % 360) > 0.05 ? ((deg % 360) + 360) % 360 : 0; if (t.rotation) layoutTile(t); }
+  return t;
+}
+function buildTileFromRecord(v) {
   if (!v || typeof v !== 'object') return null;
   if (v.type === 'youtube' || v.type === 'twitch') {
     const parsed = typeof v.url === 'string' ? WebUrl.parse(v.url) : null;
@@ -4214,6 +8296,7 @@ function buildFromRecord(v) {
   }
   // text: null when the record has no usable board, since text has no gallery form
   if (v.type === 'text') return addTextTile(v);
+  if (v.type === 'line') return addLineTile(v); // (null without a usable board: lines are board-only too)
   if (v.type === 'sequence') {
     const seq = v.seq;
     if (typeof v.dir !== 'string' || !seq || typeof seq.name !== 'string') return null;
@@ -4234,15 +8317,16 @@ async function recordFileMissing(v) {
     if (typeof v.dir !== 'string' || !seq || typeof seq.name !== 'string') return false;
     return !(await window.api.fileExists(joinPath(v.dir, Sequence.framePath(seq, seq.start))));
   }
-  if (v.type === 'youtube' || v.type === 'twitch' || v.type === 'text') return false;
+  if (v.type === 'youtube' || v.type === 'twitch' || v.type === 'text' || v.type === 'line') return false;
   if (typeof v.path !== 'string') return false;
   return !(await window.api.fileExists(v.path));
 }
 
-async function applySession(data) {
+async function applySession(data, veil) {
   if (!data || !Array.isArray(data.videos)) throw new Error('Not a Multi Video Player session file.');
   const startedAt = Date.now();
   clearAll();
+  favFolders = Favorites.folders(data.favFolders); // before the tiles: each finds its folder as it is built
   window.api.forgetDeadPaths(); // a share that was unreachable last time may be back now
   // every rule for reading an old file lives in lib/session.js, where it is tested against fixtures
   const L = Session.layout(data.layout, {
@@ -4255,13 +8339,14 @@ async function applySession(data) {
   layout.timelineExpanded = L.timelineExpanded;
   layout.timelineHeight = L.timelineHeight;
   layout.quality = L.quality; syncQualityRadios(); // before the tiles are built: each goes to its tier once probed
+  setBoardBackground(L.background);
   if (L.board) {
     board.panX = L.board.panX; board.panY = L.board.panY; board.zoom = L.board.zoom;
     board.initialized = true;
   } else {
     board.initialized = false;
   }
-  setLinked(L.linked);
+  // setLinked(L.linked); // (before 2026-11-19: each session carried it, on in most; Push neighbours is a setting now)
   setMode(L.mode);
   setMasterVolume(Session.masterVolume(data.masterVolume, DEFAULT_MASTER_VOLUME));
 
@@ -4269,6 +8354,7 @@ async function applySession(data) {
   const byIndex = new Map(); // index in data.videos -> tile (v3 files and bad entries leave gaps)
   for (const [i, v] of data.videos.entries()) {
     const r = await addFromRecord(Session.openRecord(v));
+    if (veil) loadVeil.building(veil, i + 1, data.videos.length);
     if (r.missing) missing++;
     if (r.tile) byIndex.set(i, r.tile);
   }
@@ -4277,10 +8363,16 @@ async function applySession(data) {
   for (const sg of Session.groups(data.groups, (i) => byIndex.has(i))) {
     const g = createGroup(sg.members.map((i) => byIndex.get(i)), { ...sg, sync: false });
     if (sg.id !== null) g.id = sg.id;
+    if (sg.main !== null) g.main = byIndex.get(sg.main) || null;
+    if (sg.ctrl) g.ctrl = sg.ctrl;
+    const saved = (i) => ({ start: Session.syncStart(data.videos[i]), points: Groups.cleanPoints(Session.syncPoints(data.videos[i])) });
     if (sg.sync) {
       // restore saved starts rather than recapturing them from not-yet-loaded videos
       g.sync = true;
-      for (const i of sg.members) byIndex.get(i).sync = { start: Session.syncStart(data.videos[i]) };
+      for (const i of sg.members) byIndex.get(i).sync = saved(i);
+    } else if (sg.members.some((i) => Session.syncPoints(data.videos[i]))) {
+      // Sync was off, but its sync points are kept for when it is turned on again
+      g.stash = new Map(sg.members.map((i) => [byIndex.get(i), saved(i)]));
     }
     nextGroupId = Math.max(nextGroupId, g.id + 1);
   }
@@ -4321,16 +8413,76 @@ async function openSession(filePath) {
     return;
   }
   if (!r) return;
+  const veil = loadVeil.begin(basename(r.filePath || 'session').replace(/\.mvp$/i, ''));
   try {
-    const { loaded, missing } = await applySession(r.data);
+    // const { loaded, missing } = await applySession(r.data); // (before 2026-11-19)
+    const { loaded, missing } = await applySession(r.data, veil);
+    loadVeil.watch(veil); // stays up until what is on screen has loaded
     sessionPath = r.filePath;
     rememberSession(r.filePath);
     updateChrome();
     setStatus(missing ? `Opened ${loaded} videos – ${missing} file(s) missing` : `Opened ${loaded} videos`, missing ? 10000 : 4000);
   } catch (e) {
+    loadVeil.end(veil);
     setStatus(`Could not open session: ${e.message}`, 8000);
   }
 }
+
+// ---------- opening a session: the board dims until what is on screen has loaded (2026-11-19) ----------
+// Shown after a quarter of a second (a small session never flashes it): first while the tiles are
+// set up, then until every picture and local video in view shows something (or a minute passes,
+// or "Show the board now"). YouTube / Twitch, text and lines are not waited on.
+const loadVeil = (() => {
+  const el = document.getElementById('load-veil');
+  const fill = el.querySelector('.lv-fill'), title = el.querySelector('.lv-title'), note = el.querySelector('.lv-note');
+  let run = 0, showTimer = null, poll = null;
+  const bar = (frac) => { fill.style.width = Math.round(Math.max(0, Math.min(1, frac)) * 100) + '%'; };
+  const hide = () => {
+    clearTimeout(showTimer); clearInterval(poll); poll = null;
+    el.classList.remove('on');
+    setTimeout(() => { if (!el.classList.contains('on')) el.hidden = true; }, 250);
+  };
+  el.querySelector('.lv-skip').addEventListener('click', () => { run++; hide(); });
+  const onScreen = (t) => {
+    if (!t.el || !t.el.isConnected) return false;
+    const r = t.el.getBoundingClientRect(), g = grid.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.right > g.left && r.left < g.right && r.bottom > g.top && r.top < g.bottom;
+  };
+  const shows = (t) => {
+    if (t.type === 'image') return !!t.img && t.img.complete;
+    if (!t.type && t.video && t.path && !t.url) { // a local video
+      if (t.live === false || t.video.error || t.video.readyState >= 2) return true;
+      const err = t.el.querySelector('.error');
+      return !!err && !err.classList.contains('hidden'); // (an error panel is something to see too)
+    }
+    return true;
+  };
+  return {
+    begin(name) {
+      const my = ++run;
+      clearTimeout(showTimer); clearInterval(poll); poll = null;
+      title.textContent = `Opening ${name}…`; note.textContent = 'Reading the session'; bar(0.02);
+      showTimer = setTimeout(() => { if (run !== my) return; el.hidden = false; requestAnimationFrame(() => { if (run === my) el.classList.add('on'); }); }, 250);
+      return my;
+    },
+    building(my, i, n) { if (run !== my) return; note.textContent = `Setting up ${i} of ${n}`; bar(0.25 * i / Math.max(1, n)); },
+    watch(my) {
+      if (run !== my) return;
+      const t0 = performance.now();
+      const tick = () => {
+        if (run !== my) return;
+        const want = tiles.filter((t) => (t.type === 'image' || (!t.type && t.video)) && onScreen(t));
+        const ready = want.filter(shows).length;
+        note.textContent = want.length ? `Loading media: ${ready} of ${want.length} on screen` : 'Nearly there';
+        bar(0.25 + 0.75 * (want.length ? ready / want.length : 1));
+        if (ready >= want.length || performance.now() - t0 > 60000) { run++; setTimeout(hide, want.length ? 150 : 0); }
+      };
+      tick();
+      if (run === my) poll = setInterval(tick, 150);
+    },
+    end(my) { if (run === my) { run++; hide(); } },
+  };
+})();
 
 // ---------- recent sessions ----------
 // settings.recentSessions, newest first (rules in lib/recent.js): updated on open, save and save
@@ -4573,7 +8725,7 @@ document.getElementById('btn-fit').addEventListener('click', fitAll);
 function boardTilesInOrder() { return tiles.filter((t) => t.board).sort((a, b) => (a.board.y - b.board.y) || (a.board.x - b.board.x)); }
 // the tiles a Tidy entry works on: the selection when there is one, else the whole board
 function tidyTargets() {
-  const all = boardTilesInOrder();
+  const all = boardTilesInOrder().filter((t) => !t.locked); // (locked tiles stay where they are)
   const sel = all.filter((t) => selection.has(t));
   return sel.length ? { list: sel, scoped: true } : { list: all, scoped: false };
 }
@@ -4684,7 +8836,7 @@ function tidyGroup(g) {
 // centred in the viewport; undo = resize.
 function maximizeSelectionInView() {
   if (!isBoard()) { setStatus('Board only'); return; }
-  const list = boardTilesInOrder().filter((t) => selection.has(t) && !t.freeAspect);
+  const list = boardTilesInOrder().filter((t) => selection.has(t) && !t.freeAspect && !t.locked);
   if (!list.length) { setStatus('Select a video first'); return; }
   const entry = recordResize(tiles.filter((t) => t.board));
   const r = gridRect(); const W = (r.width - 2 * GAP) / board.zoom, H = (r.height - 2 * GAP) / board.zoom;
@@ -4722,7 +8874,8 @@ document.getElementById('tidy-compact').addEventListener('click', () => { tidyLi
 document.getElementById('tidy-rows').addEventListener('click', () => { tidyList.hidden = true; tidyRows(); });
 document.getElementById('tidy-fit').addEventListener('click', () => { tidyList.hidden = true; tidyFitToView(); });
 document.getElementById('tidy-grid').addEventListener('click', () => { tidyList.hidden = true; tidyGrid(); });
-document.getElementById('btn-link').addEventListener('click', () => setLinked(!board.linked));
+// document.getElementById('btn-link').addEventListener('click', () => setLinked(!board.linked)); // (before 2026-11-19)
+document.getElementById('btn-link').addEventListener('click', () => setPushNeighbours(!board.linked));
 document.getElementById('btn-hand').addEventListener('click', () => setHand(!board.hand));
 
 modeEl.addEventListener('click', (e) => {
@@ -4771,15 +8924,26 @@ function saveSettings() {
 }
 
 const sidebar = {
-  open() { settings.sidebar.open = true; sbEl.hidden = false; saveSettings(); layoutTiles(); },
-  close() { settings.sidebar.open = false; sbEl.hidden = true; saveSettings(); layoutTiles(); },
+  open() { settings.sidebar.open = true; sbEl.hidden = false; sidebar.lit(); saveSettings(); layoutTiles(); },
+  close() { settings.sidebar.open = false; sbEl.hidden = true; sidebar.lit(); saveSettings(); layoutTiles(); },
+  // the rail's buttons light up while Sources is open: the folder on Local / YouTube, the star on Favorites
+  lit() {
+    const on = !sbEl.hidden, fav = settings.sidebar.tab === 'fav';
+    const f = document.getElementById('btn-sidebar'), s = document.getElementById('btn-favs');
+    if (f) f.classList.toggle('toggled', on && !fav);
+    if (s) s.classList.toggle('toggled', on && fav);
+  },
   toggle() { settings.sidebar.open ? sidebar.close() : sidebar.open(); },
-  // two tabs: 'local' (folders) and 'web' (YouTube / Twitch playlists); remembered in settings
+  // three tabs: 'local' (folders), 'web' (YouTube / Twitch playlists) and 'fav' (the starred
+  // tiles on this board); remembered in settings
   setTab(tab) {
-    settings.sidebar.tab = tab === 'web' ? 'web' : 'local';
+    settings.sidebar.tab = tab === 'web' || tab === 'fav' ? tab : 'local';
     sbEl.classList.toggle('tab-is-local', settings.sidebar.tab === 'local');
     sbEl.classList.toggle('tab-is-web', settings.sidebar.tab === 'web');
+    sbEl.classList.toggle('tab-is-fav', settings.sidebar.tab === 'fav');
+    if (settings.sidebar.tab === 'fav') renderFavorites();
     for (const b of sbEl.querySelectorAll('.sb-tabs button')) b.classList.toggle('active', b.dataset.tab === settings.sidebar.tab);
+    sidebar.lit();
     saveSettings();
   },
   async addFolder(dir, { pinned = false } = {}) {
@@ -4808,6 +8972,340 @@ const sidebar = {
     setStatus(`${p.title}: ${p.items.length} video${p.items.length === 1 ? '' : 's'}`);
   },
 };
+
+// ---------- favorites ----------
+// A star (☆ / ★) on every tile's title bar but text. A favorite wears a gold ring, is saved with the
+// session (favorite: true on its record) and is listed on the sidebar's ★ Favorites tab, where a
+// click on its name flies the board to it. Pure rules (sorting, the camera) in lib/favorites.js.
+const btnFavs = document.getElementById('btn-favs');
+function attachFavorite(tile) {
+  if (tile.type === 'text' || tile.type === 'line' || tile.favBtn) return;
+  const top = tile.el.querySelector('.overlay .top');
+  if (!top) return;
+  const btn = document.createElement('button');
+  btn.className = 'fav';
+  btn.addEventListener('click', (e) => { e.stopPropagation(); if (!IS_VIEW) setFavorite(tile, !tile.favorite); });
+  btn.addEventListener('dblclick', (e) => e.stopPropagation()); // not a fullscreen
+  btn.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); openFavMenu(tile, e.clientX, e.clientY); }); // which folder
+  const remove = top.querySelector('.remove');
+  if (remove) remove.after(btn); else top.prepend(btn);
+  const badge = document.createElement('span');
+  badge.className = 'fav-badge'; badge.textContent = '★';
+  tile.el.appendChild(badge);
+  tile.favBtn = btn;
+  tile.favorite = !!tile.favorite;
+  paintFavorite(tile);
+}
+function paintFavorite(tile) {
+  tile.el.classList.toggle('favorite', !!tile.favorite);
+  // a favorite in a folder wears that folder's colour (ring, badge, star)
+  const f = tile.favorite && tile.favFolder ? favFolderById(tile.favFolder) : null;
+  if (f) tile.el.style.setProperty('--fav-c', f.color); else tile.el.style.removeProperty('--fav-c');
+  if (tile.favBtn) {
+    tile.favBtn.textContent = tile.favorite ? '★' : '☆';
+    tile.favBtn.classList.toggle('on', !!tile.favorite);
+    tile.favBtn.title = tile.favorite ? `Favorite${f ? ' in ' + f.name : ''}: click to unstar, right-click to file it in a folder` : 'Star as a favorite (listed under ★ Favorites). Right-click: star it into a folder';
+  }
+  scheduleFavorites();
+}
+function setFavorite(tile, on, { quiet = false } = {}) {
+  if (!viewMayEdit() || tile.type === 'text' || tile.type === 'line') return;
+  tile.favorite = !!on;
+  if (!on) tile.favFolder = null; // starred again later, it starts out of any folder
+  paintFavorite(tile);
+  if (!on) scheduleOffscreen(); // no longer kept playing out of view
+  if (quiet) return;
+  logUi('info', on ? 'favorite added' : 'favorite removed', { name: tileName(tile) });
+  setStatus(on ? `★ ${tileName(tile)} is a favorite` : `${tileName(tile)} is no longer a favorite`, 3000);
+}
+// The list is redrawn once per tick at most, whatever changed (a star, a removed tile, a session).
+// The timer lives on the function: updateChrome can run before this part of the file has.
+function scheduleFavorites() {
+  if (IS_VIEW || scheduleFavorites.timer) return;
+  scheduleFavorites.timer = setTimeout(() => { scheduleFavorites.timer = null; renderFavorites(); }, 0);
+}
+const favKind = (t) => (t.type === 'youtube' ? 'YouTube' : t.type === 'twitch' ? 'Twitch' : t.type === 'image' ? 'Image' : t.type === 'sequence' ? 'Seq' : '');
+
+// ---- folders (Mark, 2026-11-05) ----
+// The session's favorite folders, in the order they are listed: [{ id, name, color, open }]. A
+// favorite's folder is tile.favFolder (an id, or null). Saved as favFolders on the session and
+// favFolder on each record; the rules for reading them back are in lib/favorites.js. (A var, not
+// a let: paintFavorite can run for a tile built before this part of the file has.)
+var favFolders = [];
+function favFolderById(id) { return (favFolders || []).find((f) => f.id === id) || null; }
+function setTileFolder(tile, folderId, { quiet = false } = {}) {
+  if (!viewMayEdit() || tile.type === 'text' || tile.type === 'line') return;
+  const f = folderId ? favFolderById(folderId) : null;
+  tile.favorite = true; // filing a video stars it
+  tile.favFolder = f ? f.id : null;
+  paintFavorite(tile);
+  if (!quiet) setStatus(f ? `★ ${tileName(tile)} → ${f.name}` : `★ ${tileName(tile)} is in no folder`, 2500);
+}
+function repaintFavorites() { for (const t of tiles) if (t.favBtn) paintFavorite(t); scheduleFavorites(); }
+let favRenameNext = null; // a folder just made: its name opens for typing once the list is drawn
+function newFavFolder({ withSelection = true } = {}) {
+  if (IS_VIEW) return null;
+  const f = Favorites.newFolder(favFolders);
+  favFolders.push(f);
+  // what is selected on the board goes straight into it (starred if it was not)
+  const picked = withSelection ? [...selection].filter((t) => tiles.includes(t) && t.type !== 'text' && t.type !== 'line') : [];
+  for (const t of picked) { t.favorite = true; t.favFolder = f.id; }
+  logUi('info', 'favorite folder added', { name: f.name, tiles: picked.length });
+  // the tab is on show first: a name box in a hidden sidebar cannot take the typing
+  if (!settings.sidebar.open || settings.sidebar.tab !== 'fav') { sidebar.setTab('fav'); if (!settings.sidebar.open) sidebar.open(); }
+  favRenameNext = f.id;
+  repaintFavorites();
+  setStatus(picked.length ? `New folder with ${picked.length} favorite${picked.length === 1 ? '' : 's'}: type its name` : 'New folder: type its name, then drag favorites onto it', 4000);
+  return f;
+}
+function deleteFavFolder(f) {
+  const members = tiles.filter((t) => t.favFolder === f.id);
+  favFolders = favFolders.filter((x) => x !== f);
+  for (const t of members) t.favFolder = null; // still favorites, just in no folder
+  logUi('info', 'favorite folder removed', { name: f.name, tiles: members.length });
+  repaintFavorites();
+  setStatus(`Folder ${f.name} removed${members.length ? `; its ${members.length} favorite${members.length === 1 ? ' is' : 's are'} still starred` : ''}`, 4000);
+}
+// fly to show every tile in a folder at once
+function focusFolder(f) {
+  const members = tiles.filter((t) => t.favorite && t.favFolder === f.id);
+  if (!members.length) { setStatus(`${f.name} is empty: drag favorites onto it`, 2500); return; }
+  if (members.length === 1) { focusTile(members[0]); return; }
+  if (isBoard()) {
+    const box = Favorites.bounds(members.map((t) => t.board));
+    if (!box) return;
+    const r = gridRect();
+    flyTo(Favorites.camera(box, { w: r.width, h: r.height }, { minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM, fill: 0.9 }));
+  } else {
+    members[0].el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+  }
+  for (const t of members) pulseTile(t);
+  setStatus(`★ ${f.name}: ${members.length} favorites`, 2500);
+}
+// A small menu (right-click a favorite's name, or a tile's star): which folder it goes in.
+let favMenuEl = null;
+function closeFavMenu() { if (favMenuEl) { favMenuEl.remove(); favMenuEl = null; } }
+function openFavMenu(tile, x, y) {
+  if (IS_VIEW || tile.type === 'text' || tile.type === 'line') return;
+  closeFavMenu();
+  const m = document.createElement('div');
+  m.className = 'fav-menu';
+  const add = (label, on, fn, cls) => {
+    const b = document.createElement('button');
+    b.className = 'fav-menu-item' + (cls ? ' ' + cls : '') + (on ? ' on' : '');
+    b.textContent = label;
+    b.addEventListener('click', (e) => { e.stopPropagation(); closeFavMenu(); fn(); });
+    m.appendChild(b);
+    return b;
+  };
+  const head = document.createElement('div'); head.className = 'fav-menu-head'; head.textContent = tileName(tile); m.appendChild(head);
+  for (const f of favFolders) {
+    const b = add(f.name, tile.favorite && tile.favFolder === f.id, () => setTileFolder(tile, f.id));
+    const sw = document.createElement('span'); sw.className = 'fav-swatch'; sw.style.background = f.color; b.prepend(sw);
+  }
+  add(favFolders.length ? 'No folder' : 'Star it (no folder)', tile.favorite && !tile.favFolder, () => setTileFolder(tile, null));
+  add('+ New folder with it', false, () => { const f = newFavFolder({ withSelection: false }); if (f) setTileFolder(tile, f.id, { quiet: true }); }, 'fav-menu-new');
+  if (tile.favorite) add('Unstar', false, () => setFavorite(tile, false), 'fav-menu-unstar');
+  document.body.appendChild(m);
+  const r = m.getBoundingClientRect();
+  m.style.left = Math.max(4, Math.min(x, window.innerWidth - r.width - 4)) + 'px';
+  m.style.top = Math.max(4, Math.min(y, window.innerHeight - r.height - 4)) + 'px';
+  favMenuEl = m;
+}
+window.addEventListener('pointerdown', (e) => { if (favMenuEl && !(e.target instanceof Node && favMenuEl.contains(e.target))) closeFavMenu(); }, true);
+window.addEventListener('keydown', (e) => { if (favMenuEl && e.key === 'Escape') { e.stopPropagation(); closeFavMenu(); } }, true);
+window.addEventListener('blur', closeFavMenu);
+// a name dragged onto a folder (or onto "No folder") is filed there
+const FAV_DRAG = 'application/x-ozy-fav';
+const isFavDrag = (e) => !!(e.dataTransfer && [...e.dataTransfer.types].includes(FAV_DRAG));
+function favDropTarget(el, folderId) {
+  el.addEventListener('dragover', (e) => {
+    if (!isFavDrag(e)) return;
+    e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move';
+    el.classList.add('drop-hover');
+  });
+  el.addEventListener('dragleave', (e) => { if (!(e.relatedTarget instanceof Node) || !el.contains(e.relatedTarget)) el.classList.remove('drop-hover'); });
+  el.addEventListener('drop', (e) => {
+    const id = e.dataTransfer && e.dataTransfer.getData(FAV_DRAG);
+    if (!id) return;
+    e.preventDefault(); e.stopPropagation();
+    el.classList.remove('drop-hover');
+    const t = tileById(id);
+    if (t) setTileFolder(t, folderId);
+  });
+}
+function renameFolderInline(f, nameEl) {
+  if (!nameEl) return;
+  const input = document.createElement('input');
+  input.className = 'fav-rename'; input.value = f.name; input.maxLength = 80;
+  nameEl.replaceWith(input);
+  input.focus(); input.select();
+  let done = false;
+  const finish = (keep) => {
+    if (done) return; done = true;
+    const v = input.value.trim();
+    if (keep && v && v !== f.name) { f.name = v.slice(0, 80); logUi('info', 'favorite folder renamed', { name: f.name }); }
+    input.blur();
+    repaintFavorites();
+  };
+  input.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') finish(true); if (e.key === 'Escape') finish(false); });
+  input.addEventListener('blur', () => finish(true));
+  for (const ev of ['pointerdown', 'click', 'dblclick']) input.addEventListener(ev, (e) => e.stopPropagation());
+}
+function favRow(f) {
+  const row = document.createElement('div');
+  row.className = 'fav-row';
+  row.title = `${f.name}\nClick: show it on the board. Drag onto a folder, or right-click, to file it.`;
+  row.draggable = true;
+  const star = document.createElement('span'); star.className = 'fav-star'; star.textContent = '★';
+  const name = document.createElement('span'); name.className = 'fav-name'; name.textContent = f.name;
+  row.append(star, name);
+  if (f.kind) { const k = document.createElement('span'); k.className = 'fav-kind'; k.textContent = f.kind; row.append(k); }
+  const unstar = document.createElement('button');
+  unstar.className = 'fav-unstar'; unstar.textContent = '✕'; unstar.title = 'Unstar (the video stays on the board)';
+  unstar.addEventListener('click', (e) => { e.stopPropagation(); const t = tileById(f.id); if (t) setFavorite(t, false); });
+  row.append(unstar);
+  row.addEventListener('click', () => { const t = tileById(f.id); if (t) focusTile(t); });
+  row.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); const t = tileById(f.id); if (t) openFavMenu(t, e.clientX, e.clientY); });
+  row.addEventListener('dragstart', (e) => { e.dataTransfer.setData(FAV_DRAG, f.id); e.dataTransfer.effectAllowed = 'move'; row.classList.add('dragging'); sbEl.classList.add('fav-dragging'); });
+  row.addEventListener('dragend', () => { row.classList.remove('dragging'); sbEl.classList.remove('fav-dragging'); for (const x of sbEl.querySelectorAll('.drop-hover')) x.classList.remove('drop-hover'); });
+  return row;
+}
+function renderFavorites() {
+  if (IS_VIEW) return;
+  const list = sbEl.querySelector('.fav-list');
+  const typing = document.activeElement;
+  if (typing && typing.classList.contains('fav-rename') && list.contains(typing)) return; // not while a name is being typed (its blur redraws)
+  const all = tiles.filter((t) => t.favorite && t.type !== 'text' && t.type !== 'line');
+  const items = all.map((t) => ({ id: t.id, name: tileName(t), kind: favKind(t), folder: t.favFolder || null }));
+  sbEl.querySelector('.sb-tabs .fav-count').textContent = all.length ? String(all.length) : '';
+  // btnFavs.textContent = all.length ? `★ Favorites (${all.length})` : '★ Favorites'; // DISABLED (Mark, 2026-11-15): an icon button now
+  btnFavs.dataset.count = all.length ? String(all.length) : ''; // (a small number on the star)
+  btnFavs.classList.toggle('has-favs', all.length > 0);
+  list.textContent = '';
+  list.classList.toggle('has-folders', favFolders.length > 0);
+  sbEl.querySelector('.fav-help').hidden = !all.length;
+  for (const sec of Favorites.sections(items, favFolders)) {
+    const f = sec.folder;
+    if (!f && !favFolders.length) { for (const it of sec.items) list.appendChild(favRow(it)); continue; } // no folders: the plain list
+    const box = document.createElement('div');
+    box.className = 'fav-folder' + (f ? '' : ' fav-loose') + (f && !f.open ? ' closed' : '');
+    if (f) box.style.setProperty('--fav-c', f.color);
+    const head = document.createElement('div'); head.className = 'fav-fhead';
+    const caret = document.createElement('button'); caret.className = 'fav-caret'; caret.textContent = f && !f.open ? '▸' : '▾';
+    if (f) {
+      caret.title = f.open ? 'Hide its favorites' : 'Show its favorites';
+      caret.addEventListener('click', (e) => { e.stopPropagation(); f.open = !f.open; renderFavorites(); });
+    } else caret.disabled = true;
+    head.appendChild(caret);
+    if (f) {
+      const sw = document.createElement('button'); sw.className = 'fav-swatch'; sw.style.background = f.color; sw.title = 'Change its colour';
+      sw.addEventListener('click', (e) => { e.stopPropagation(); const c = Favorites.COLORS; f.color = c[(c.indexOf(f.color) + 1) % c.length]; repaintFavorites(); });
+      head.appendChild(sw);
+    }
+    const nm = document.createElement('span'); nm.className = 'fav-fname'; nm.textContent = f ? f.name : 'No folder';
+    head.appendChild(nm);
+    const cnt = document.createElement('span'); cnt.className = 'fav-fcount'; cnt.textContent = String(sec.items.length);
+    head.appendChild(cnt);
+    if (f) {
+      head.title = `${f.name}\nClick: show all of it on the board. Double-click the name to rename it.`;
+      head.addEventListener('click', () => focusFolder(f));
+      nm.addEventListener('dblclick', (e) => { e.stopPropagation(); renameFolderInline(f, nm); });
+      const ren = document.createElement('button'); ren.className = 'fav-fbtn'; ren.textContent = '✎'; ren.title = 'Rename';
+      ren.addEventListener('click', (e) => { e.stopPropagation(); renameFolderInline(f, head.querySelector('.fav-fname')); });
+      const del = document.createElement('button'); del.className = 'fav-fbtn'; del.textContent = '✕'; del.title = 'Remove the folder (its videos stay favorites)';
+      del.addEventListener('click', (e) => { e.stopPropagation(); deleteFavFolder(f); });
+      head.append(ren, del);
+    }
+    box.appendChild(head);
+    const body = document.createElement('div'); body.className = 'fav-fbody';
+    for (const it of sec.items) body.appendChild(favRow(it));
+    if (f && !sec.items.length) { const e = document.createElement('div'); e.className = 'fav-empty'; e.textContent = 'Drag favorites here'; body.appendChild(e); }
+    box.appendChild(body);
+    favDropTarget(box, f ? f.id : null);
+    box.dataset.folder = f ? f.id : '';
+    list.appendChild(box);
+  }
+  if (favRenameNext) {
+    const id = favRenameNext; favRenameNext = null;
+    const box = list.querySelector(`.fav-folder[data-folder="${CSS.escape(id)}"]`);
+    const f = favFolderById(id);
+    if (f && box) { box.scrollIntoView({ block: 'nearest' }); renameFolderInline(f, box.querySelector('.fav-fname')); }
+  }
+}
+// Show this tile: on the board fly the camera to it (centred, filling about 60 % of the view); in
+// the gallery scroll it into the middle. Either way it pulses gold once so the eye finds it.
+let flyRaf = 0;
+const cancelFly = () => { if (flyRaf) { cancelAnimationFrame(flyRaf); flyRaf = 0; } };
+grid.addEventListener('wheel', cancelFly, { capture: true, passive: true }); // the user takes over
+grid.addEventListener('pointerdown', cancelFly, true);
+// the board camera flies from where it is to `to` ({ zoom, panX, panY })
+function flyTo(to) {
+  const r = gridRect();
+  const view = { w: r.width, h: r.height };
+  const from = { zoom: board.zoom, panX: board.panX, panY: board.panY };
+  cancelFly();
+  const t0 = performance.now();
+  const step = (now) => {
+    const k = Math.min(1, (now - t0) / Favorites.FLY_MS);
+    const c = Favorites.between(from, to, k, view);
+    board.zoom = c.zoom; board.panX = c.panX; board.panY = c.panY; board.initialized = true;
+    applyBoardView();
+    flyRaf = k < 1 ? requestAnimationFrame(step) : 0;
+  };
+  flyRaf = requestAnimationFrame(step);
+}
+// one flash round a tile (gold, or its folder's colour), so the eye finds it
+function pulseTile(tile) {
+  for (const old of tile.el.querySelectorAll('.fav-pulse')) old.remove();
+  const pulse = document.createElement('div');
+  pulse.className = 'fav-pulse';
+  pulse.addEventListener('animationend', () => pulse.remove());
+  tile.el.appendChild(pulse);
+}
+function focusTile(tile) {
+  if (!tiles.includes(tile)) return;
+  if (isBoard() && tile.board) {
+    const r = gridRect();
+    flyTo(Favorites.camera(tile.board, { w: r.width, h: r.height }, { minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM }));
+    // bringToFront(tile); // DISABLED (Mark, 2026-11-10): jumping to it no longer changes its layer
+  } else {
+    tile.el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+  }
+  pulseTile(tile);
+  setStatus(`★ ${tileName(tile)}`, 2500);
+}
+// ★ Favorites in the toolbar: the sidebar on its Favorites tab (again: closes it)
+btnFavs.addEventListener('click', () => {
+  if (settings.sidebar.open && settings.sidebar.tab === 'fav') { sidebar.close(); return; }
+  sidebar.setTab('fav');
+  if (!settings.sidebar.open) sidebar.open();
+});
+if (!IS_VIEW) sbEl.querySelector('.fav-newfolder').addEventListener('click', (e) => { e.stopPropagation(); newFavFolder(); });
+// "Playing favorites keep playing out of view": one setting, shown in the Optimize menu and on the
+// Favorites tab, with its quiet level (a share of full volume) on the tab
+const favKeepBoxes = [...document.querySelectorAll('.opt-favkeep')];
+const favQuietInput = sbEl.querySelector('.opt-favquiet');
+function syncFavKeep() {
+  for (const b of favKeepBoxes) b.checked = !!settings.favKeepPlaying;
+  favQuietInput.value = String(Math.round(settings.favQuiet * 100));
+  favQuietInput.disabled = !settings.favKeepPlaying;
+}
+function setFavKeep(on) {
+  settings.favKeepPlaying = !!on;
+  saveSettings(); syncFavKeep();
+  if (on) for (const t of tiles) if (t.favorite && t.autoPaused && t.pb) offscreenResume(t); // what offscreen pause stopped plays on
+  applyLiveBudget(); applyOffscreen();
+  setStatus(on ? `Playing favorites keep playing out of view, at ${Math.round(settings.favQuiet * 100)}% volume` : 'Favorites out of view are stills again, like every other video', 4000);
+}
+for (const b of favKeepBoxes) b.addEventListener('change', () => setFavKeep(b.checked));
+favQuietInput.addEventListener('keydown', (e) => e.stopPropagation()); // digits are not shortcuts here
+favQuietInput.addEventListener('change', () => {
+  settings.favQuiet = Settings.merge({ favQuiet: Number(favQuietInput.value) / 100 }).favQuiet;
+  saveSettings(); syncFavKeep();
+  applyAudioOwners(); // the favorites playing out of view now are at the new level
+  setStatus(`Favorites out of view play at ${Math.round(settings.favQuiet * 100)}% volume`, 3000);
+});
 
 const sbNote = sbEl.querySelector('[data-section="playlists"] .sb-note');
 function showYtdlpOutdated() {
@@ -5053,6 +9551,7 @@ async function renderFolders() {
 }
 
 document.getElementById('btn-sidebar').addEventListener('click', sidebar.toggle);
+document.getElementById('sb-close').addEventListener('click', () => sidebar.close()); // (the ✕ in its own header)
 document.getElementById('sb-add-folder').addEventListener('click', async () => { const d = await window.api.pickFolder(); if (d) { sidebar.setTab('local'); sidebar.addFolder(d, { pinned: true }); } });
 for (const b of sbEl.querySelectorAll('.sb-tabs button')) b.addEventListener('click', () => sidebar.setTab(b.dataset.tab));
 document.getElementById('sb-add-playlist').addEventListener('click', () => { urlBar.hidden = false; urlInput.focus(); });
@@ -5077,9 +9576,11 @@ window.api.getSettings().then((s) => {
 // the toggles and fields that show a setting; at startup, and when another window saved settings
 function applySettingsToUi() {
   wheelZoomEl.checked = !!settings.wheelZoom;
+  setLinked(!!settings.pushNeighbours); // Push neighbours (off as standard)
   optOffscreen.checked = settings.pauseOffscreen;
   applyLoadStrip(); // the strip and its height come back as they were left
   optLiveCap.value = String(settings.viewLiveCap);
+  syncFavKeep(); // favorites playing on out of view, and how quietly
   tidySlackEl.value = String(settings.tidySlack);
   hoverPlayBtn.classList.toggle('toggled', !!settings.hoverPlay); // the mode survives a restart
   ezPlayBtn.classList.toggle('toggled', !!settings.ezPlay); document.body.classList.toggle('ez-play', !!settings.ezPlay);
@@ -5100,7 +9601,7 @@ let hpSeq = 0;
 const hpId = (t) => (t.hpId || (t.hpId = ++hpSeq)); // stable per tile, unlike an index
 const hpTile = (id) => tiles.find((t) => t.hpId === id) || null;
 const hoverPlayOn = () => !!(settings && settings.hoverPlay);
-const hoverPlayBusy = () => !cmp.el.hidden || !!document.fullscreenElement; // compare / fullscreen own playback
+const hoverPlayBusy = () => !cmp.el.hidden || sedOpen() || !!document.fullscreenElement; // compare / the sync editor / fullscreen own playback
 
 function hpApply(actions) {
   for (const a of actions) {
@@ -5157,7 +9658,7 @@ window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) 
 // is paused without touching its group, and resumed when it comes back; a synced member is
 // re-seeked to the group time first so it stays in step. Rules in lib/visibility.js.
 const OFFSCREEN_MARGIN = 0.5; // of the viewport, each side
-const offscreenOn = () => !!(settings && settings.pauseOffscreen) && !hoverPlayOn() && cmp.el.hidden && !document.fullscreenElement;
+const offscreenOn = () => !!(settings && settings.pauseOffscreen) && !hoverPlayOn() && cmp.el.hidden && !sedOpen() && !document.fullscreenElement;
 // An explicit pause (Pause all, the group bar, a synced partner) of a tile we paused must stick, or
 // it would start playing when it came back. It is already paused, so no media event fires: catch
 // the call itself, once per playback adapter.
@@ -5173,9 +9674,9 @@ function offscreenResumeNow(t) {
   t.autoPaused = false;
   const g = t.group;
   if (g && g.sync && t.sync) {
-    const gt = groupTimeOf(g), d = t.pb.duration;
-    t.pb.time = Groups.memberTime(gt, t.sync.start, d);
-    if (!(gt >= t.sync.start && gt < t.sync.start + d)) return; // waiting at 0 or held at its end: the sync engine starts it
+    const gt = groupTimeOf(g), m = memberEntry(t);
+    t.pb.time = Groups.at(m, gt);
+    if (!Groups.plays(m, gt)) return; // waiting at 0, holding, or held at its end: the sync engine starts it
   }
   t.pb.play();
 }
@@ -5189,7 +9690,9 @@ function applyOffscreenNow() {
     return { id: t, rect: { x: b.left, y: b.top, w: b.width, h: b.height }, playing: !t.pb.paused, autoPaused: !!t.autoPaused };
   });
   // local videos are not paused off screen any more: the live budget turns them into stills
-  for (const a of Visibility.decide(items.filter((i) => !i.id.release), view, Math.max(r.width, r.height) * OFFSCREEN_MARGIN)) {
+  // a playing favorite is not paused either while favorites keep playing (applyLiveBudget turns it down)
+  for (const t of tiles) if (t.autoPaused && t.pb && keptFavorite(t)) offscreenResume(t);
+  for (const a of Visibility.decide(items.filter((i) => !i.id.release && !keptFavorite(i.id)), view, Math.max(r.width, r.height) * OFFSCREEN_MARGIN)) {
     const t = a.id;
     if (a.op === 'pause') { watchPause(t); t.pb.pause(); t.autoPaused = true; } // no broadcast: the group keeps playing
     else offscreenResume(t);
@@ -5204,21 +9707,27 @@ function applyOffscreenNow() {
 const LIVE_MIN_PX = 96;
 const LIVE_WANTED_MS = 5000;
 const liveCapHere = () => (window.OZY_VIEW > 0 ? settings.viewLiveCap : Infinity);
+// a favorite that is playing keeps playing out of view (the main window only: it is the one heard
+// for it; a view that also shows it is heard instead while it does)
+const favKeepOn = () => !IS_VIEW && !!(settings && settings.favKeepPlaying);
+const keptFavorite = (t) => favKeepOn() && !!t.favorite && !!t.pb && (!t.pb.paused || !!t.autoPaused);
 function applyLiveBudget() {
   if (!settings) return;
   const r = gridRect();
   const view = { x: r.left, y: r.top, w: r.width, h: r.height };
   const fsEl = document.fullscreenElement, now = performance.now();
-  const forced = (t) => (!cmp.el.hidden && (t === cmp.a || t === cmp.b)) || (fsEl && fsEl === t.el) || (t.wantedAt && now - t.wantedAt < LIVE_WANTED_MS);
+  const forced = (t) => (!cmp.el.hidden && (t === cmp.a || t === cmp.b)) || (sedOpen() && (t === sed.main || t === sed.f)) || (fsEl && fsEl === t.el) || (t.wantedAt && now - t.wantedAt < LIVE_WANTED_MS);
   // compare and fullscreen first, then the most recently touched (Lod caps them at the window's cap)
-  const forcedRank = (t) => ((!cmp.el.hidden && (t === cmp.a || t === cmp.b)) || (fsEl && fsEl === t.el) ? 0 : 1 + (now - (t.wantedAt || 0)));
+  const forcedRank = (t) => ((!cmp.el.hidden && (t === cmp.a || t === cmp.b)) || (sedOpen() && (t === sed.main || t === sed.f)) || (fsEl && fsEl === t.el) ? 0 : 1 + (now - (t.wantedAt || 0)));
   const items = tiles.filter((t) => (t.release || t.pb) && !t.freeAspect).map((t) => {
     const shown = t.el.isConnected && !t.el.hidden && (isBoard() ? !!t.board : true);
     const b = shown ? t.el.getBoundingClientRect() : { left: -1e6, top: -1e6, width: 0, height: 0 };
     const f = !!(t.release && forced(t));
-    return { id: t, rect: { x: b.left, y: b.top, w: b.width, h: b.height }, playing: !!(t.pb && !t.pb.paused), budgeted: !!t.release, forced: f, forcedRank: f ? forcedRank(t) : 0 };
+    return { id: t, rect: { x: b.left, y: b.top, w: b.width, h: b.height }, playing: !!(t.pb && !t.pb.paused), budgeted: !!t.release, forced: f, forcedRank: f ? forcedRank(t) : 0, keep: keptFavorite(t) };
   });
   const live = Lod.choose(items, view, { minPx: LIVE_MIN_PX, cap: liveCapHere() });
+  // kept playing but not really in view (off screen or too small to see): quietly
+  for (const i of items) setQuietKept(i.id, i.keep && live.has(i.id) && !Lod.seen(i.rect, view, LIVE_MIN_PX));
   for (const t of tiles) {
     if (!t.release) continue;
     if (live.has(t)) { if (!t.live) t.restore(); }
@@ -5227,7 +9736,7 @@ function applyLiveBudget() {
   }
   refreshLiveSet(); // which window is heard for each tile may have moved
 }
-setInterval(() => { if (!document.hidden) { applyLiveBudget(); applyOffscreen(); } }, 500);
+setInterval(() => { if (!document.hidden) { applyLiveBudget(); applyOffscreen(); applyImageLod(); } }, 500);
 grid.addEventListener('scroll', scheduleOffscreen, { passive: true });
 const optOffscreen = document.getElementById('opt-offscreen');
 function setPauseOffscreen(on) {
@@ -5449,7 +9958,7 @@ function tileDblClick(tile, e) {
   if (!hit || !tile.el.contains(hit)) return;
   // the picture: the tile's video / canvas (not an embed's iframe), or an image tile's <img>
   const onPicture = (hit === tile.mediaEl && hit.tagName !== 'IFRAME') || (hit.tagName === 'IMG' && hit.parentElement === tile.el);
-  if (ClickGuard.dblClickFullscreens({ retargeted, onPicture, compareOpen: !cmp.el.hidden })) toggleTileFullscreen(tile.el);
+  if (ClickGuard.dblClickFullscreens({ retargeted, onPicture, compareOpen: !cmp.el.hidden || sedOpen() })) toggleTileFullscreen(tile.el);
 }
 // the time readout cycles clock -> frames -> timecode, for every tile at once
 function cycleTimeDisplay() {
@@ -5471,7 +9980,7 @@ grid.addEventListener('pointerleave', () => { pointerOverBoard = false; });
 grid.addEventListener('pointermove', (e) => { lastPointer = { clientX: e.clientX, clientY: e.clientY }; });
 
 // what a tile looks like as one line of text, for the OS clipboard
-const recordLine = (r) => (r.type === 'text' ? r.text : r.url || r.dir || r.path || '');
+const recordLine = (r) => (r.type === 'text' ? r.text : r.type === 'line' ? '' : r.url || r.dir || r.path || '');
 
 function copySelection() {
   if (!selection.size) { setStatus('Nothing selected to copy'); return; }
@@ -5484,13 +9993,73 @@ function copySelection() {
   // also hand the paths / text to the OS clipboard, so they can be pasted elsewhere. Best effort.
   try {
     const lines = records.map(recordLine).filter(Boolean);
-    if (lines.length) navigator.clipboard.writeText(lines.join('\n')).catch(() => {});
+    clipboard.osText = lines.join('\n'); // so a paste can tell Ozy's own copy from something copied since
+    // (through main, not navigator.clipboard: that one fails when the window is not focused)
+    if (lines.length) Promise.resolve(window.api.copyText(lines.join('\n'))).catch(() => navigator.clipboard.writeText(lines.join('\n')).catch(() => {}));
   } catch {}
+}
+
+// ---- a picture copied in another program (Mark, 2026-11-10) ----
+// Ctrl+V with a picture on the system clipboard (Chrome's or Discord's Copy image, a link to a
+// picture) puts it on the board under the cursor, unless the clipboard still holds what Ozy itself
+// copied last, in which case Ozy's tiles are pasted as before. main.js picks the best copy of the
+// picture and keeps it in "Ozy Imports\Pasted".
+const sameText = (a, b) => String(a || '').replace(/\r\n/g, '\n').trim() === String(b || '').replace(/\r\n/g, '\n').trim();
+let pastingPicture = false;
+let lastPasteNote = ''; // why a copied link could not be pasted, said if there is nothing else to paste
+async function pastePicture() {
+  if (pastingPicture) return true;
+  pastingPicture = true;
+  setStatus('Pasting the picture…', 20000);
+  let r;
+  try { r = await window.api.pasteImage(); } catch (e) { r = { error: String(e && e.message || e) }; } finally { pastingPicture = false; }
+  if (!r || r.notPicture) { lastPasteNote = r && r.error ? r.error : ''; return false; }
+  if (r.error) { setStatus(r.error, 6000); return true; }
+  // where: under the cursor on the board, else the middle of the view; about as big on screen as
+  // it really is, but never more than half the view's height (the board can zoom in on it)
+  let at = null, board0 = null;
+  if (isBoard()) {
+    const gr = gridRect();
+    const c = pointerOverBoard && lastPointer ? toCanvas(lastPointer.clientX, lastPointer.clientY) : viewCentreWorld();
+    const ar = r.w > 0 && r.h > 0 ? r.w / r.h : DEFAULT_ASPECT;
+    const hScreen = Math.max(80, Math.min(r.h > 0 ? r.h : gr.height * 0.4, gr.height * 0.5));
+    const h = hScreen / board.zoom, w = h * ar;
+    board0 = { x: c.x - w / 2, y: c.y - h / 2, w, h };
+    at = c;
+  }
+  const tile = addImageTile(r.path, board0 ? { board: board0, aspect: board0.w / board0.h } : {}, at);
+  if (!tile) return true;
+  if (isBoard() && !tile.board) placeOnBoard([tile], at);
+  layoutTiles();
+  clearSelection(); bringToFront(tile); setSelected(tile, true);
+  recordAdd([tile], 'paste picture');
+  updateChrome(); markOnBoard();
+  const from = r.from === 'link' ? 'the original file' : r.from === 'data' ? 'the picture in the page' : 'the copied picture';
+  setStatus(`Pasted ${r.w && r.h ? `${r.w} × ${r.h} ` : ''}picture (${from}${r.reused ? ', already pasted before: same file' : ''})`, 5000);
+  logUi('info', 'picture pasted', { from: r.from, w: r.w, h: r.h, reused: !!r.reused });
+  return true;
 }
 
 async function pasteClipboard() {
   if (!viewMayEdit()) return;
-  if (!clipboard || !clipboard.records.length) { setStatus('Nothing to paste'); return; }
+  // a picture copied in another program since Ozy's own last copy wins
+  let sys = null;
+  try { sys = await window.api.clipboardKind(); } catch {}
+  const ozyOwn = !!(clipboard && clipboard.osText != null && sys && sameText(sys.text, clipboard.osText) && !sys.hasImage);
+  lastPasteNote = '';
+  // links (2026-11-16): into the selected bookmark block; else, once they are no picture, a new block
+  const pastedUrls = sys && !ozyOwn && !sys.hasImage ? LinkTable.findUrls(sys.text || '') : [];
+  const linkBlocks = [...selection].filter(isLinksTile);
+  if (pastedUrls.length && linkBlocks.length === 1) { addLinks(linkBlocks[0], pastedUrls); return; }
+  // lines of text into the selected to-do list: one task each (2026-11-17)
+  const todoBlocks = [...selection].filter((t) => t.todo && tiles.includes(t));
+  if (todoBlocks.length === 1 && sys && !ozyOwn && !sys.hasImage && (sys.text || '').trim()) {
+    const items = TodoList.fromText(sys.text);
+    if (items.length && changeTodo(todoBlocks[0], `paste ${items.length} tasks`, (m) => { m.items.push(...items); TodoList.settle(m.items); return true; })) { setStatus(`Added ${TodoList.count(items)} tasks`, 3000); return; }
+  }
+  if (sys && !ozyOwn && (sys.hasImage || sys.src || sys.url)) { if (await pastePicture()) return; }
+  if (pastedUrls.length && isBoard() && !IS_VIEW) { addLinksBlock(placePoint(), pastedUrls); return; }
+  if (!clipboard || !clipboard.records.length) { setStatus(lastPasteNote || 'Nothing to paste: copy a picture (or tiles here) first', 5000); return; }
   let target = null;
   if (isBoard() && pointerOverBoard && lastPointer) {
     target = toCanvas(lastPointer.clientX, lastPointer.clientY); // drop the block under the cursor
@@ -5504,10 +10073,10 @@ async function pasteClipboard() {
   const added = [];
   let missing = 0, skipped = 0, loose = 0;
   for (const v of recs) {
-    if (!isBoard() && v.type === 'text') { skipped++; continue; } // text has no gallery form
+    if (!isBoard() && (v.type === 'text' || v.type === 'line')) { skipped++; continue; } // text and lines have no gallery form
     const wasLoose = !(v.board && isFinite(Number(v.board.x)));
     // groups aren't copied, so nor are offsets; copies start paused and are new tiles (new ids)
-    const r = await addFromRecord(Session.openRecord({ ...v, sync: null, id: undefined }));
+    const r = await addFromRecord(Session.openRecord({ ...v, sync: null, id: undefined, locked: undefined, ends: undefined })); // (a pasted copy is not locked, nor held at its ends)
     if (r.missing) missing++;
     if (r.tile) {
       if (isBoard() && wasLoose && !r.tile.board) placeOnBoard([r.tile], loosePoints[loose] || null);
@@ -5548,6 +10117,8 @@ window.addEventListener('keydown', (e) => {
   // Esc leaves a fullscreen tile (Electron doesn't do this for page fullscreen by itself)
   if (e.key === 'Escape' && document.fullscreenElement) { e.preventDefault(); document.exitFullscreen().catch(() => {}); return; }
 
+  // the sync editor owns the keyboard while it is open
+  if (sedOpen()) { sedKey(e); return; }
   // the compare view owns the keyboard while it is open
   if (!cmp.el.hidden) {
     if (e.key === 'Escape') { closeCompare(); return; }
@@ -5565,11 +10136,28 @@ window.addEventListener('keydown', (e) => {
   if (ctrl && e.key.toLowerCase() === 'g' && !inControl) { e.preventDefault(); e.shiftKey ? (active && dissolveGroup(active)) : toggleGroupFromSelection(); return; }
   if (ctrl && e.key.toLowerCase() === 'a' && !isBoard() && !inControl) { e.preventDefault(); document.getElementById('add-local').click(); return; }
   // inControl already covers a text tile being edited, where these are the native copy and paste
+  if ((e.key === 'PageUp' || e.key === 'PageDown') && !ctrl && !inControl && isBoard() && !IS_VIEW) {
+    const target = selection.size ? null : hoveredTile;
+    if (selection.size || (target && target.board)) { e.preventDefault(); (e.key === 'PageUp' ? stackToFront : stackToBack)(target); return; }
+  }
+  if (ctrl && e.shiftKey && key === 'l' && !inControl && isBoard() && !IS_VIEW) { e.preventDefault(); toggleLock(selection.size ? null : hoveredTile); return; }
+  if (ctrl && key === 'd' && !e.shiftKey && !inControl && isBoard() && !IS_VIEW) { e.preventDefault(); duplicateSelection(); return; }
+  if (ctrl && key === 'f' && !e.shiftKey && isBoard()) { e.preventDefault(); openFind(); return; }
   if (ctrl && key === 'c' && !inControl) { e.preventDefault(); copySelection(); return; }
   if (ctrl && key === 'v' && !inControl) { e.preventDefault(); pasteClipboard(); return; }
 
   if (inControl) return;
   if (key === 'c' && !ctrl) { tryOpenCompare(); return; }
+  // lines (2026-11-10): [ ] thinner / thicker (the selected lines, else the line under the mouse);
+  // Delete removes the selected lines; D draws a line
+  if ((e.key === '[' || e.key === ']') && !ctrl && isBoard() && !IS_VIEW) {
+    const target = selectedLines().length ? null : hoveredTile && hoveredTile.type === 'line' ? hoveredTile : null;
+    if (selectedLines().length || target) { e.preventDefault(); stepLines(e.key === ']' ? 1 : -1, target); return; }
+  }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && !ctrl && isBoard() && !IS_VIEW && selectedLines().length) { e.preventDefault(); removeLines(null); return; }
+  if (key === 'd' && !ctrl && !e.shiftKey && isBoard() && !IS_VIEW) { e.preventDefault(); setLineTool(!lineTool); return; }
+  if (key === 'n' && !ctrl && !e.shiftKey && isBoard() && !IS_VIEW) { e.preventDefault(); addShapeAt('note', placePoint()); return; }
+  if (key === 'p' && !ctrl && isBoard() && !IS_VIEW) { e.preventDefault(); const k = e.shiftKey ? 'highlighter' : 'pen'; setPenTool(penTool === k ? null : k); return; }
 
   // shortcuts that act on the video under the mouse
   const h = hoveredTile && tiles.includes(hoveredTile) ? hoveredTile : null;
@@ -5602,16 +10190,22 @@ window.addEventListener('keydown', (e) => {
     setLinked(!board.linked);
     setStatus(board.linked ? 'Linked: neighbours move out of the way' : 'Unlinked: videos may overlap');
   */
+  /* (before 2026-11-19: Linked was saved in each session)
   } else if (key === 'l' && e.shiftKey && !ctrl && isBoard()) {
     setLinked(!board.linked);
     setStatus(board.linked ? 'Linked: neighbours move out of the way' : 'Unlinked: videos may overlap');
+  */
+  } else if (key === 'l' && e.shiftKey && !ctrl && isBoard()) {
+    setPushNeighbours(!board.linked);
   } else if (key === 'l' && !ctrl) {
-    setStatus('L loops the video under the mouse' + (isBoard() ? '; Shift+L toggles Linked' : ''));
+    setStatus('L loops the video under the mouse' + (isBoard() ? '; Shift+L toggles Push neighbours' : ''));
   } else if (key === 'h' && isBoard()) {
     setHand(!board.hand);
+  } else if (key === 'm' && !ctrl && isBoard()) { // (2026-11-15) the overview map
+    setMiniMap(!miniOn);
   } else if (ctrl && key === 'a' && isBoard()) {
     e.preventDefault();
-    for (const t of tiles) setSelected(t, true);
+    for (const t of tiles) if (!t.locked) setSelected(t, true); // (not the locked ones, as in Miro)
     selectionStatus();
   } else if (e.key === '`') {
     sidebar.toggle();
@@ -5671,7 +10265,7 @@ function applyDropState(visible) {
   }
 }
 // drags that start in the Sources sidebar don't get the big "Release to add" overlay
-const isSidebarDrag = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('application/x-ozy-items');
+const isSidebarDrag = (e) => e.dataTransfer && ([...e.dataTransfer.types].includes('application/x-ozy-items') || [...e.dataTransfer.types].includes('application/x-ozy-fav')); // (a favorite's name being filed)
 // a dragleave only counts when the pointer really left the window: between elements it fires
 // constantly, and Chromium reports relatedTarget null when it leaves for good
 const leftTheWindow = (e) => e.relatedTarget === null
@@ -5687,6 +10281,12 @@ window.addEventListener('drop', async (e) => {
   e.preventDefault();
   if (IS_VIEW) return; // nothing is added from a view
   applyDropState(dropState.drop());
+  if (isFavDrag(e)) return; // a favorite's name let go outside its list: nothing to add
+  // a link dragged from a browser (2026-11-16): onto a bookmark block it joins it; elsewhere on the board, a new block
+  if (isBoard() && !(e.dataTransfer.files && e.dataTransfer.files.length) && !e.dataTransfer.getData('application/x-ozy-items')) {
+    const urls = linksInTransfer(e.dataTransfer);
+    if (urls.length) { const lt = linksTileAt(e.clientX, e.clientY); if (lt) addLinks(lt, urls); else addLinksBlock(toCanvas(e.clientX, e.clientY), urls); return; }
+  }
   const at = isBoard() && tiles.length ? toCanvas(e.clientX, e.clientY) : null; // on the board, drop where the cursor is
   const raw = e.dataTransfer.getData('application/x-ozy-items');
   if (raw) { try { addItemsToBoard(JSON.parse(raw), at); } catch {} return; }
@@ -5705,7 +10305,8 @@ window.api.onOpenSession((p) => openSession(p));
 updateChrome();
 setMode('gallery');
 layout.rowHeight = 240; // the size new gallery tiles start at
-setLinked(true);
+// setLinked(true); // (before 2026-11-19)
+setLinked(false); // until the settings are in (applySettingsToUi)
 setHand(false);
 setMasterVolume(DEFAULT_MASTER_VOLUME);
 
@@ -5754,7 +10355,7 @@ function snapshotNow(force) {
   if (IS_VIEW || !viewsOpen.size) return;
   refreshLiveSet(); // the views know a new tile is heard here before they build it
   const s = collectSession();
-  const body = { videos: s.videos, groups: s.groups, layout: { mode: layout.mode, quality: layout.quality, timeDisplay: layout.timeDisplay }, name: sessionPath ? basename(sessionPath) : '' };
+  const body = { videos: s.videos, groups: s.groups, favFolders: s.favFolders, layout: { mode: layout.mode, quality: layout.quality, timeDisplay: layout.timeDisplay, background: layout.background }, name: sessionPath ? basename(sessionPath) : '' };
   const key = JSON.stringify(body, (k, v) => (SNAP_SKIP.has(k) ? undefined : v));
   if (!force && key === lastSnapKey) return;
   lastSnapKey = key;
@@ -5773,6 +10374,7 @@ function applySnapshot(msg) {
   try {
     const lay = msg.layout || {};
     if (lay.mode && lay.mode !== layout.mode) setMode(lay.mode);
+    if (lay.background && lay.background !== layout.background) setBoardBackground(lay.background);
     if (lay.timeDisplay && lay.timeDisplay !== layout.timeDisplay) { layout.timeDisplay = lay.timeDisplay; for (const t of tiles) if (t.refreshTime) t.refreshTime(); }
     if (lay.quality && lay.quality !== layout.quality) { layout.quality = lay.quality; syncQualityRadios(); for (const t of tiles) if (t.applyQuality) t.applyQuality(); }
     applyGroupSound(msg);
@@ -5796,6 +10398,24 @@ function applySnapshot(msg) {
       for (const g of [...groups]) dissolveGroup(g);
       for (const g of regroup) { const list = g.members.map(tileById).filter(Boolean); if (list.length > 1) createGroup(list, g.opts); }
       lastGroups = regroup;
+    }
+    // a synced member's offset and sync points as main has them (regrouping here captured its own,
+    // from this window's times), so what is scrubbed here moves the others where main will (2026-11-18)
+    for (const rec of msg.videos || []) {
+      const t = rec && tileById(rec.id);
+      if (t && t.group && t.group.sync && rec.sync) t.sync = { start: Session.syncStart(rec), points: Groups.cleanPoints(Session.syncPoints(rec)) };
+    }
+    // each tile's place in the stack, as main has it
+    for (const rec of msg.videos || []) {
+      const t = rec && tileById(rec.id);
+      const z = rec && rec.z != null ? Number(rec.z) : null;
+      if (t && t.z !== z) { t.z = z; layoutTile(t); }
+    }
+    // which tiles main has starred (the star itself is not in the rebuild signature: no reload for it)
+    favFolders = Favorites.folders(msg.favFolders);
+    for (const rec of msg.videos || []) {
+      const t = rec && tileById(rec.id);
+      if (t) { t.favorite = Favorites.fromRecord(rec); t.favFolder = t.favorite ? Favorites.folderOf(rec, favFolders) : null; paintFavorite(t); } // ring and its folder's colour
     }
     // each tile's volume and mute as main has them (not one this view changed a moment ago and
     // main has not heard about yet)
@@ -5875,18 +10495,93 @@ if (window.api.onBus) window.api.onBus((msg) => {
   }
 });
 
-// Window ▾ (main window only)
+// (the old Window menu, before 2026-11-17)
+// // Window ▾ (main window only)
+// const winMenu = document.getElementById('window-menu');
+// if (winMenu) {
+//   const winList = winMenu.querySelector('.menu-list');
+//   document.getElementById('btn-window').addEventListener('click', (e) => { e.stopPropagation(); winList.hidden = !winList.hidden; });
+//   window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !winMenu.contains(e.target)) winList.hidden = true; });
+//   for (const n of [1, 2]) {
+//     document.getElementById(`win-view-${n}`).addEventListener('click', () => {
+//       winList.hidden = true;
+//       window.api.openView(n);
+//       setStatus(`View ${n}: another camera on this board (pan, zoom and play there; edit here)`);
+//     });
+//   }
+// }
+
+// Window ▾ (main window only): the extra windows, each open or not, and how they load videos.
+// The controls here are a second face of the Optimize ones (same settings, same handlers).
 const winMenu = document.getElementById('window-menu');
-if (winMenu) {
-  const winList = winMenu.querySelector('.menu-list');
-  document.getElementById('btn-window').addEventListener('click', (e) => { e.stopPropagation(); winList.hidden = !winList.hidden; });
+const winList = winMenu ? winMenu.querySelector('.menu-list') : null;
+const winLiveCap = document.getElementById('win-livecap');
+const winOffscreen = document.getElementById('win-offscreen');
+const winQuality = document.getElementById('win-quality');
+function refreshWindowMenu() {
+  if (!winList || IS_VIEW) return;
+  winLiveCap.value = String(settings ? settings.viewLiveCap : 12);
+  winOffscreen.checked = !!(settings && settings.pauseOffscreen);
+  winQuality.value = layout.quality || 'full';
+  for (const row of winList.querySelectorAll('.wm-view')) {
+    const n = Number(row.dataset.n), open = viewsOpen.has(n), live = liveSets.get(n);
+    row.classList.toggle('open', open);
+    row.querySelector('.wm-state').textContent = open ? `open${live ? ` · ${live.size} playing live` : ''}` : 'closed';
+    const b = row.querySelector('.wm-open');
+    b.textContent = open ? 'Bring to front' : `Open view ${n}`;
+    b.title = open ? `View ${n} is open: bring its window to the front` : `Open view ${n}: another window on this board`;
+  }
+}
+if (winList && !IS_VIEW) {
+  document.getElementById('btn-window').addEventListener('click', (e) => { e.stopPropagation(); refreshWindowMenu(); winList.hidden = !winList.hidden; });
   window.addEventListener('pointerdown', (e) => { if (!(e.target instanceof Node) || !winMenu.contains(e.target)) winList.hidden = true; });
+  setInterval(() => { if (!winList.hidden) refreshWindowMenu(); }, 1000); // a view opening or closing
   for (const n of [1, 2]) {
     document.getElementById(`win-view-${n}`).addEventListener('click', () => {
-      winList.hidden = true;
+      const was = viewsOpen.has(n);
       window.api.openView(n);
-      setStatus(`View ${n}: another camera on this board (pan, zoom and play there; edit here)`);
+      setStatus(was ? `View ${n} brought to the front` : `View ${n}: another camera on this board. Its settings are on its View settings button (top left), and here under ⧉`);
+      setTimeout(refreshWindowMenu, 800);
     });
+  }
+  winLiveCap.addEventListener('keydown', (e) => e.stopPropagation()); // digits are not shortcuts here
+  winLiveCap.addEventListener('change', () => { optLiveCap.value = winLiveCap.value; optLiveCap.dispatchEvent(new Event('change')); winLiveCap.value = optLiveCap.value; });
+  winOffscreen.addEventListener('change', () => setPauseOffscreen(winOffscreen.checked));
+  winQuality.addEventListener('change', () => setSceneQuality(winQuality.value));
+}
+// The Optimize menu says what this window is doing with its videos right now (in a view it is the
+// View settings panel, with a word on how a view works and where its quality comes from).
+const optLiveLine = document.getElementById('opt-live-line');
+function refreshOptLive() {
+  if (!optLiveLine || optList.hidden) return;
+  const budgeted = tiles.filter((t) => t.release);
+  const live = budgeted.filter((t) => t.live).length, stills = budgeted.length - live;
+  const web = tiles.filter((t) => t.pb && !t.release && (t.yt || t.type === 'youtube' || t.type === 'twitch')).length;
+  const cap = liveCapHere();
+  const parts = [`<b>${live}</b> local video${live === 1 ? '' : 's'} playing live`];
+  if (stills) parts.push(`<b>${stills}</b> shown as a still`);
+  if (web) parts.push(`${web} YouTube / Twitch`);
+  optLiveLine.innerHTML = `${IS_VIEW ? 'In this view now' : 'In this window now'}: ${parts.join(' · ')}`
+    + (Number.isFinite(cap) ? ` <span style="opacity:.7">(limit ${cap})</span>` : '');
+  const q = document.querySelector('#opt-list .ov-quality');
+  if (q) q.textContent = layout.quality === 'half' ? '½ resolution' : layout.quality === 'quarter' ? '¼ resolution' : 'Full';
+}
+document.getElementById('btn-optimize').addEventListener('click', () => setTimeout(refreshOptLive, 0));
+setInterval(refreshOptLive, 1000);
+// A view's first few openings point at its settings, which a new window otherwise hides well.
+if (IS_VIEW) {
+  let seen = 0;
+  try { seen = Number(localStorage.getItem('ozy-view-callout')) || 0; } catch { seen = 3; }
+  if (seen < 3) {
+    try { localStorage.setItem('ozy-view-callout', String(seen + 1)); } catch {}
+    const c = document.createElement('div');
+    c.className = 'view-callout';
+    c.innerHTML = `<b>View ${window.OZY_VIEW} settings are here</b>: how many videos play live in this window, pausing what is off screen, and the load viewer.<small>Click to close</small>`;
+    const close = () => c.remove();
+    c.addEventListener('click', close);
+    document.getElementById('btn-optimize').addEventListener('click', close, { once: true });
+    setTimeout(close, 12000);
+    document.body.appendChild(c);
   }
 }
 

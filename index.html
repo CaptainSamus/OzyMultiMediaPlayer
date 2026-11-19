@@ -3,126 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; media-src localvideo: https://*.googlevideo.com https://*.twitchcdn.net https://*.twitch.tv https://d1ndex63qxojbr.cloudfront.net; img-src 'self' data: localvideo: https://i.ytimg.com; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'; frame-src https://www.youtube.com https://www.youtube-nocookie.com https://player.twitch.tv https://clips.twitch.tv">
+        content="default-src 'self'; media-src localvideo: http://127.0.0.1:* https://*.googlevideo.com https://*.twitchcdn.net https://*.twitch.tv https://d1ndex63qxojbr.cloudfront.net; img-src 'self' data: localvideo: http://127.0.0.1:* https://i.ytimg.com; style-src 'self'; script-src 'self'; connect-src http://127.0.0.1:*; object-src 'none'; frame-src https://www.youtube.com https://www.youtube-nocookie.com https://player.twitch.tv https://clips.twitch.tv">
   <title>Ozy Multi Media Player</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header id="toolbar">
-    <div class="menu" id="add-menu">
-      <button id="btn-add" title="Add local files or a YouTube / Twitch URL">+ Add videos ▾</button>
-      <div class="menu-list" hidden>
-        <button id="add-local">Local files… <kbd>Ctrl+A</kbd></button>
-        <button id="add-url">YouTube / Twitch URL…</button>
-      </div>
-    </div>
-    <button id="add-text" title="Text (or double-click the board)">T</button>
-    <button id="btn-sidebar" title="Sources sidebar: folders and playlists to drag from (`)">☰ Sources</button>
-    <div class="menu" id="open-menu">
-      <span class="split"><button id="btn-open" title="Open a saved .mvp session (Ctrl+O)">Open session</button><button id="btn-open-recent" title="Recent sessions">▾</button></span>
-      <div class="menu-list" id="recent-list" hidden></div>
-    </div>
-    <button id="btn-save" title="Save session (Ctrl+S). Right-click: Save as… (Ctrl+Shift+S)">Save</button>
-    <button id="btn-save-as" title="Save this board as a new file, leaving the current one untouched (Ctrl+Shift+S)">Save as…</button>
-    <!-- DISABLED (Mark, 2026-09-11): replaced by Clear board; Save right-click = Save as
-         (re-enabled as a visible button 2026-10-07 (Mark), see the button above)
-    <button id="btn-save-as" title="Save session to a new file (Ctrl+Shift+S)">Save as…</button>
-    -->
-    <button id="btn-clear" title="Remove every video from the board (asks first)">Clear board</button>
-    <div class="menu" id="app-menu">
-      <button id="btn-app" title="Cache, updates and version">App ▾</button>
-      <div class="menu-list" hidden>
-        <button id="btn-cache" title="Playable copies, thumbnails and decoded sequence frames live in a cache folder">Cache…</button>
-        <button id="btn-check-updates">Check for updates</button>
-        <label class="menu-check"><input type="checkbox" id="upd-auto"> Check automatically on launch</label>
-        <label class="menu-check"><input type="checkbox" id="upd-prerelease"> Include pre-releases</label>
-        <button id="btn-open-logs" title="Open the folder holding this app's log files">Open logs folder</button>
-        <button id="btn-diagnostics" title="Copy what version you're running, what's on the board, and the end of the log – paste it into a message">Copy diagnostics</button>
-        <button id="btn-version" disabled>Version …</button>
-      </div>
-    </div>
-    <div class="menu" id="window-menu">
-      <button id="btn-window" title="Another window on this same board: its own pan and zoom, the same videos playing in step. Edit in this window; look and play in the views.">Window ▾</button>
-      <div class="menu-list" hidden>
-        <button id="win-view-1">New view 1</button>
-        <button id="win-view-2">New view 2</button>
-      </div>
-    </div>
-    <div class="menu" id="optimize-menu">
-      <button id="btn-optimize" title="Make a heavy scene lighter: pause what is off screen, play at a lower resolution, see what the scene costs">Optimize ▾</button>
-      <div class="menu-list" id="opt-list" hidden>
-        <label class="menu-check" title="A video scrolled out of view stops decoding and resumes when it comes back"><input type="checkbox" id="opt-offscreen"> Pause offscreen videos</label>
-        <label class="menu-check" title="How many local videos an extra view window decodes at once (the main window has no limit). The rest, and anything smaller than about 96 pixels on screen in any window, show a still of their frame and keep their place in time.">Live videos per extra view <input type="number" id="opt-livecap" min="4" max="100" step="1" style="width:4.5em"></label>
-        <label class="menu-check" title="What this scene costs: Ozy against everything else on the machine, and each video"><input type="checkbox" id="opt-load"> Show load viewer (pop-out)</label>
-        <div class="menu-title">Playback quality <small>local videos; each tile's ⚙ can override</small></div>
-        <label class="menu-check"><input type="radio" name="opt-quality" value="full"> Full</label>
-        <label class="menu-check"><input type="radio" name="opt-quality" value="half"> ½ resolution</label>
-        <label class="menu-check"><input type="radio" name="opt-quality" value="quarter"> ¼ resolution</label>
-        <div class="menu-title">Cache <small id="opt-cache-line">…</small></div>
-        <label class="menu-check" title="Playable and smaller copies are deleted, least recently used first, once they pass this size">Cap <input type="number" id="opt-cache-cap" min="512" step="512" style="width:7em"> MB</label>
-        <button id="opt-cache-folder" title="Where playable and smaller copies are kept. Existing files are not moved.">Change folder…</button>
-        <button id="opt-cache-clear" title="Delete every cached copy, thumbnail and decoded frame">Clear cache…</button>
-      </div>
-    </div>
-    <button id="btn-load" title="Load strip: live bars for memory and CPU, Ozy against everything else (resize by dragging its top edge)">Load</button>
-    <span class="sep"></span>
-    <button id="btn-play-all" title="Play every video (Space)">Play all</button>
-    <button id="btn-pause-all" title="Pause every video (Space)">Pause all</button>
-    <button id="hover-play" title="Hover play: videos play only while the mouse is over them">Hover play</button>
-    <button id="ez-play" title="EZ play: click anywhere on a video to play or pause it (the controls still work). For YouTube tiles the click lands on Ozy, so the embed's own controls are off while this is on.">EZ play</button>
-    <!-- DISABLED (Mark, 2026-09-11): Mute all + Unmute all merged into one toggle; Loop all took the freed slot
-    <button id="btn-mute-all" title="Mute every video">Mute all</button>
-    <button id="btn-unmute-all" title="Unmute every video">Unmute all</button>
-    -->
-    <button id="btn-mute-all" title="Mute every video, or unmute them all when every one is muted">🔇 Mute all</button>
-    <button id="btn-loop-all" title="Loop every video; click again to turn every loop off">🔁 Loop all</button>
-    <span class="sep"></span>
-    <div class="seg" id="mode">
-      <button data-mode="gallery" class="active" title="Attached: videos flow in rows and share one size. Pull any corner to resize them all.">Gallery</button>
-      <button data-mode="board" title="Detached: an infinite board. Drag videos anywhere, resize each one on its own, pan and zoom the view.">Board</button>
-    </div>
-    <label class="zoom" title="Gallery: scale every video together (keeps their relative sizes). Board: view zoom. Ctrl + mouse wheel over the videos does the same.">
-      <span>🔍</span>
-      <input type="range" id="zoom" min="0" max="1000" value="500">
-      <span id="zoom-label"></span>
-    </label>
-    <label class="wheel-zoom" title="Mouse wheel zooms instead of scrolling: on the board it zooms at the cursor, in the gallery it scales every video together. Shift+wheel still scrolls sideways, middle-mouse still pans, and Ctrl+wheel always zooms."><input type="checkbox" id="wheel-zoom"> Wheel zoom</label>
-    <button id="btn-fit" title="Fit every video on screen">Fit all</button>
-    <button id="btn-group" title="Group the selected videos (Ctrl+G)">Group</button>
-    <button id="btn-ungroup" title="Ungroup (Ctrl+Shift+G)">Ungroup</button>
-    <button id="btn-ab" title="A/B: compare two selected videos with a wipe or flip (C)">A/B</button>
-    <!-- DISABLED (Mark, 2026-09-11): old Tidy wrapped at the tiles' own width and collapsed into 2 columns; replaced by the Tidy menu
-    <button id="btn-tidy" class="board-only" title="Line the videos up in neat rows, keeping their sizes">Tidy</button>
-    -->
-    <div class="menu board-only" id="tidy-menu">
-      <button id="btn-tidy-menu" title="Arrange the board">Tidy ▾</button>
-      <div class="menu-list" hidden>
-        <button id="tidy-pack" title="Close the gaps: every video keeps its place and may grow or shrink a little so neighbours meet edge to edge (Ctrl+Z undoes)">Pack <small>close gaps, sizes within the limit below</small></button>
-        <button id="tidy-justify" title="Keep each row's videos together and scale the row to fill the width edge to edge, within the resize limit (Ctrl+Z undoes)">Justify <small>rows filled edge to edge</small></button>
-        <button id="tidy-align" title="Line up edges that are nearly lined up and make gaps even. Nothing changes size and nothing moves far (Ctrl+Z undoes)">Align <small>keep sizes, straighten edges</small></button>
-        <button id="tidy-compact" title="Keep every size and the rough arrangement; slide everything up and left until it sits one gap apart (Ctrl+Z undoes)">Compact <small>keep sizes, close the gaps</small></button>
-        <button id="tidy-rows" title="Keep every size and sort into rows across the view with even gaps (Ctrl+Z undoes)">Rows <small>keep sizes, sort into rows</small></button>
-        <button id="tidy-grid" title="Keep sizes and pack edge to edge into a rough square (Ctrl+Z undoes). Linked spaces them out again on the next drag.">Grid <small>keep sizes, no gaps</small></button>
-        <button id="tidy-fit" title="Every tile the same height, as big as fits in the current view (Ctrl+Z undoes)">Fit to view <small>same size, fills the view</small></button>
-        <label class="menu-check" title="How much Pack and Justify may resize a video">Resize up to <select id="tidy-slack"><option value="0">0 %</option><option value="0.1">10 %</option><option value="0.25">25 %</option><option value="0.5">50 %</option></select></label>
-      </div>
-    </div>
-    <button id="btn-link" class="board-only" title="Linked: when you move or resize a video, its neighbours slide out of the way so nothing overlaps (Shift+L). Off: videos can overlap freely.">🔗 Linked</button>
-    <button id="btn-hand" class="board-only" title="Pan + zoom: left-drag pans, wheel zooms (H). Middle-mouse or Alt-drag always pans.">✋ Pan + zoom</button>
-    <span id="count"></span>
-    <span class="sep"></span>
-    <label class="master" title="Master volume – scales every video's own volume">
-      <span id="master-icon">🔊</span>
-      <input type="range" id="master-vol" min="0" max="100" value="100">
-      <span id="master-pct">100%</span>
-    </label>
-    <span id="status"></span>
-    <div id="url-bar" hidden>
-      <input type="url" id="url-input" placeholder="Paste a YouTube video, Short, playlist, Twitch clip or channel URL" spellcheck="false">
-      <button id="url-go">Add</button>
-      <button id="url-cancel" title="Close (Esc)">✕</button>
-    </div>
-  </header>
 
   <div id="workspace">
     <aside id="sidebar" hidden>
@@ -131,18 +16,183 @@
         <button id="sb-add-selected" title="Add every highlighted row to the board (Enter)" disabled>Add selected</button>
         <button id="sb-add-folder" class="tab-local" title="Add a folder">+ Folder</button>
         <button id="sb-add-playlist" class="tab-web" title="Add a YouTube playlist" disabled>+ Playlist</button>
+        <button id="sb-close" class="sb-close" data-icon="close" title="Close Sources (`)" aria-label="Close Sources"></button>
       </div>
-      <div class="sb-tabs"><button data-tab="local" class="active">Local</button><button data-tab="web">YouTube / Twitch</button></div>
+      <div class="sb-tabs"><button data-tab="local" class="active">Local</button><button data-tab="web">YouTube / Twitch</button><button data-tab="fav" title="Starred videos on this board">★ Favorites<span class="fav-count"></span></button></div>
       <div class="sb-section tab-local" data-section="folders"><div class="sb-title">Folders</div><div class="sb-list"></div></div>
       <div class="sb-section tab-web" data-section="playlists"><div class="sb-title">Playlists</div><div class="sb-list"></div><div class="sb-note"></div></div>
+      <div class="sb-section tab-fav" data-section="favorites"><div class="sb-title fav-title">Favorites on this board<button class="fav-newfolder" title="New folder. Videos selected on the board go into it (and are starred).">+ Folder</button></div><div class="sb-list fav-list"></div><div class="sb-note fav-note">No favorites yet. Hover a video and click ☆ on its title bar to star it; it gets a gold ring and shows up here. Click a name here to fly to it.</div><div class="sb-note fav-help">Drag a name onto a folder to file it, or right-click it (or a tile's ★). Each folder's colour is the ring its videos wear.</div>
+        <label class="menu-check fav-keep" title="A favorite that is playing keeps playing when you look elsewhere on the board, turned down this low, and is back at its own volume when it is in view again"><input type="checkbox" class="opt-favkeep"> Playing favorites keep playing out of view, at <input type="number" class="opt-favquiet" min="0" max="25" step="1" style="width:3.5em">% volume</label></div>
       <div id="sb-resize"></div>
     </aside>
-    <main id="grid">
-      <div id="canvas"></div>
-      <div id="marquee" hidden></div>
-      <div id="guide-v" class="guide" hidden></div>
-      <div id="guide-h" class="guide" hidden></div>
-    </main>
+    <div id="stage">
+      <main id="grid">
+        <div id="canvas"></div>
+        <div id="marquee" hidden></div>
+        <div id="guide-v" class="guide" hidden></div>
+        <div id="guide-h" class="guide" hidden></div>
+      </main>
+    <!-- (Mark, 2026-11-15) the toolbar as floating panels over the board, Miro-style: every control
+         keeps its id (and so what it does); app.js puts the icons in from data-icon. -->
+    <header id="toolbar">
+      <!-- top left: the board's name, files, the app -->
+      <div class="hud-panel hud-file">
+        <span class="hud-logo" aria-hidden="true">O</span>
+        <button id="board-name" class="hud-name" title="Recent boards">Untitled board</button>
+        <span class="hud-sep"></span>
+        <div class="menu" id="open-menu">
+          <span class="split"><button id="btn-open" class="ib" data-icon="open" title="Open a saved board (Ctrl+O)"></button><button id="btn-open-recent" class="ib ib-narrow" data-icon="chevron" title="Recent boards"></button></span>
+          <div class="menu-list" id="recent-list" hidden></div>
+        </div>
+        <button id="btn-save" class="ib" data-icon="save" title="Save (Ctrl+S). Right-click: Save as… (Ctrl+Shift+S)"></button>
+        <button id="btn-save-as" class="ib" data-icon="saveas" title="Save this board as a new file, leaving the current one untouched (Ctrl+Shift+S)"></button>
+        <button id="btn-clear" class="ib" data-icon="trash" title="Clear board: remove everything (asks first)"></button>
+        <span class="hud-sep"></span>
+        <div class="menu" id="app-menu">
+          <button id="btn-app" class="ib" data-icon="menu" title="App: import from Miro, cache, updates, version"></button>
+          <div class="menu-list" hidden>
+            <button id="btn-miro" title="Bring a whole Miro board over: its pictures, text, sticky notes, shapes and frames, each where it was">Import from Miro…</button>
+            <button id="btn-cache" title="Playable copies, thumbnails and decoded sequence frames live in a cache folder">Cache…</button>
+            <label class="menu-check" title="Mouse wheel zooms instead of scrolling: on the board it zooms at the cursor, in the gallery it scales every video together. Shift+wheel still scrolls sideways, middle-mouse still pans, and Ctrl+wheel always zooms."><input type="checkbox" id="wheel-zoom"> Mouse wheel zooms</label>
+            <button id="btn-check-updates">Check for updates</button>
+            <label class="menu-check"><input type="checkbox" id="upd-auto"> Check automatically on launch</label>
+            <label class="menu-check"><input type="checkbox" id="upd-prerelease"> Include pre-releases</label>
+            <button id="btn-open-logs" title="Open the folder holding this app's log files">Open logs folder</button>
+            <button id="btn-diagnostics" title="Copy what version you're running, what's on the board, and the end of the log – paste it into a message">Copy diagnostics</button>
+            <button id="btn-version" disabled>Version …</button>
+          </div>
+        </div>
+        <div class="menu" id="window-menu">
+          <button id="btn-window" class="ib" data-icon="window" title="Extra windows: more cameras on this same board, and how they load videos"></button>
+          <div class="menu-list wm-panel" hidden>
+            <div class="wm-head">Extra windows<small>Each one is another camera on this board: its own pan and zoom, the same videos playing in step. Edit in this window; look and play in the others.</small></div>
+            <div class="wm-view" data-n="1"><span class="wm-dot"></span><span class="wm-name">View 1</span><span class="wm-state">closed</span><button id="win-view-1" class="wm-open" title="Open view 1: another window on this board">Open view 1</button></div>
+            <div class="wm-view" data-n="2"><span class="wm-dot"></span><span class="wm-name">View 2</span><span class="wm-state">closed</span><button id="win-view-2" class="wm-open" title="Open view 2: another window on this board">Open view 2</button></div>
+            <div class="wm-sec">How the extra windows load videos</div>
+            <label class="menu-check wm-row" title="How many local videos each extra window decodes at once, the ones nearest its middle first. This window has no limit.">Live videos per extra window <input type="number" id="win-livecap" min="4" max="100" step="1" style="width:4.5em"></label>
+            <div class="wm-note">The rest show a still of their frame and keep their place in time; they come alive when you zoom in on them. Lower this if a view stutters.</div>
+            <label class="menu-check wm-row" title="A video scrolled out of view stops decoding and resumes when it comes back (every window)"><input type="checkbox" id="win-offscreen"> Pause videos scrolled out of view</label>
+            <div class="menu-check wm-row" title="Play local videos from a half or quarter size copy (every window; each tile's settings can override)">Playback quality <select id="win-quality"><option value="full">Full</option><option value="half">½ resolution</option><option value="quarter">¼ resolution</option></select></div>
+            <div class="wm-note">Anything under about 96 pixels on screen is a still in every window. YouTube and Twitch play in their own players. Sound: the window showing a video is the one heard. Each view also has a <b>View settings</b> button at its top left.</div>
+          </div>
+        </div>
+        <div class="menu" id="optimize-menu">
+          <button id="btn-optimize" class="ib" data-icon="bolt" title="Optimize: make a heavy scene lighter – pause what is off screen, play at a lower resolution, see what the scene costs"><span class="ib-label view-only">View settings</span></button>
+          <div class="menu-list" id="opt-list" hidden>
+            <div class="ov-info view-only"><div class="ov-title">How this view works</div><ul><li>Pan and zoom here freely; add, move and edit things in the main window.</li><li>Videos play in step with the main window. The window showing a video is the one heard.</li><li>Playback quality follows the main window: <b class="ov-quality">Full</b>.</li></ul></div>
+            <div class="ov-live" id="opt-live-line"></div>
+            <div class="wm-sec view-only">Videos in this window</div>
+            <label class="menu-check" title="A video scrolled out of view stops decoding and resumes when it comes back"><input type="checkbox" id="opt-offscreen"> Pause offscreen videos</label>
+            <label class="menu-check" title="A favorite that is playing keeps playing when you look elsewhere, very quietly (set the level on the ★ Favorites tab), and is back at its own volume in view"><input type="checkbox" class="opt-favkeep"> Favorites keep playing out of view (quietly)</label>
+            <label class="menu-check" title="How many local videos an extra view window decodes at once (the main window has no limit). The rest, and anything smaller than about 96 pixels on screen in any window, show a still of their frame and keep their place in time.">Live videos per extra view <input type="number" id="opt-livecap" min="4" max="100" step="1" style="width:4.5em"></label>
+            <div class="wm-note view-only">Each extra view decodes at most this many local videos, the ones nearest its middle first. The rest show a still of their frame and keep their place in time; zoom in and they play. Lower it if this window stutters.</div>
+            <label class="menu-check" title="What this scene costs: Ozy against everything else on the machine, and each video"><input type="checkbox" id="opt-load"> Show load viewer (pop-out)</label>
+            <div class="menu-title">Playback quality <small>local videos; each tile's ⚙ can override</small></div>
+            <label class="menu-check"><input type="radio" name="opt-quality" value="full"> Full</label>
+            <label class="menu-check"><input type="radio" name="opt-quality" value="half"> ½ resolution</label>
+            <label class="menu-check"><input type="radio" name="opt-quality" value="quarter"> ¼ resolution</label>
+            <div class="menu-title">Cache <small id="opt-cache-line">…</small></div>
+            <label class="menu-check" title="Playable and smaller copies are deleted, least recently used first, once they pass this size">Cap <input type="number" id="opt-cache-cap" min="512" step="512" style="width:7em"> MB</label>
+            <button id="opt-cache-folder" title="Where playable and smaller copies are kept. Existing files are not moved.">Change folder…</button>
+            <button id="opt-cache-clear" title="Delete every cached copy, thumbnail and decoded frame">Clear cache…</button>
+          </div>
+        </div>
+        <button id="btn-load" class="ib" data-icon="chart" title="Load strip: live bars for memory and CPU, Ozy against everything else (resize by dragging its top edge)"></button>
+      </div>
+
+      <!-- left: the tools, and what to add -->
+      <div class="hud-panel hud-rail">
+        <button id="btn-search" class="ib ib-search" data-icon="search" title="Search features (Ctrl+K): find any button, menu item or shortcut by name"></button>
+        <span class="hud-hsep"></span>
+        <button id="btn-hand" class="ib board-only" data-icon="hand" title="Pan + zoom: left-drag pans, wheel zooms (H). Middle-mouse or Alt-drag always pans."></button>
+        <span class="hud-hsep board-only"></span>
+        <div class="menu" id="add-menu">
+          <button id="btn-add" class="ib" data-icon="media" title="Add videos and pictures: local files, or a YouTube / Twitch link"></button>
+          <div class="menu-list" hidden>
+            <button id="add-local">Local files… <kbd>Ctrl+A</kbd></button>
+            <button id="add-url">YouTube / Twitch URL…</button>
+          </div>
+        </div>
+        <button id="add-text" class="ib" data-icon="text" title="Text (or double-click the board)"></button>
+        <button id="add-shape" class="ib" data-icon="shapes" title="Sticky notes and shapes (N: a sticky note under the mouse)"></button>
+        <button id="add-line" class="ib" data-icon="line" title="Line (D): drag on the board; drop an end on something and it stays on it. [ ] thinner / thicker"></button>
+        <button id="btn-pen" class="ib" data-icon="pen" title="Pen (P) and highlighter (Shift+P)"></button>
+        <button id="btn-frames" class="ib" data-icon="frame" title="Frames: add one, jump to one, present them, export them"></button>
+        <button id="add-links" class="ib" data-icon="bookmark" title="Bookmarks: a list of links, like a spreadsheet. Paste links into it; each gets its page name and icon"></button>
+        <button id="add-todo" class="ib" data-icon="checklist" title="To-do list: a goal and the tasks (and sub-tasks) that get it done"></button>
+        <span class="hud-hsep"></span>
+        <button id="btn-sidebar" class="ib" data-icon="folders" title="Sources: folders and playlists to drag from (`)"></button>
+        <button id="btn-favs" class="ib" data-icon="star" title="Favorites: every starred video on this board. Click a name to fly to it. Star a video with ☆ on its title bar."></button>
+        <button id="btn-media-search" class="ib ib-media" data-icon="photosearch" title="Search pictures and videos (Ctrl+Shift+F): by name, as thumbnails"></button>
+      </div>
+
+      <!-- top right: playback and sound -->
+      <div class="hud-panel hud-play">
+        <button id="btn-play-all" class="ib" data-icon="play" title="Play every video (Space)"></button>
+        <button id="btn-pause-all" class="ib" data-icon="pause" title="Pause every video (Space)"></button>
+        <button id="btn-loop-all" class="ib" data-icon="loop" title="Loop every video; click again to turn every loop off"></button>
+        <button id="hover-play" class="ib" data-icon="hover" title="Hover play: videos play only while the mouse is over them"></button>
+        <button id="ez-play" class="ib" data-icon="tap" title="EZ play: click anywhere on a video to play or pause it (the controls still work). For YouTube tiles the click lands on Ozy, so the embed's own controls are off while this is on."></button>
+        <span class="hud-sep"></span>
+        <button id="btn-mute-all" class="ib ib-mute" title="Mute every video, or unmute them all when every one is muted"></button>
+        <label class="master" title="Master volume – scales every video's own volume">
+          <span id="master-icon" hidden>🔊</span>
+          <input type="range" id="master-vol" min="0" max="100" value="100">
+          <span id="master-pct">100%</span>
+        </label>
+      </div>
+
+      <!-- bottom left: gallery or board, and arranging -->
+      <div class="hud-panel hud-arrange">
+        <div class="seg" id="mode">
+          <button data-mode="gallery" class="active ib" data-icon="gallery" title="Gallery: videos flow in rows and share one size. Pull any corner to resize them all."></button>
+          <button data-mode="board" class="ib" data-icon="board" title="Board: an infinite board. Drag things anywhere, resize each one on its own, pan and zoom the view."></button>
+        </div>
+        <span class="hud-sep"></span>
+        <button id="btn-group" class="ib" data-icon="group" title="Group the selected videos (Ctrl+G)"></button>
+        <button id="btn-ungroup" class="ib" data-icon="ungroup" title="Ungroup (Ctrl+Shift+G)"></button>
+        <button id="btn-ab" class="ib" data-icon="ab" title="A/B: compare two selected videos with a wipe or flip (C)"></button>
+        <div class="menu board-only" id="tidy-menu">
+          <button id="btn-tidy-menu" class="ib" data-icon="tidy" title="Tidy: arrange the board"></button>
+          <div class="menu-list" hidden>
+            <button id="tidy-pack" title="Close the gaps: every video keeps its place and may grow or shrink a little so neighbours meet edge to edge (Ctrl+Z undoes)">Pack <small>close gaps, sizes within the limit below</small></button>
+            <button id="tidy-justify" title="Keep each row's videos together and scale the row to fill the width edge to edge, within the resize limit (Ctrl+Z undoes)">Justify <small>rows filled edge to edge</small></button>
+            <button id="tidy-align" title="Line up edges that are nearly lined up and make gaps even. Nothing changes size and nothing moves far (Ctrl+Z undoes)">Align <small>keep sizes, straighten edges</small></button>
+            <button id="tidy-compact" title="Keep every size and the rough arrangement; slide everything up and left until it sits one gap apart (Ctrl+Z undoes)">Compact <small>keep sizes, close the gaps</small></button>
+            <button id="tidy-rows" title="Keep every size and sort into rows across the view with even gaps (Ctrl+Z undoes)">Rows <small>keep sizes, sort into rows</small></button>
+            <button id="tidy-grid" title="Keep sizes and pack edge to edge into a rough square (Ctrl+Z undoes). Linked spaces them out again on the next drag.">Grid <small>keep sizes, no gaps</small></button>
+            <button id="tidy-fit" title="Every tile the same height, as big as fits in the current view (Ctrl+Z undoes)">Fit to view <small>same size, fills the view</small></button>
+            <label class="menu-check" title="How much Pack and Justify may resize a video">Resize up to <select id="tidy-slack"><option value="0">0 %</option><option value="0.1">10 %</option><option value="0.25">25 %</option><option value="0.5">50 %</option></select></label>
+          </div>
+        </div>
+        <!-- (before 2026-11-19: Linked was on by default)
+        <button id="btn-link" class="ib board-only" data-icon="link" title="Linked: when you move or resize a video, its neighbours slide out of the way so nothing overlaps (Shift+L). Off: videos can overlap freely."></button>
+        -->
+        <button id="btn-link" class="ib board-only" data-icon="link" title="Push neighbours: when you move or resize something, its neighbours slide out of the way (Shift+L, or right-click the board). Off, as standard: what you move stops against what it meets and nothing else moves; hold Alt (Option on a Mac) while dragging to let it overlap."></button>
+        <span id="count"></span>
+      </div>
+
+      <!-- bottom right: the view -->
+      <div class="hud-panel hud-view">
+        <button id="btn-map" class="ib board-only" data-icon="map" title="Overview map of the whole board (M)"></button>
+        <button id="btn-fit" class="ib" data-icon="fit" title="Fit everything on screen"></button>
+        <span class="hud-sep"></span>
+        <button id="zoom-out" class="ib" data-icon="minus" title="Zoom out (−)"></button>
+        <label class="zoom" title="Gallery: scale every video together (keeps their relative sizes). Board: view zoom. Ctrl + mouse wheel over the videos does the same.">
+          <input type="range" id="zoom" min="0" max="1000" value="500">
+          <span id="zoom-label"></span>
+        </label>
+        <button id="zoom-in" class="ib" data-icon="plus" title="Zoom in (+)"></button>
+      </div>
+
+      <span id="status"></span>
+      <div id="url-bar" hidden>
+        <input type="url" id="url-input" placeholder="Paste a YouTube video, Short, playlist, Twitch clip or channel URL" spellcheck="false">
+        <button id="url-go">Add</button>
+        <button id="url-cancel" title="Close (Esc)">✕</button>
+      </div>
+    </header>
+    </div>
   </div>
   <template id="sb-source-template">
     <div class="sb-source">
@@ -235,9 +285,11 @@
   </div>
 
   <div id="empty">
-    <div class="big">Drop video files here</div>
-    <div>or click <b>+ Add videos</b>. Drop a <b>.mvp</b> file to restore a saved session.</div>
-    <div class="hint">Gallery keeps videos attached in rows. Board is an infinite canvas: drag videos anywhere, resize each one, lasso several to move them together, pan and zoom.</div>
+    <div class="big not-view">Drop video files here</div>
+    <div class="big view-only">This view shows the main window's board</div>
+    <div class="view-only">Add videos and pictures in the main window and they appear here. Pan and zoom this window on its own; its settings are under <b>View settings</b>, top left.</div>
+    <div class="not-view">or click <b>+ Add videos</b>. Drop a <b>.mvp</b> file to restore a saved session.</div>
+    <div class="hint not-view">Gallery keeps videos attached in rows. Board is an infinite canvas: drag videos anywhere, resize each one, lasso several to move them together, pan and zoom.</div>
     <div id="empty-recent" hidden></div>
   </div>
 
@@ -262,6 +314,42 @@
         <button data-cmp="flip">Flip (Tab)</button>
       </div>
       <button class="cmp-close">Close (Esc)</button>
+    </div>
+  </div>
+
+  <!-- the sync editor (2026-11-18): two videos side by side, never linked while it is open -->
+  <!-- opening a session: the board dims until what is on screen has loaded (2026-11-19) -->
+  <div id="load-veil" hidden>
+    <div class="lv-box">
+      <div class="lv-spin"></div>
+      <div class="lv-title">Opening session…</div>
+      <div class="lv-bar"><div class="lv-fill"></div></div>
+      <div class="lv-note"></div>
+      <button class="lv-skip" title="Hide this and use the board now; the rest keeps loading">Show the board now</button>
+    </div>
+  </div>
+  <div id="sync-editor" hidden>
+    <div class="sed-top">
+      <b class="sed-title">Sync editor</b>
+      <span class="sed-hint">Click a video to steer it · <kbd>←</kbd> <kbd>→</kbd> one frame · <kbd>Shift</kbd> ten · <kbd>Space</kbd> play it · <kbd>Tab</kbd> the other one · <kbd>G</kbd> to its sync · drag or scroll the strip under it</span>
+      <button class="sed-done">Done (Esc)</button>
+    </div>
+    <div class="sed-stage"></div>
+    <div class="sed-bar">
+      <button class="sed-match">⚡ Match (M)</button>
+      <button class="sed-both">▶ Play both</button>
+      <button class="sed-add" title="These two frames are the same moment: keep it as a sync point (Enter)">◆ Sync here</button>
+      <span class="sed-gap"></span>
+      <button class="sed-prev" title="Previous sync point">‹</button>
+      <div class="sed-pts"></div>
+      <button class="sed-next" title="Next sync point">›</button>
+    </div>
+    <div class="sed-msg"></div>
+    <div class="sed-ask" hidden>
+      <span>They are lined up differently from their sync, and that has not been kept.</span>
+      <button class="sed-ask-keep">◆ Sync here, then close</button>
+      <button class="sed-ask-drop">Close without it</button>
+      <button class="sed-ask-back">Back</button>
     </div>
   </div>
 
@@ -396,6 +484,24 @@
     </div>
   </template>
 
+  <!-- Import from Miro (2026-11-06): see the Miro import part of app.js -->
+  <div id="miro-dialog" class="modal" hidden>
+    <div class="modal-box" role="dialog" aria-label="Import a Miro board">
+      <div class="modal-title">Import a Miro board</div>
+      <p class="modal-sub">Brings the board's pictures, text, sticky notes, shapes and frames over, each where it was. Pictures are downloaded at full size into the folder below.</p>
+      <label class="modal-field">Board link<input id="miro-url" type="text" spellcheck="false" placeholder="https://miro.com/app/board/…"></label>
+      <label class="modal-field">Access token<input id="miro-token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your Miro access token"></label>
+      <div class="miro-tip"><b>For exact crops:</b> first open the board in Miro, click an empty spot, press <b>Ctrl+A</b> then <b>Ctrl+C</b>. Ozy reads every picture's crop from that copy (Miro's API does not give them). Already imported? Do that, then Import again: nothing is downloaded twice.</div>
+      <div class="miro-saved" hidden>A token is saved on this PC; leave the box empty to use it. <button id="miro-forget" type="button">Forget it</button></div>
+      <label class="menu-check"><input type="checkbox" id="miro-remember"> Remember the token on this PC (encrypted for your Windows account)</label>
+      <label class="modal-field">Put the board in<span class="modal-row"><input id="miro-root" type="text" spellcheck="false"><button id="miro-browse" type="button">Browse…</button></span></label>
+      <div class="miro-howto" hidden>In Miro: your profile picture → Settings → Your apps → Create new app (pick the team that has the board). Leave "Expire user authorization token" unticked. Under Permissions tick only boards:read, then Install app and get OAuth token, and copy the token it shows. The token only reads boards; delete the app in Miro to cancel it.</div>
+      <div class="miro-progress" hidden><div class="bar"><div class="fill"></div></div><div class="miro-note"></div></div>
+      <div class="miro-result" hidden></div>
+      <div class="modal-buttons"><button id="miro-help" type="button">How do I get a token?</button><span class="grow"></span><button id="miro-close" type="button">Close</button><button id="miro-go" type="button" class="primary">Import</button></div>
+    </div>
+  </div>
+
   <template id="tpl-text">
     <div class="tile text-tile">
       <div class="text-bubble"><div class="text-body"></div></div>
@@ -447,6 +553,8 @@
   <script src="lib/weburl.js"></script>
   <script src="lib/frames.js"></script>
   <script src="lib/groups.js"></script>
+  <script src="lib/audiosync.js"></script>
+  <script src="lib/picsync.js"></script>
   <script src="lib/timeline.js"></script>
   <script src="lib/undo.js"></script>
   <script src="lib/settings.js"></script>
@@ -458,6 +566,10 @@
   <script src="lib/webstream.js"></script>
   <script src="lib/session.js"></script>
   <script src="lib/texttile.js"></script>
+  <script src="lib/linetile.js"></script>
+  <script src="lib/rows.js"></script>
+  <script src="lib/linktable.js"></script>
+  <script src="lib/todolist.js"></script>
   <script src="lib/clipboard.js"></script>
   <script src="lib/hoverplay.js"></script>
   <script src="lib/scrub.js"></script>
@@ -471,8 +583,10 @@
   <script src="lib/select.js"></script>
   <script src="lib/clickguard.js"></script>
   <script src="lib/snap.js"></script>
+  <script src="lib/collide.js"></script>
   <script src="lib/swap.js"></script>
   <script src="lib/recent.js"></script>
+  <script src="lib/favorites.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

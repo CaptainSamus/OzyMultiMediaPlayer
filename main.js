@@ -3,6 +3,11 @@
 // http server (YouTube and Twitch embeds need a real http origin), and every
 // other network request is cancelled unless it goes to a YouTube/Twitch host.
 
+// Node does all file reads on a pool of 4 threads by default. Every playing video streams through
+// that pool, so with a big board on a busy PC a simple "does this file exist?" waited in line for
+// seconds. More threads; must be set before the pool is first used.
+if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '16';
+
 const { app, BrowserWindow, ipcMain, dialog, protocol, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -79,14 +84,8 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
-const MIME = {
-  '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm',
-  '.mkv': 'video/x-matroska', '.mov': 'video/quicktime', '.ogv': 'video/ogg',
-  '.ogg': 'video/ogg', '.avi': 'video/x-msvideo',
-  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.flac': 'audio/flac',
-  '.jpg': 'image/jpeg', // cached thumbnails and image tiles
-  '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
-};
+// content types and Range handling: lib/mediahttp.js (shared with the media server process)
+const MediaHttp = require('./lib/mediahttp');
 
 // Where ffmpeg.exe / ffprobe.exe / yt-dlp.exe live: bundled next to the app when packaged,
 // straight out of node_modules (ffmpeg, ffprobe) or bin/ (yt-dlp) in development.
@@ -118,52 +117,100 @@ function urlToFilePath(url) {
   return Buffer.from(seg, 'base64url').toString('utf8');
 }
 
-// Serves localvideo:// — every video, picture and cached frame. It runs on the main process, so a
+// Serves localvideo:// — the fallback way the windows get videos, pictures and cached frames, used
+// only if the media server process (below) could not start. It runs on the main process, so a
 // tile whose file sits on a share that no longer answers must not be able to block it: the stat is
 // guarded like every other user-supplied path, and an unreachable file simply 404s.
 // when each cached video copy was last asked for: the cache trim leaves alone what a tile is reading
 const proxyServedAt = new Map();
-const PROXY_FILE = /[\\/][0-9a-f]{40}(-half|-quarter)?\.mp4$/;
 async function handleVideoRequest(request) {
   let filePath;
   try { filePath = urlToFilePath(request.url); } catch { return new Response('Bad URL', { status: 400 }); }
-  if (PROXY_FILE.test(filePath)) proxyServedAt.set(path.normalize(filePath).toLowerCase(), Date.now());
+  if (MediaHttp.PROXY_FILE.test(filePath)) proxyServedAt.set(path.normalize(filePath).toLowerCase(), Date.now());
 
   const stat = await guardedStat(filePath);
   if (!stat) return new Response('Not found', { status: 404 });
   if (!stat.isFile()) return new Response('Not a file', { status: 404 });
 
   const size = stat.size;
-  const type = MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
-  const baseHeaders = { 'Content-Type': type, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' };
-
+  const baseHeaders = { 'Content-Type': MediaHttp.typeOf(path.extname(filePath)), 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' };
   if (size === 0) return new Response(null, { status: 200, headers: { ...baseHeaders, 'Content-Length': '0' } });
 
-  let start = 0, end = size - 1, status = 200;
-  const range = request.headers.get('range');
-  if (range) {
-    const m = /bytes=(\d*)-(\d*)/.exec(range);
-    if (m) {
-      if (m[1] !== '') {
-        start = parseInt(m[1], 10);
-        if (m[2] !== '') end = Math.min(parseInt(m[2], 10), size - 1);
-      } else if (m[2] !== '') {
-        start = Math.max(0, size - parseInt(m[2], 10));
-      }
-      if (start > end || start >= size) {
-        return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
-      }
-      status = 206;
-    }
-  }
+  const r = MediaHttp.range(request.headers.get('range'), size);
+  if (r.status === 416) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
+  const headers = { ...baseHeaders, 'Content-Length': String(r.end - r.start + 1) };
+  if (r.status === 206) headers['Content-Range'] = `bytes ${r.start}-${r.end}/${size}`;
+  if (request.method === 'HEAD') return new Response(null, { status: r.status, headers });
 
-  const headers = { ...baseHeaders, 'Content-Length': String(end - start + 1) };
-  if (status === 206) headers['Content-Range'] = `bytes ${start}-${end}/${size}`;
-  if (request.method === 'HEAD') return new Response(null, { status, headers });
-
-  const stream = fs.createReadStream(filePath, { start, end });
-  return new Response(Readable.toWeb(stream), { status, headers });
+  const stream = fs.createReadStream(filePath, { start: r.start, end: r.end });
+  return new Response(Readable.toWeb(stream), { status: r.status, headers });
 }
+
+// ---- media server process ----
+// Every video, picture and cached frame is served by lib/mediaserver.js in its own background
+// process, so the bytes of a big board playing never pass through this one (see that file). The
+// windows build their media URLs from mediaBase, which they ask for once as they load (preload.js):
+// http://127.0.0.1:<port>/m/<token>/. Empty means the server isn't there and they use localvideo://.
+const crypto = require('crypto');
+const mediaToken = crypto.randomBytes(16).toString('hex');
+let mediaProc = null;
+let mediaPort = 0;
+let mediaBase = '';
+let mediaRestarts = 0;
+let quitting = false;
+function startMediaServer() {
+  return new Promise((resolve) => {
+    const { utilityProcess } = require('electron');
+    let settled = false;
+    const done = (ok) => { if (!settled) { settled = true; resolve(ok); } };
+    let proc;
+    try {
+      proc = utilityProcess.fork(path.join(__dirname, 'lib', 'mediaserver.js'), [], {
+        serviceName: 'Ozy media server',
+        stdio: 'ignore',
+        env: { ...process.env, UV_THREADPOOL_SIZE: '16' }, // many videos read at once: more file threads
+      });
+    } catch (e) { log('error', 'media server could not start; serving from the main process', { error: String(e && e.message) }); return done(false); }
+    mediaProc = proc;
+    const timer = setTimeout(() => { log('warn', 'media server did not answer in time; serving from the main process'); done(false); }, 8000);
+    proc.on('message', (m) => {
+      if (!m || typeof m !== 'object') return;
+      if (m.type === 'ready') {
+        clearTimeout(timer);
+        const restarted = !!mediaBase;
+        mediaPort = m.port;
+        mediaBase = `http://127.0.0.1:${mediaPort}/m/${mediaToken}/`;
+        log('info', restarted ? 'media server restarted' : 'media server ready', { port: mediaPort });
+        if (fsGuard.networkDrives.size) proc.postMessage({ type: 'network-drives', list: [...fsGuard.networkDrives] });
+        if (restarted) for (const w of ozyWindows()) { w.webContents.send('media-base', mediaBase); w.webContents.send('paths-recovered'); }
+        done(true);
+      } else if (m.type === 'failed') {
+        // the old port was taken by something else after a restart: take any free one
+        if (mediaPort) { mediaPort = 0; proc.postMessage({ type: 'init', port: 0, token: mediaToken, uiOrigin: `http://127.0.0.1:${uiPort}` }); }
+        else { clearTimeout(timer); done(false); }
+      } else if (m.type === 'served-proxy') {
+        proxyServedAt.set(path.normalize(String(m.path)).toLowerCase(), Date.now());
+      } else if (m.type === 'recovered') {
+        announceRecovered();
+      } else if (m.type === 'log') {
+        log(m.level || 'info', '[media] ' + m.msg, m.data);
+      }
+    });
+    proc.on('exit', (code) => {
+      clearTimeout(timer);
+      if (mediaProc === proc) mediaProc = null;
+      if (quitting) return;
+      log('warn', 'media server stopped', { code });
+      done(false);
+      // bring it back on the same port, so the windows' URLs keep working; give up after a few tries
+      if (mediaBase && mediaRestarts++ < 5) setTimeout(() => { if (!quitting) startMediaServer(); }, 500);
+      else if (mediaBase) { mediaBase = ''; for (const w of ozyWindows()) w.webContents.send('media-base', ''); }
+    });
+    proc.postMessage({ type: 'init', port: mediaPort, token: mediaToken, uiOrigin: `http://127.0.0.1:${uiPort}` });
+  });
+}
+app.on('will-quit', () => { quitting = true; if (mediaProc) mediaProc.kill(); });
+ipcMain.on('media-base', (e) => { e.returnValue = mediaBase; });
 
 let win = null;
 
@@ -340,8 +387,10 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     setupLogging();
     elog.info(startupHeader()); // the block every run starts with
+    detectDriveTypes(); // which drive letters are network drives (see guardedFs)
     protocol.handle('localvideo', handleVideoRequest);
     await startUiServer();
+    await startMediaServer(); // before the window: its first URLs already go there
 
     // Network allowlist: our loopback page, plus YouTube / Twitch hosts. Everything else is cancelled.
     session.defaultSession.webRequest.onBeforeRequest(
@@ -349,7 +398,7 @@ if (!app.requestSingleInstanceLock()) {
       (details, callback) => {
         let u = null;
         try { u = new URL(details.url); } catch {}
-        const own = !!u && u.protocol === 'http:' && u.hostname === '127.0.0.1' && Number(u.port) === uiPort;
+        const own = !!u && u.protocol === 'http:' && u.hostname === '127.0.0.1' && (Number(u.port) === uiPort || (mediaPort > 0 && Number(u.port) === mediaPort));
         callback({ cancel: !(own || (u && allowedHost(u.hostname))) });
       },
     );
@@ -423,41 +472,34 @@ ipcMain.handle('load-session', async (_e, filePath) => {
   return { filePath, data };
 });
 
-// Does this file exist? A session can name files on a share or drive that no longer answers, and
-// a plain existsSync on an unreachable UNC path blocks for as long as Windows takes to give up —
-// once per video, which would stall opening the session. So: ask asynchronously, give up after a
-// few seconds and call it missing, and remember a root that timed out so the rest of that
-// session's files on the same dead share answer at once.
-const FILE_CHECK_MS = 3000;
-const deadRoots = new Map(); // "\\\\server\\share" or "X:" -> when it timed out
-const pathRoot = (p) => {
-  const s = String(p);
-  const unc = /^\\\\[^\\/]+[\\/][^\\/]+/.exec(s);
-  if (unc) return unc[0].toLowerCase();
-  const drive = /^[A-Za-z]:/.exec(s);
-  return drive ? drive[0].toLowerCase() : null;
-};
-const TIMED_OUT = Symbol('timed out');
-// Run one filesystem call against a path the user gave us, and never wait on it forever. If the
-// path's root has already timed out this session, don't even try. Everything that reads a file
-// named by a session or a folder source goes through this, so one dead share costs 3 s once
-// instead of ~26 s per file.
-async function guardedFs(p, work, fallback) {
-  if (typeof p !== 'string' || !p) return fallback;
-  const root = pathRoot(p);
-  if (root && deadRoots.has(root)) return fallback;
-  let timer = null;
-  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), FILE_CHECK_MS); });
-  let result;
-  try { result = await Promise.race([work(), timeout]); }
-  catch { clearTimeout(timer); return fallback; } // a normal error (missing file, no permission)
-  clearTimeout(timer);
-  if (result === TIMED_OUT) {
-    if (root) deadRoots.set(root, Date.now()); // the rest of this share answers at once now
-    log('warn', 'path timed out, treating the share as unreachable', { root: root || '(no root)', path: p, afterMs: FILE_CHECK_MS });
-    return fallback;
-  }
-  return result;
+// Does this file exist? A session can name files on a share or drive that no longer answers, so
+// every call on a user-supplied path is guarded: see lib/fsguard.js (where the "every video goes
+// red when the PC is busy" bug was, and is tested).
+const FsGuard = require('./lib/fsguard');
+// A slow call finally answered: every window is told (once a second at most) so tiles that failed
+// meanwhile load again.
+let recoverTimer = null;
+function announceRecovered() {
+  if (recoverTimer) return;
+  recoverTimer = setTimeout(() => {
+    recoverTimer = null;
+    for (const w of ozyWindows()) w.webContents.send('paths-recovered');
+  }, 1000);
+}
+const fsGuard = FsGuard.create({ onRevive: announceRecovered, log: (level, msg, data) => log(level, msg, data) });
+const guardedFs = (p, work, fallback) => fsGuard.run(p, work, fallback);
+// Which drive letters are mapped network drives (the only drive letters that may hang like a
+// share). Asked once, in the background, at startup; until the answer is back every drive letter
+// counts as local, which at worst means one slow load from a dead mapped drive, never a false "missing".
+function detectDriveTypes() {
+  if (process.platform !== 'win32') return;
+  const ps = 'Get-CimInstance Win32_LogicalDisk | ForEach-Object { "$($_.DeviceID) $($_.DriveType)" }';
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true, timeout: 20000 }, (err, stdout) => {
+    if (err) { log('warn', 'could not list drive types; every drive letter counts as local', { error: String(err.message || err) }); return; }
+    for (const d of FsGuard.networkDrivesFrom(stdout)) fsGuard.networkDrives.add(d);
+    if (mediaProc && fsGuard.networkDrives.size) mediaProc.postMessage({ type: 'network-drives', list: [...fsGuard.networkDrives] });
+    log('info', 'drive types', { network: [...fsGuard.networkDrives] });
+  });
 }
 const fileExists = (p) => guardedFs(p, () => fs.promises.access(p, fs.constants.F_OK).then(() => true), false);
 const guardedStat = (p) => guardedFs(p, () => fs.promises.stat(p), null);
@@ -471,7 +513,7 @@ const guardedReadHead = (p, bytes) => guardedFs(p, async () => {
 }, null);
 ipcMain.handle('file-exists', (_e, p) => fileExists(p));
 // a new session load gets a fresh chance at a share that may be back
-ipcMain.on('forget-dead-paths', () => deadRoots.clear());
+ipcMain.on('forget-dead-paths', () => { fsGuard.forget(); if (mediaProc) mediaProc.postMessage({ type: 'forget' }); });
 
 // ---- logging: what the renderer sends, and the two App ▾ items ----
 // The renderer forwards window.onerror, unhandledrejection and console.error here, plus a few
@@ -545,6 +587,62 @@ ipcMain.handle('probe', async (_e, filePath) => {
   });
   if (!json) return base;
   return { ...base, ...Codecs.parseProbe(json, path.extname(filePath).toLowerCase()) };
+});
+
+// A stretch of a video's sound for lining up by sound (lib/audiosync.js): mono 16-bit PCM at 8 kHz,
+// at most ten minutes (the stretch between two sync points, when finding where two cuts part), as bytes. null when the file is gone, has no sound, or ffmpeg fails.
+ipcMain.handle('audio-pcm', async (_e, filePath, start, dur) => {
+  if (typeof filePath !== 'string' || !checkTools()) return null;
+  const s = Math.max(0, Number(start) || 0), d = Math.min(600, Math.max(0, Number(dur) || 0));
+  if (!d || !(await guardedStat(filePath))) return null;
+  return new Promise((resolve) => {
+    execFile(binPath('ffmpeg'), ['-v', 'error', '-ss', s.toFixed(3), '-t', d.toFixed(3), '-i', filePath, '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', 'pipe:1'],
+      { windowsHide: true, encoding: 'buffer', maxBuffer: 12 * 1024 * 1024, timeout: 60000 }, (err, stdout) => {
+        if (err || !stdout || !stdout.length) { if (err) log('warn', 'audio-pcm failed', { error: String(err.message || err).slice(0, 300) }); return resolve(null); }
+        resolve(new Uint8Array(stdout.buffer, stdout.byteOffset, stdout.length));
+      });
+  });
+});
+
+// Where the picture cuts in a short stretch of a video (at most 5 s): the times, in the video's own
+// time. Used to put a cut found by sound exactly on the frame where the shot changes.
+ipcMain.handle('scene-cuts', async (_e, filePath, start, dur) => {
+  if (typeof filePath !== 'string' || !checkTools()) return [];
+  const s = Math.max(0, Number(start) || 0), d = Math.min(5, Math.max(0, Number(dur) || 0));
+  if (!d || !(await guardedStat(filePath))) return [];
+  return new Promise((resolve) => {
+    execFile(binPath('ffmpeg'), ['-hide_banner', '-ss', s.toFixed(3), '-t', d.toFixed(3), '-i', filePath, '-an', '-vf', "select='gt(scene,0.2)',showinfo", '-f', 'null', '-'],
+      { windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 30000 }, (err, _out, stderr) => {
+        if (err) return resolve([]);
+        resolve([...String(stderr).matchAll(/pts_time:([0-9.]+)/g)].map((m) => s + Number(m[1])).filter(isFinite));
+      });
+  });
+});
+
+// How much each frame of a stretch (at most 30 s) changes from the one before, for lining two videos
+// up by picture (lib/picsync.js): [{ t, v }], t in the video's own time, v the mean grey-level change
+// of 32x24 frames. [] when it cannot be read.
+ipcMain.handle('frame-activity', async (_e, filePath, start, dur) => {
+  if (typeof filePath !== 'string' || !checkTools()) return [];
+  const s = Math.max(0, Number(start) || 0), d = Math.min(30, Math.max(0, Number(dur) || 0));
+  if (!d || !(await guardedStat(filePath))) return [];
+  const W = 32, H = 24, N = W * H;
+  return new Promise((resolve) => {
+    const child = spawn(binPath('ffmpeg'), ['-hide_banner', '-ss', s.toFixed(3), '-t', d.toFixed(3), '-i', filePath, '-an', '-vf', `scale=${W}:${H},format=gray,showinfo`, '-f', 'rawvideo', 'pipe:1'], { windowsHide: true });
+    const chunks = []; let err = '';
+    const timer = setTimeout(() => child.kill(), 60000);
+    child.stdout.on('data', (c) => chunks.push(c));
+    child.stderr.on('data', (c) => { err += c; if (err.length > 4e6) err = err.slice(-2e6); });
+    child.on('error', () => { clearTimeout(timer); resolve([]); });
+    child.on('close', () => {
+      clearTimeout(timer);
+      const buf = Buffer.concat(chunks);
+      const times = [...err.matchAll(/pts_time:([0-9.]+)/g)].map((m) => s + Number(m[1]));
+      const n = Math.min(times.length, Math.floor(buf.length / N)), out = [];
+      for (let i = 1; i < n; i++) { let v = 0; for (let k = 0; k < N; k++) v += Math.abs(buf[i * N + k] - buf[(i - 1) * N + k]); out.push({ t: times[i], v: v / N }); }
+      resolve(out);
+    });
+  });
 });
 
 // One ffmpeg at a time; others wait their turn. A job is one file at one tier ('full' is the
@@ -751,6 +849,239 @@ ipcMain.handle('show-in-explorer', (_e, p) => {
 });
 ipcMain.handle('copy-text', (_e, t) => { require('electron').clipboard.writeText(String(t)); });
 
+// ---------- Miro import (Mark, 2026-11-06) ----------
+// The renderer asks; this process talks to Miro (lib/miroimport.js) and writes the board. The
+// token is kept only if the user ticks "remember", encrypted by Windows for this user
+// (safeStorage), and it is never handed back to a window.
+const MiroImport = require('./lib/miroimport');
+const MiroClip = require('./lib/miroclip');
+const miroTokenPath = () => path.join(app.getPath('userData'), 'miro-token.bin');
+function miroSavedToken() {
+  try { const { safeStorage } = require('electron'); if (!safeStorage.isEncryptionAvailable()) return ''; return safeStorage.decryptString(fs.readFileSync(miroTokenPath())); } catch { return ''; }
+}
+function miroSaveToken(tok) {
+  try { const { safeStorage } = require('electron'); if (!safeStorage.isEncryptionAvailable()) return false; fs.writeFileSync(miroTokenPath(), safeStorage.encryptString(tok)); return true; } catch { return false; }
+}
+// Where imports go unless picked: "Ozy Imports" on the drive the app is installed on, unless
+// that is the system drive (then on the first other fixed drive with room, else Documents).
+function miroDefaultRoot() {
+  const sys = (process.env.SystemDrive || 'C:').toUpperCase();
+  const appDrive = path.parse(process.execPath).root.slice(0, 2).toUpperCase(); // 'D:' from 'D:\'
+  if (/^[A-Z]:$/.test(appDrive) && appDrive !== sys) return path.join(appDrive + path.sep, 'Ozy Imports');
+  for (const d of 'DEFGHIJ') { try { if (d + ':' !== sys && fs.existsSync(d + ':' + path.sep)) return path.join(d + ':' + path.sep, 'Ozy Imports'); } catch {} }
+  return path.join(app.getPath('documents'), 'Ozy Imports');
+}
+// which folder each Miro board was imported into: { boardId: dir } (no token, nothing secret)
+const miroBoardsPath = () => path.join(app.getPath('userData'), 'miro-boards.json');
+function miroBoards(next) {
+  if (next) { try { fs.writeFileSync(miroBoardsPath(), JSON.stringify(next, null, 1)); } catch {} return next; }
+  try { const o = JSON.parse(fs.readFileSync(miroBoardsPath(), 'utf8')); return o && typeof o === 'object' ? o : {}; } catch { return {}; }
+}
+// ---------- pasting a picture copied elsewhere (Mark, 2026-11-10) ----------
+// Ctrl+V on the board with a picture copied in Chrome (Google Images), Discord or anywhere. The
+// clipboard can hold the picture itself and a link to its file; the bigger of the two is kept (the
+// linked file on a tie: its own format, and a GIF still moves). Saved in "Ozy Imports\Pasted" on
+// the same drive as Miro imports (never C: unless that is all there is); the same picture pasted
+// again is the same file, not a new copy (pasted-index.json, by its content's fingerprint).
+const PasteImage = require('./lib/pasteimage');
+const ImageSizeLib = require('./lib/imagesize');
+const PASTE_MAX_BYTES = 150 * 1024 * 1024;
+function clipboardNow() {
+  const { clipboard } = require('electron');
+  const html = clipboard.readHTML() || '';
+  const text = clipboard.readText() || '';
+  const img = clipboard.readImage();
+  return { html, text, img, src: PasteImage.imgSrc(html), url: PasteImage.urlFromText(text) };
+}
+ipcMain.handle('clipboard-kind', () => {
+  const c = clipboardNow();
+  return { hasImage: !c.img.isEmpty(), src: !!c.src, url: !!c.url, text: c.text };
+});
+// a picture's width and height from its bytes, or null
+function pictureSize(bytes) {
+  const s = ImageSizeLib.fromBuffer(bytes);
+  if (s && s.w > 0 && s.h > 0) return s;
+  try { const ni = require('electron').nativeImage.createFromBuffer(bytes); if (!ni.isEmpty()) { const z = ni.getSize(); return { w: z.width, h: z.height }; } } catch {}
+  return null;
+}
+// a picture from the web, as bytes (null when it is not a picture, too big, or does not come)
+async function fetchPicture(url) {
+  // (its own browser session: the windows' session only lets them reach Ozy's own few hosts, a rule
+  // that stays as it is; this one fetches only the picture the user just pasted, and keeps nothing)
+  const ses = session.fromPartition('ozy-paste-fetch');
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 20000);
+  try {
+    const res = await ses.fetch(url, { signal: ac.signal, headers: { Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8' } });
+    if (!res.ok) { log('info', 'pasted link not fetched', { status: res.status, host: new URL(url).hostname }); return null; }
+    const type = String(res.headers.get('content-type') || '').toLowerCase();
+    const ext = PasteImage.extFor(type, url);
+    if (!type.startsWith('image/') && !ext) { log('info', 'pasted link is not a picture', { type, host: new URL(url).hostname }); return null; }
+    if (Number(res.headers.get('content-length')) > PASTE_MAX_BYTES) { log('info', 'pasted picture too big', { host: new URL(url).hostname }); return null; }
+    const chunks = []; let n = 0;
+    for await (const ch of res.body) { n += ch.length; if (n > PASTE_MAX_BYTES) return null; chunks.push(Buffer.from(ch)); }
+    const bytes = Buffer.concat(chunks);
+    if (!type.startsWith('image/') && !pictureSize(bytes)) return null; // a page, not a picture
+    return { bytes, type: type.startsWith('image/') ? type : '', ext: ext || '.jpg' };
+  } catch (e) { log('info', 'pasted link not fetched', { error: String(e && e.message || e), host: (() => { try { return new URL(url).hostname; } catch { return ''; } })() }); return null; } finally { clearTimeout(timer); }
+}
+ipcMain.handle('paste-image', async () => {
+  const c = clipboardNow();
+  const cands = [];
+  const link = c.src && /^https?:/i.test(c.src) ? c.src : c.url;
+  if (link) {
+    const got = await fetchPicture(link);
+    if (got) { const z = pictureSize(got.bytes); cands.push({ kind: 'link', bytes: got.bytes, ext: got.ext, url: link, w: z ? z.w : 0, h: z ? z.h : 0 }); }
+  }
+  if (c.src && /^data:/i.test(c.src)) {
+    const d = PasteImage.fromDataUrl(c.src);
+    if (d) { const z = pictureSize(d.bytes); cands.push({ kind: 'data', bytes: d.bytes, ext: PasteImage.extFor(d.type, '') || '.png', w: z ? z.w : 0, h: z ? z.h : 0 }); }
+  }
+  if (!c.img.isEmpty()) { const z = c.img.getSize(); cands.push({ kind: 'bitmap', img: c.img, ext: '.png', w: z.width, h: z.height }); }
+  log('info', 'paste: clipboard', { link: link ? new URL(link).hostname : null, data: !!(c.src && /^data:/i.test(c.src)), bitmap: !c.img.isEmpty(), got: cands.map((x) => `${x.kind} ${x.w}x${x.h}`) });
+  const pick = PasteImage.best(cands);
+  if (!pick) return link ? { notPicture: true, error: 'That link is not a picture (or the site would not hand it over).' } : { notPicture: true };
+  const bytes = pick.bytes || pick.img.toPNG();
+  // (OZY_PASTE_DIR: a scratch folder for testing, honoured only in a dev run)
+  const dir = !app.isPackaged && process.env.OZY_PASTE_DIR ? process.env.OZY_PASTE_DIR : path.join(miroDefaultRoot(), 'Pasted');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { return { error: `Could not make ${dir}: ${e.message}` }; }
+  // the same picture pasted again: the file it already is
+  const sha = require('crypto').createHash('sha1').update(bytes).digest('hex');
+  const indexPath = path.join(dir, 'pasted-index.json');
+  let index = {};
+  try { index = JSON.parse(fs.readFileSync(indexPath, 'utf8')) || {}; } catch {}
+  const had = index[sha] && path.join(dir, index[sha]);
+  let file = had && fs.existsSync(had) ? had : null;
+  if (!file) {
+    let name = PasteImage.fileName(pick.url || '', pick.ext);
+    for (let n = 2; fs.existsSync(path.join(dir, name)); n++) name = name.replace(/(\.[a-z0-9]+)$/i, ` ${n}$1`);
+    file = path.join(dir, name);
+    fs.writeFileSync(file, bytes);
+    index[sha] = name;
+    try { fs.writeFileSync(indexPath, JSON.stringify(index, null, 1)); } catch {}
+  }
+  const others = cands.filter((x) => x !== pick && x.w).map((x) => `${x.kind} ${x.w}x${x.h}`);
+  log('info', 'picture pasted', { from: pick.kind, w: pick.w, h: pick.h, file, alsoOffered: others, reused: file === had });
+  return { path: file, w: pick.w, h: pick.h, from: pick.kind, reused: file === had };
+});
+
+let miroAbort = null;
+ipcMain.handle('miro-defaults', () => ({ root: miroDefaultRoot(), hasToken: !!miroSavedToken() }));
+ipcMain.handle('miro-pick-root', async (_e, from) => {
+  const r = await dialog.showOpenDialog(win, { title: 'Where to put imported boards', defaultPath: from || undefined, properties: ['openDirectory', 'createDirectory'] });
+  return r.canceled ? null : r.filePaths[0];
+});
+// ---- export (Mark, 2026-11-15) ----
+// capture-rect: a part of the asking window (its own CSS pixels) as a PNG data URL.
+// save-export: { kind: 'png' | 'pngs' | 'pdf', name, pages: [dataURL], names: [frame names] } saved
+// where the user picks; a PDF has one page per picture, each page the picture's own size.
+ipcMain.handle('capture-rect', async (e, rect) => {
+  const r = rect || {};
+  const n = (v) => Math.max(0, Math.round(Number(v) || 0));
+  const img = await e.sender.capturePage({ x: n(r.x), y: n(r.y), width: Math.max(1, n(r.w)), height: Math.max(1, n(r.h)) });
+  return img.toDataURL();
+});
+const pngBytes = (url) => Buffer.from(String(url || '').replace(/^data:image\/png;base64,/, ''), 'base64');
+const safeFileName = (s) => String(s || 'Frame').replace(/[<>:"/\\|?*\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '').slice(0, 80) || 'Frame';
+// (dev only, like OZY_PASTE_DIR: OZY_EXPORT_DIR answers every save dialog with a path in that folder)
+const exportDevDir = () => (!app.isPackaged && process.env.OZY_EXPORT_DIR ? process.env.OZY_EXPORT_DIR : null);
+ipcMain.handle('save-export', async (e, job = {}) => {
+  const owner = BrowserWindow.fromWebContents(e.sender) || win;
+  const dev = exportDevDir();
+  if (dev) {
+    const realSave = dialog.showSaveDialog, realOpen = dialog.showOpenDialog;
+    dialog.showSaveDialog = async (_w, o) => ({ canceled: false, filePath: path.join(dev, path.basename(o.defaultPath || 'export')) });
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [dev] });
+    try { return await saveExportJob(owner, job); } finally { dialog.showSaveDialog = realSave; dialog.showOpenDialog = realOpen; }
+  }
+  return saveExportJob(owner, job);
+});
+async function saveExportJob(owner, job) {
+  const pages = Array.isArray(job.pages) ? job.pages.filter((p) => typeof p === 'string' && p.startsWith('data:image/png;base64,')) : [];
+  if (!pages.length) return null;
+  if (job.kind === 'png') {
+    const r = await dialog.showSaveDialog(owner, { title: 'Save the picture', defaultPath: safeFileName(String(job.name || 'Ozy').replace(/\.png$/i, '')) + '.png', filters: [{ name: 'PNG picture', extensions: ['png'] }] });
+    if (r.canceled || !r.filePath) return null;
+    await fs.promises.writeFile(r.filePath, pngBytes(pages[0]));
+    return r.filePath;
+  }
+  if (job.kind === 'pngs') {
+    const r = await dialog.showOpenDialog(owner, { title: 'Folder for the frame pictures', properties: ['openDirectory', 'createDirectory'] });
+    if (r.canceled || !r.filePaths[0]) return null;
+    const names = Array.isArray(job.names) ? job.names : [];
+    const used = new Set();
+    for (const [i, p] of pages.entries()) {
+      let base = `${String(i + 1).padStart(2, '0')} ${safeFileName(names[i] || 'Frame')}`, k = 2;
+      while (used.has(base.toLowerCase())) base = `${base} (${k++})`;
+      used.add(base.toLowerCase());
+      await fs.promises.writeFile(path.join(r.filePaths[0], base + '.png'), pngBytes(p));
+    }
+    return r.filePaths[0];
+  }
+  if (job.kind === 'pdf') {
+    const r = await dialog.showSaveDialog(owner, { title: 'Save the PDF', defaultPath: safeFileName(String(job.name || 'Ozy').replace(/\.pdf$/i, '')) + '.pdf', filters: [{ name: 'PDF', extensions: ['pdf'] }] });
+    if (r.canceled || !r.filePath) return null;
+    // the pictures in a page each, in a hidden window of its own, printed to PDF
+    const dir = await fs.promises.mkdtemp(path.join(app.getPath('temp'), 'ozy-pdf-'));
+    const { nativeImage } = require('electron');
+    try {
+      // (one page size for all, the largest picture's: Chromium ignores a size per page) each picture
+      // centred on a page of its own
+      let W = 1, H = 1, body = '';
+      for (const [i, p] of pages.entries()) {
+        const bytes = pngBytes(p);
+        await fs.promises.writeFile(path.join(dir, `${i}.png`), bytes);
+        const sz = nativeImage.createFromBuffer(bytes).getSize();
+        W = Math.max(W, sz.width); H = Math.max(H, sz.height);
+        body += `<div class="pg"><img src="${i}.png"></div>`;
+      }
+      const css = `@page { size: ${W}px ${H}px; margin: 0 } html, body { margin: 0; padding: 0; background: #fff }
+        .pg { width: ${W}px; height: ${H}px; display: flex; align-items: center; justify-content: center; overflow: hidden; break-after: page; }
+        .pg:last-child { break-after: auto } .pg img { max-width: 100%; max-height: 100%; display: block }`;
+      await fs.promises.writeFile(path.join(dir, 'pages.html'), `<!doctype html><meta charset="utf-8"><style>${css}</style>${body}`);
+      const pw = new BrowserWindow({ show: false, webPreferences: { partition: 'ozy-export', javascript: false, sandbox: true } });
+      try {
+        await pw.loadFile(path.join(dir, 'pages.html'));
+        const pdf = await pw.webContents.printToPDF({ preferCSSPageSize: true, printBackground: true, margins: { marginType: 'none' } });
+        await fs.promises.writeFile(r.filePath, pdf);
+      } finally { pw.destroy(); }
+      return r.filePath;
+    } finally { fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {}); }
+  }
+  return null;
+}
+ipcMain.handle('miro-forget-token', () => { try { fs.unlinkSync(miroTokenPath()); } catch {} return true; });
+ipcMain.handle('miro-cancel', () => { if (miroAbort) miroAbort.abort(); return true; });
+ipcMain.handle('miro-import', async (e, opts = {}) => {
+  if (miroAbort) return { error: 'An import is already running.' };
+  const typed = String(opts.token || '').trim();
+  const token = typed || miroSavedToken();
+  const root = String(opts.root || '') || miroDefaultRoot();
+  miroAbort = new AbortController();
+  const send = (p) => { try { if (!e.sender.isDestroyed()) e.sender.send('miro-progress', p); } catch {} };
+  try {
+    // (OZY_MIRO_API: a pretend Miro for testing, honoured only in a dev run, never in the installed app)
+    const apiBase = !app.isPackaged && process.env.OZY_MIRO_API ? process.env.OZY_MIRO_API : undefined;
+    const imp = MiroImport.createImporter({ log: (level, msg, data) => log(level, msg, data), ...(apiBase ? { apiBase } : {}) });
+    // Miro's own crops: what the user copied in Miro (Ctrl+A, Ctrl+C on the board) is on the
+    // clipboard, with every picture's crop in it (lib/miroclip.js). Read only, never changed.
+    let miroCopy = null;
+    try {
+      const decoded = MiroClip.decode(require('electron').clipboard.readHTML());
+      if (decoded) miroCopy = MiroClip.info(decoded); // crops, layer order, text heights and styles, frames
+      log('info', 'miro copy on the clipboard', decoded ? { board: decoded.boardId, objects: decoded.objects.length, pictureCrops: miroCopy.crops.size } : { none: true });
+    } catch (e) { log('warn', 'miro copy could not be read', { error: String(e && e.message || e) }); }
+    const r = await imp.run({ boardUrl: opts.boardUrl, token, root, onProgress: send, signal: miroAbort.signal, boardDir: (id) => miroBoards()[id] || null, miroCopy,
+      rememberDir: (id, dir) => miroBoards({ ...miroBoards(), [id]: dir }) }); // next time this board continues in the same folder
+    if (typed && opts.remember) miroSaveToken(typed);
+    return { sessionPath: r.sessionPath, dir: r.dir, summary: r.summary, failed: r.failed, items: r.items };
+  } catch (err) {
+    const msg = err instanceof MiroImport.ImportError ? err.message : `The import stopped: ${err && err.message ? err.message : err}`;
+    log('warn', 'miro import failed', { error: msg });
+    return { error: msg };
+  } finally { miroAbort = null; }
+});
+
 ipcMain.handle('pick-folder', async () => {
   const r = await dialog.showOpenDialog(win, { title: 'Add folder', properties: ['openDirectory'] });
   return r.canceled ? null : r.filePaths[0];
@@ -916,6 +1247,95 @@ ipcMain.handle('open-external', (_e, url) => {
   if (!/^https:\/\/(github\.com|api\.github\.com)\//.test(u)) return false; // only our own release pages
   require('electron').shell.openExternal(u);
   return true;
+});
+
+// ---- bookmark blocks (Mark, 2026-11-16) ----
+// A link in a bookmark block opens in the default browser (http / https only). A link pasted into
+// one is looked up for its page title, site name and icon. The lookup runs in its own in-memory
+// session, apart from the window's: the window's network allowlist above stays as it is, and the
+// sites see no cookies. At most ~1 MB of the page is read (its <head> is enough) and a 64 KB icon.
+const LinkTable = require('./lib/linktable');
+ipcMain.handle('open-link', (_e, url) => {
+  const u = LinkTable.cleanUrl(url);
+  if (!u) return false;
+  require('electron').shell.openExternal(u);
+  return true;
+});
+let linkSession = null;
+const linkSes = () => linkSession || (linkSession = session.fromPartition('ozy-link-info'));
+async function linkFetch(url, ms, accept) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try { return { res: await linkSes().fetch(url, { signal: ctl.signal, redirect: 'follow', headers: { Accept: accept, 'Accept-Language': 'en-US,en;q=0.8' } }), ctl, timer }; }
+  catch (e) { clearTimeout(timer); throw e; }
+}
+// the body up to `cap` bytes (stopping early once `until` shows up in the text), then let go of the rest
+async function readCapped(res, cap, until) {
+  const reader = res.body && res.body.getReader();
+  if (!reader) return Buffer.alloc(0);
+  const parts = []; let n = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(Buffer.from(value)); n += value.length;
+      if (n >= cap) break;
+      if (until && Buffer.from(value).toString('latin1').toLowerCase().includes(until)) break;
+    }
+  } finally { try { await reader.cancel(); } catch {} }
+  return Buffer.concat(parts).subarray(0, cap);
+}
+async function linkIcon(url) {
+  if (!url) return '';
+  let f;
+  try {
+    f = await linkFetch(url, 6000, 'image/*');
+    const type = (f.res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!f.res.ok || !/^image\/[a-z0-9.+-]+$/.test(type)) return '';
+    const buf = await readCapped(f.res, 64 * 1024 + 1);
+    if (!buf.length || buf.length > 64 * 1024) return '';
+    return `data:${type === 'image/vnd.microsoft.icon' ? 'image/x-icon' : type};base64,${buf.toString('base64')}`;
+  } catch { return ''; }
+  finally { if (f) clearTimeout(f.timer); }
+}
+ipcMain.handle('link-info', async (_e, raw) => {
+  const url = LinkTable.cleanUrl(raw);
+  if (!url) return { ok: false };
+  let title = '', site = '', page = url, iconHref = '';
+  // YouTube's page can be a cookie-consent page; its oEmbed answer is the video's own title
+  if (LinkTable.isYouTube(url)) {
+    let f;
+    try {
+      f = await linkFetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`, 6000, 'application/json');
+      if (f.res.ok) { const j = JSON.parse((await readCapped(f.res, 64 * 1024)).toString('utf8')); title = String(j.title || ''); site = 'YouTube'; }
+    } catch {} finally { if (f) clearTimeout(f.timer); }
+  }
+  if (!title) {
+    let f;
+    try {
+      f = await linkFetch(url, 9000, 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.5');
+      page = f.res.url || url;
+      const type = (f.res.headers.get('content-type') || '').toLowerCase();
+      if (!f.res.ok) { try { await f.res.body.cancel(); } catch {} } // an error or a bot check: its title is not the page's
+      else if (/html|xml/.test(type)) {
+        const buf = await readCapped(f.res, 1024 * 1024, '</head>');
+        const cs = (/charset=([\w-]+)/.exec(type) || /<meta[^>]+charset=["']?([\w-]+)/i.exec(buf.toString('latin1')) || [])[1];
+        let text;
+        try { text = new TextDecoder(cs || 'utf-8').decode(buf); } catch { text = buf.toString('utf8'); }
+        const h = LinkTable.parseHead(text, page);
+        title = h.title; site = site || h.site; iconHref = h.icon;
+      } else {
+        try { await f.res.body.cancel(); } catch {}
+        // a picture or a PDF: its file name is its name
+        const last = decodeURIComponent((new URL(page).pathname.split('/').filter(Boolean).pop()) || '');
+        title = last;
+      }
+    } catch (e) {
+      if (!site) return { ok: false, error: String(e && e.message || e).slice(0, 160) };
+    } finally { if (f) clearTimeout(f.timer); }
+  }
+  const icon = await linkIcon(LinkTable.iconUrl(iconHref, page));
+  return { ok: true, title, site, icon, url: page };
 });
 
 // ---- image sequences: the frame player's decode cache ----

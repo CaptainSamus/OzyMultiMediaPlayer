@@ -65,7 +65,10 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: Ozy Multi Media Player ${{ github.ref_name }}
-          prerelease: true
+          # (before v0.3: every release was a pre-release)
+          # prerelease: true
+          # a version tag ending .0.0 (v0.3.0.0) is a full release; v0.3.0.1 and the like stay pre-releases
+          prerelease: ${{ !endsWith(github.ref_name, '.0.0') }}
           files: |
             dist/*.exe
             dist/*.dmg
