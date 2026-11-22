@@ -290,7 +290,7 @@ function createWindow() {
     setTimeout(() => {
       if (!readSettings().updates.auto) return;
       const up = getUpdater();
-      if (up) { up.allowPrerelease = readSettings().updates.includePrerelease; up.checkForUpdates().catch(() => {}); }
+      if (up) { up.allowPrerelease = allowPrerelease(readSettings()); up.checkForUpdates().catch(() => {}); }
       else noticeCheck(false);
     }, 10000);
   });
@@ -373,6 +373,14 @@ app.on('open-file', (e, p) => {
   if (win && !win.webContents.isLoading()) win.webContents.send('open-session', p);
   else pendingOpen = p;
 });
+
+// Windows groups a taskbar button with its pin by app ID. The installer tags the Start menu, desktop
+// and pinned shortcuts with build.appId, but the app itself never said it, so it had that ID only
+// when started from one of those shortcuts. Opened from a .mvp file, restarted after an update or
+// started from Explorer, it got a different ID and showed up as a second icon beside the pin
+// (Mark, 2026-11-22). Saying the same ID here keeps it on its pin however it starts. Dev runs keep
+// Electron's own ID so they don't land on the installed app's pin.
+if (process.platform === 'win32' && app.isPackaged) app.setAppUserModelId('com.ozy.multimediaplayer'); // = package.json build.appId
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -1173,6 +1181,12 @@ function startupHeader() {
 const canAutoUpdate = () => process.platform === 'win32' && app.isPackaged && !isPortable();
 const appVersion = () => require('./package.json').buildVersion || app.getVersion();
 let updater = null, updateReady = false;
+// A local test build is versioned like 0.2.16-local.29. With pre-releases allowed, electron-updater
+// reads that "-local" as a release channel and accepts only release tags on the same channel. Our
+// tags (v0.3.0.0) never are one, so every check failed with "No published versions on GitHub" and
+// the local build never saw 0.3 (Mark, 2026-11-19). A build like that looks at the newest full
+// release instead. Release builds (0.3.0, from the tag) have no "-" part and are unaffected.
+const allowPrerelease = (s) => s.updates.includePrerelease && !app.getVersion().includes('-');
 // electron-updater's raw errors are not for reading: app-update.yml is missing in a build that
 // wasn't produced by an installer, and a network failure shouldn't look like a bug in the app.
 function updateErrorText(err) {
@@ -1191,7 +1205,7 @@ function getUpdater() {
       updater.logger = elog; // electron-updater's own diagnostics land in the same file
       updater.autoDownload = false;
       updater.autoInstallOnAppQuit = true;
-      updater.allowPrerelease = readSettings().updates.includePrerelease;
+      updater.allowPrerelease = allowPrerelease(readSettings());
       updater.on('update-available', (info) => { log('info', 'update available', { version: info.version }); toWin({ kind: 'available', version: info.version, notes: typeof info.releaseNotes === 'string' ? info.releaseNotes.slice(0, 500) : '' }); });
       updater.on('update-not-available', () => { log('info', 'update: already newest', { version: appVersion() }); toWin({ kind: 'none', version: appVersion() }); });
       updater.on('download-progress', (p) => toWin({ kind: 'progress', percent: Math.round(p.percent) }));
@@ -1231,7 +1245,7 @@ ipcMain.handle('update-check', async (_e, manual) => {
   if (!manual && !s.updates.auto) return { ok: false, skipped: true };
   const up = getUpdater();
   if (!up) return noticeCheck(manual); // portable, Mac, or dev
-  up.allowPrerelease = s.updates.includePrerelease;
+  up.allowPrerelease = allowPrerelease(s);
   try { await up.checkForUpdates(); return { ok: true }; }
   catch (e) { const msg = updateErrorText(e); if (manual) toWin({ kind: 'error', message: msg }); return { ok: false, error: msg }; }
 });
