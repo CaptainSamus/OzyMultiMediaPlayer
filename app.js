@@ -10108,8 +10108,16 @@ window.addEventListener('keydown', (e) => {
   const tag = (e.target && e.target.tagName) || '';
   // a focused button (you just clicked one) shouldn't swallow the shortcuts
   // a tile being typed into counts as a control: its keys are text, not shortcuts
-  const inControl = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || !!(e.target && e.target.isContentEditable);
   const ctrl = e.ctrlKey || e.metaKey;
+  // (before 2026-11-22: every <input> counted)
+  // const inControl = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || !!(e.target && e.target.isContentEditable);
+  // A slider or checkbox keeps the focus after you click it (zoom, volume, a video's seek bar). It
+  // still gets its own plain keys (arrows, Home/End, Space), but Ctrl/⌘ shortcuts are the app's.
+  // When they weren't, Ctrl+A fell through to the page's own select-all and painted the whole
+  // board blue instead of selecting the tiles (Mark, 2026-11-22).
+  const textEntry = tag === 'TEXTAREA' || !!(e.target && e.target.isContentEditable)
+    || (tag === 'INPUT' && !/^(range|checkbox|radio|button|submit|reset|color|file|image)$/i.test(e.target.type || ''));
+  const inControl = textEntry || tag === 'SELECT' || (tag === 'INPUT' && !ctrl);
   const key = e.key.toLowerCase();
 
   if (e.key === 'Escape' && colorPop) { e.preventDefault(); closeColorPop(); return; } // the colour pop first
